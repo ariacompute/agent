@@ -1,0 +1,11 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@deepseek-ai/cordis": ["../../stubs/cordis.ts"],
+      "@deepseek-ai/dsh-tools": ["../../stubs/dsh-tools.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "../../stubs/*.ts"]
+}

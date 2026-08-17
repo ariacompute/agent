@@ -1,0 +1,10 @@
+{
+  "name": "@ariacompute/dsh-aria-engine",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness LLM adapter for aria-engine",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

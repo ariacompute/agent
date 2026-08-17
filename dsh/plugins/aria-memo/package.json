@@ -1,0 +1,10 @@
+{
+  "name": "@ariacompute/dsh-aria-memo",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness memo tools for aria-memo",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

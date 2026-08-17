@@ -1,0 +1,23 @@
+{
+  "name": "aria-agent",
+  "private": true,
+  "type": "module",
+  "description": "Out-of-tree Aria engine/memo plugins for DeepSeek Harness and Pi",
+  "scripts": {
+    "test": "tsx --test packages/aria-bridge/test/*.test.ts dsh/plugins/aria-engine/test/*.test.ts dsh/plugins/aria-memo/test/*.test.ts pi/test/*.test.ts",
+    "typecheck": "tsc --noEmit -p packages/aria-bridge/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-engine/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-memo/tsconfig.json && tsc --noEmit -p pi/tsconfig.json"
+  },
+  "workspaces": [
+    "packages/*",
+    "dsh/plugins/*",
+    "pi"
+  ],
+  "engines": {
+    "node": ">=18.18"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.10",
+    "tsx": "4.19.3",
+    "typescript": "5.8.2"
+  }
+}

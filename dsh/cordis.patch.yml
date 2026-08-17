@@ -1,0 +1,11 @@
+# Replace AGENT_ROOT with the absolute path to this agent checkout.
+- insert:
+    - id: aria-engine
+      name: AGENT_ROOT/dsh/plugins/aria-engine/src/index.ts
+      config:
+        baseUrl: http://127.0.0.1:8080/v1
+    - id: aria-memo
+      name: AGENT_ROOT/dsh/plugins/aria-memo/src/index.ts
+      config:
+        autoInject: false
+        topK: 5

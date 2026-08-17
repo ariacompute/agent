@@ -1,0 +1,10 @@
+{
+  "name": "@ariacompute/aria-bridge",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Shared Aria engine HTTP and memo CLI client",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
