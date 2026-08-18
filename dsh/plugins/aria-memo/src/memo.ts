@@ -1,6 +1,6 @@
-import { loadConfig, type AriaBridgeConfig } from "./config.ts";
-import { AriaError, ErrorCode } from "./error.ts";
-import { defaultRunCommand, type RunCommand } from "./spawn.ts";
+import { loadConfig, type AriaBridgeConfig } from "../../shared/src/config.ts";
+import { AriaError, ErrorCode } from "../../shared/src/error.ts";
+import { defaultRunCommand, type RunCommand } from "../../shared/src/spawn.ts";
 
 export const MEMO_TYPES = [
   "working",

@@ -1,4 +1,4 @@
-import { AriaError, ErrorCode } from "./error.ts";
+import { AriaError, ErrorCode } from "../../shared/src/error.ts";
 
 export const ENGINE_SERVE_HINT =
   "aria-engine serve <bundle> --bind 127.0.0.1:8080";

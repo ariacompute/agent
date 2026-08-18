@@ -1,15 +1,17 @@
 import type { Context } from "@deepseek-ai/cordis";
 import {
-  formatSearchHits,
   loadConfig,
+  type AriaBridgeConfig,
+  type RunCommand,
+} from "../../shared/src/index.ts";
+import {
+  formatSearchHits,
   memoAdd,
   memoForget,
   memoGet,
   memoList,
   memoSearch,
-  type AriaBridgeConfig,
-  type RunCommand,
-} from "../../../../packages/aria-bridge/src/index.ts";
+} from "./memo.ts";
 
 export const name = "aria-memo";
 export const inject = ["tools"];

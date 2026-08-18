@@ -2,15 +2,13 @@
   "name": "aria-agent",
   "private": true,
   "type": "module",
-  "description": "Out-of-tree Aria engine/memo plugins for DeepSeek Harness and Pi",
+  "description": "Aria dsh plugins: engine adapter, memo context memory, CubeSandbox agent sandbox with isolated persistent workspaces",
   "scripts": {
-    "test": "tsx --test packages/aria-bridge/test/*.test.ts dsh/plugins/aria-engine/test/*.test.ts dsh/plugins/aria-memo/test/*.test.ts pi/test/*.test.ts",
-    "typecheck": "tsc --noEmit -p packages/aria-bridge/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-engine/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-memo/tsconfig.json && tsc --noEmit -p pi/tsconfig.json"
+    "test": "tsx --test dsh/plugins/shared/test/*.test.ts dsh/plugins/aria-engine/test/*.test.ts dsh/plugins/aria-memo/test/*.test.ts dsh/plugins/aria-sandbox/test/*.test.ts",
+    "typecheck": "tsc --noEmit -p dsh/plugins/shared/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-engine/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-memo/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-sandbox/tsconfig.json"
   },
   "workspaces": [
-    "packages/*",
-    "dsh/plugins/*",
-    "pi"
+    "dsh/plugins/*"
   ],
   "engines": {
     "node": ">=18.18"

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AriaError, ErrorCode } from "../src/error.ts";
+import { AriaError, ErrorCode } from "../../shared/src/error.ts";
 import {
   chatStream,
   ENGINE_SERVE_HINT,

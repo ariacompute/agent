@@ -1,5 +1,5 @@
 import type { Context } from "@deepseek-ai/cordis";
-import { loadConfig } from "../../../../packages/aria-bridge/src/index.ts";
+import { loadConfig } from "../../shared/src/index.ts";
 import { AriaAdapter } from "./adapter.ts";
 
 export const name = "aria-engine";

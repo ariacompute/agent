@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { GenerateOptions, StreamChunk } from "../../../stubs/dsh-llm.ts";
 import { apply, AriaAdapter, toDshChunks } from "../src/index.ts";
-import type { EngineStreamEvent } from "../../../../packages/aria-bridge/src/index.ts";
+import type { EngineStreamEvent } from "../src/engine.ts";
 
 async function* events(list: EngineStreamEvent[]): AsyncGenerator<EngineStreamEvent> {
   for (const e of list) {

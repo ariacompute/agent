@@ -1,0 +1,7 @@
+{
+  "name": "@ariacompute/dsh-shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared config/error/spawn helpers used by aria dsh plugins (replaced packages/aria-bridge)."
+}

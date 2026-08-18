@@ -1,0 +1,10 @@
+{
+  "name": "@ariacompute/aria-sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CubeSandbox (E2B-compatible) agent sandbox for dsh with isolated persistent per-agent workspaces.",
+  "dependencies": {
+    "e2b": "^2.40.0"
+  }
+}

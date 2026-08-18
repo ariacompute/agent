@@ -1,57 +1,74 @@
-# agent
+# aria agent
 
 [English](README.md) | [中文](README_cn.md)
 
-Out-of-tree plugins that connect [engine](https://github.com/ariacompute/engine) and [memo](https://github.com/ariacompute/memo) to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and [Pi](https://github.com/earendil-works/pi). 
+Out-of-tree integration of Aria components into **DeepSeek Harness (`dsh`)**.
 
-- **engine** — LLM adapter / custom provider against `aria-engine serve` (OpenAI HTTP).
-- **memo** — memory tools plus optional context injection via the `aria-memo` CLI.
+- **LLM backend**: `engine` as an OpenAI-compatible server via the `aria-engine` plugin.
+- **Context memory**: `memo` via the `aria-memo` plugin (tools `aria_memo_*`, optional `autoInject`).
+- **Agent sandbox**: [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) (E2B-compatible)
+  via the `aria-sandbox` plugin — each agent gets an isolated, persistent workspace.
 
-## Prerequisites
+## Architecture
 
-1. Start the engine:
-
-```sh
-aria-engine serve <bundle_or_model> --bind 127.0.0.1:8080
+```
+dsh/plugins/
+├── shared/          config / AriaError / spawn helpers (replaced aria-bridge)
+├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE
+├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject (off by default)
+└── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
+                     sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /
+                     workspace_status  (CubeSandbox via e2b SDK)
+scripts/cube-sandbox-up.sh   one-shot local CubeSandbox bootstrap + template
 ```
 
-2. Build memo if it is not already on `PATH`:
+## Requirements
+
+- Node >= 18.18, pnpm.
+- `aria-engine` binary reachable at `ARIA_ENGINE_URL` (default `http://127.0.0.1:8080/v1`).
+- `aria-memo` CLI reachable at `ARIA_MEMO_BIN` (default `aria-memo`).
+- CubeSandbox: x86_64 Linux with KVM (`/dev/kvm`); see [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
+
+## Setup
 
 ```sh
-cargo build -p aria-memo --release
-export ARIA_MEMO_BIN=/path/to/aria-memo
+pnpm install            # use https_proxy=http://127.0.0.1:7897 if the network requires it
+scripts/cube-sandbox-up.sh   # checks KVM, installs CubeSandbox, creates the template, writes .env
 ```
 
-## Environment
-
-| Variable | Default |
-|----------|---------|
-| `ARIA_ENGINE_URL` | `http://127.0.0.1:8080/v1` |
-| `ARIA_MEMO_BIN` | `aria-memo` |
-| `ARIA_MEMO_DB` | `~/.ariacompute/memo.db` |
-
-## DeepSeek Harness
-
-From a dsh checkout that can run `pnpm dsh`:
+## Run
 
 ```sh
+aria-engine serve <bundle> --bind 127.0.0.1:8080 &
 pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
 
-Edit [dsh/cordis.patch.yml](dsh/cordis.patch.yml) so plugin `name` paths are absolute on your machine. Details: [dsh/README.md](dsh/README.md).
+Select provider route `aria`. The sandbox template id is read from `CUBE_TEMPLATE_ID`
+(env or `.env`); without it `sandbox_*` tools will fail loudly.
 
-## Pi
+## Workspaces (isolation)
+
+- Each agent session maps to one workspace id: tool arg `workspace` → `sessionId` → config → `default`.
+- Host dir: `$ARIA_WORKSPACE_ROOT/<workspaceId>/` (default `~/.ariacompute/agent/workspaces`, mode 0700).
+- Registered with dsh `ctx.workspaceRegistry` when available (falls back to plain dirs).
+- Isolation: one KVM MicroVM per workspace (CubeSandbox) + separate 0700 host dirs +
+  tool-level path checks (`/workspace` only, no `..` escapes).
+- Persistence: `sandbox_sync_to_host` / `sandbox_sync_from_host`; optional
+  `ARIA_WORKSPACE_SYNC_AFTER_EXEC=true` to auto-pull after every `sandbox_exec`.
+
+## Configuration
+
+See `requirements.md` §2 for the full env table (`ARIA_ENGINE_URL`, `ARIA_MEMO_*`,
+`E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`, `E2B_TIMEOUT_MS`,
+`ARIA_WORKSPACE_ROOT`, `ARIA_WORKSPACE_SYNC_AFTER_EXEC`, `ARIA_WORKSPACE_ID`).
+
+## Development
 
 ```sh
-pi install /absolute/path/to/agent/pi
-```
-
-Select provider `aria` after the engine is up. Details: [pi/README.md](pi/README.md).
-
-## Develop
-
-```sh
-npm install
-npm test
+npm test            # offline unit tests (shared + engine + memo + sandbox)
 npm run typecheck
 ```
+
+Notes: memo `search` returns `score\tcontent` lines (no ids). `engine` must be
+serving before use. `model/` is out of scope. GitHub/registry access may need
+`export https_proxy=http://127.0.0.1:7897`.

@@ -1,57 +1,67 @@
-# agent
+# aria agent
 
 [English](README.md) | [中文](README_cn.md)
 
-将 [engine](https://github.com/ariacompute/engine) 与 [memo](https://github.com/ariacompute/memo) 以 out-of-tree 插件接到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 [Pi](https://github.com/earendil-works/pi)。
+将 Aria 组件接入 **DeepSeek Harness（`dsh`）** 的 out-of-tree 接入层。
 
-- **engine** — 作为 LLM adapter / custom provider，打 `aria-engine serve` 的 OpenAI HTTP。
-- **memo** — 记忆 tools + 可选上下文注入（`aria-memo` CLI）。
+- **LLM 后端**：`engine` 以 OpenAI 兼容服务运行，由 `aria-engine` 插件接入。
+- **Context memory**：`memo` 经 `aria-memo` 插件接入（tools `aria_memo_*`，可选 `autoInject`）。
+- **Agent 沙盒**：[CubeSandbox](https://github.com/TencentCloud/CubeSandbox)（E2B 兼容）
+  经 `aria-sandbox` 插件接入——每个 agent 拥有一个隔离的持久化工作空间。
 
-## 前置
+## 架构
 
-1. 启动 engine：
-
-```sh
-aria-engine serve <bundle_or_model> --bind 127.0.0.1:8080
+```
+dsh/plugins/
+├── shared/          config / AriaError / spawn 助手（替代 aria-bridge）
+├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE
+├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject（默认关闭）
+└── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
+                     sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /
+                     workspace_status（经 e2b SDK 连 CubeSandbox）
+scripts/cube-sandbox-up.sh   本地一键拉起 CubeSandbox + 建模板
 ```
 
-2. memo 不在 `PATH` 时先编译：
+## 依赖
+
+- Node >= 18.18、pnpm。
+- `aria-engine` 可执行，地址 `ARIA_ENGINE_URL`（默认 `http://127.0.0.1:8080/v1`）。
+- `aria-memo` CLI，路径 `ARIA_MEMO_BIN`（默认 `aria-memo`）。
+- CubeSandbox：x86_64 Linux + KVM（`/dev/kvm`），见 [CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。
+
+## 安装
 
 ```sh
-cargo build -p aria-memo --release
-export ARIA_MEMO_BIN=/path/to/aria-memo
+pnpm install          # 网络受限时先 export https_proxy=http://127.0.0.1:7897
+scripts/cube-sandbox-up.sh   # 检查 KVM、安装 CubeSandbox、创建模板、写 .env
 ```
 
-## 环境变量
-
-| 变量 | 默认 |
-|------|------|
-| `ARIA_ENGINE_URL` | `http://127.0.0.1:8080/v1` |
-| `ARIA_MEMO_BIN` | `aria-memo` |
-| `ARIA_MEMO_DB` | `~/.ariacompute/memo.db` |
-
-## DeepSeek Harness
-
-在可运行 `pnpm dsh` 的 checkout 上：
+## 运行
 
 ```sh
-pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
+aria-engine serve <bundle> --bind 127.0.0.1:8080 &
+pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 ```
 
-把 [dsh/cordis.patch.yml](dsh/cordis.patch.yml) 里的插件 `name` 换成你机器上的绝对路径。详见 [dsh/README_cn.md](dsh/README_cn.md)。
+选择 provider 路由 `aria`。沙盒模板 id 由 `CUBE_TEMPLATE_ID` 读取（env 或 `.env`）；未设置时 `sandbox_*` 工具会明确报错。
 
-## Pi
+## 工作空间（隔离）
 
-```sh
-pi install /absolute/path/to/agent/pi
-```
+- 每个 agent 会话映射一个工作空间 id：工具参数 `workspace` → `sessionId` → 配置 → `default`。
+- 宿主目录：`$ARIA_WORKSPACE_ROOT/<workspaceId>/`（默认 `~/.ariacompute/agent/workspaces`，0700）。
+- 有 dsh `ctx.workspaceRegistry` 时注册（缺失回退纯目录）。
+- 隔离三层：每工作空间独立 KVM MicroVM（CubeSandbox）+ 独立 0700 宿主目录 + 工具层路径校验（仅 `/workspace`，拒绝 `..` 逃逸）。
+- 持久化：`sandbox_sync_to_host` / `sandbox_sync_from_host`；可选 `ARIA_WORKSPACE_SYNC_AFTER_EXEC=true` 每次 `sandbox_exec` 后自动拉回。
 
-engine 起来后选择 provider `aria`。详见 [pi/README_cn.md](pi/README_cn.md)。
+## 配置
+
+完整环境变量表见 `requirements.md` §2（`ARIA_ENGINE_URL`、`ARIA_MEMO_*`、`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`、`E2B_TIMEOUT_MS`、`ARIA_WORKSPACE_ROOT`、`ARIA_WORKSPACE_SYNC_AFTER_EXEC`、`ARIA_WORKSPACE_ID`）。
 
 ## 开发
 
 ```sh
-npm install
-npm test
+npm test            # 离线单测（shared + engine + memo + sandbox）
 npm run typecheck
 ```
+
+注意：memo `search` 返回 `score\tcontent` 行（无 id）；`engine` 需先启动；`model/` 不在范围；GitHub/registry 访问可能需要 `export https_proxy=http://127.0.0.1:7897`。

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { RunCommand } from "../../shared/src/index.ts";
+import { loadConfig } from "../../shared/src/index.ts";
 import { apply, lastUserText } from "../src/index.ts";
-import type { RunCommand } from "../../../../packages/aria-bridge/src/index.ts";
-import { loadConfig } from "../../../../packages/aria-bridge/src/index.ts";
 
 describe("aria-memo plugin", () => {
   it("registers five tools", () => {

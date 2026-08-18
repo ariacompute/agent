@@ -4,7 +4,7 @@ import {
   listModels,
   type ChatMessage,
   type EngineStreamEvent,
-} from "../../../../packages/aria-bridge/src/index.ts";
+} from "./engine.ts";
 
 export const ARIA_USER_AGENT =
   "deepseek-harness/aria-adapter (+https://github.com/deepseek-ai/deepseek-harness)";

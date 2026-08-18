@@ -15,6 +15,9 @@ export const ErrorCode = {
   MEMO_CLI: "MEMO_CLI",
   INVALID_PARAM: "INVALID_PARAM",
   EMPTY_CONTENT: "EMPTY_CONTENT",
+  SANDBOX: "SANDBOX",
+  SANDBOX_TIMEOUT: "SANDBOX_TIMEOUT",
+  WORKSPACE: "WORKSPACE",
 } as const;
 
 export type ErrorCodeName = (typeof ErrorCode)[keyof typeof ErrorCode];

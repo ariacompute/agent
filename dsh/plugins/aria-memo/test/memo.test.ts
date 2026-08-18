@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AriaError, ErrorCode } from "../src/error.ts";
+import { AriaError, ErrorCode } from "../../shared/src/error.ts";
+import { loadConfig } from "../../shared/src/config.ts";
+import type { RunCommand } from "../../shared/src/spawn.ts";
 import {
   memoAdd,
   memoForget,
@@ -8,8 +10,6 @@ import {
   memoList,
   memoSearch,
 } from "../src/memo.ts";
-import type { RunCommand } from "../src/spawn.ts";
-import { loadConfig } from "../src/config.ts";
 
 function script(handler: (args: readonly string[]) => { code: number; stdout: string; stderr?: string }): RunCommand {
   return async (_cmd, args) => {

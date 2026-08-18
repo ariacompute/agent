@@ -9,3 +9,16 @@
       config:
         autoInject: false
         topK: 5
+    - id: aria-sandbox
+      name: AGENT_ROOT/dsh/plugins/aria-sandbox/src/index.ts
+      config:
+        # CubeSandbox E2B-compatible endpoint (or set via E2B_API_URL env).
+        apiUrl: http://127.0.0.1:3000
+        apiKey: e2b_000000
+        # CUBE_TEMPLATE_ID — set once a template exists:
+        #   scripts/cube-sandbox-up.sh
+        template: ""
+        timeoutMs: 300000
+        # Persistent host dir for per-agent workspaces (0700, isolated).
+        workspaceRoot: ~/.ariacompute/agent/workspaces
+        syncAfterExec: false
