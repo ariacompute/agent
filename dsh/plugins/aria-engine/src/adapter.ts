@@ -1,116 +1,26 @@
 import type { GenerateOptions, StreamChunk } from "@deepseek-ai/dsh-llm";
-import { chatStream, listModels, type EngineStreamEvent } from "./engine.ts";
+import { AriaError, ErrorCode } from "../../shared/src/error.ts";
+import {
+  defaultEngineFactory,
+  generate,
+  type EngineFactory,
+} from "./engine-binding.ts";
+import { openaiMessagesFrom, serializeTools, type EngineStreamEvent } from "./engine.ts";
 
-export const ARIA_USER_AGENT =
-  "deepseek-harness/aria-adapter (+https://github.com/deepseek-ai/deepseek-harness)";
+export { openaiMessagesFrom, serializeTools } from "./engine.ts";
 
 export interface AriaAdapterConfig {
-  engineUrl: string;
+  /** Local engine bundle path for in-process FFI. */
+  bundlePath: string;
+  /** Path to the native FFI shared library (ARIA_FFI_LIB). */
+  ffiLib?: string;
   defaultModel?: string;
-  fetchImpl?: typeof fetch;
-}
-
-function contentToText(content: unknown): string {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return "";
-  }
-  return content
-    .map((block) => {
-      if (block && typeof block === "object" && "text" in block && typeof block.text === "string") {
-        return block.text;
-      }
-      return "";
-    })
-    .join("");
-}
-
-function isToolCallBlock(block: unknown): block is { id?: unknown; callId?: unknown; name?: unknown; arguments?: unknown } {
-  return !!block && typeof block === "object" && (block as { type?: string }).type === "tool-call";
-}
-
-function isToolResultBlock(block: unknown): block is { toolCallId?: unknown; content?: unknown; isError?: boolean } {
-  return !!block && typeof block === "object" && (block as { type?: string }).type === "tool-result";
-}
-
-/** dsh tools (function tools) -> OpenAI wire `tools` (function type). */
-export function serializeTools(tools?: unknown[]): unknown[] | undefined {
-  if (!tools || tools.length === 0) {
-    return undefined;
-  }
-  return tools.map((tool) => {
-    const t = (tool ?? {}) as { name?: string; description?: string; parameters?: unknown };
-    return {
-      type: "function",
-      function: {
-        name: t.name ?? "",
-        description: t.description ?? "",
-        ...(t.parameters !== undefined ? { parameters: t.parameters } : {}),
-      },
-    };
-  });
-}
-
-/** Serialize dsh conversation history to OpenAI wire messages (tool calls + tool results included). */
-export function openaiMessagesFrom(options: GenerateOptions): unknown[] {
-  const out: unknown[] = [];
-  if (options.system && options.system.length > 0) {
-    out.push({ role: "system", content: options.system });
-  }
-  for (const raw of options.messages) {
-    if (!raw || typeof raw !== "object") {
-      continue;
-    }
-    const msg = raw as { role?: string; content?: unknown };
-    const role = msg.role ?? "user";
-    const blocks = Array.isArray(msg.content) ? msg.content : [];
-    if (role === "user" && blocks.length === 1 && isToolResultBlock(blocks[0])) {
-      const tr = blocks[0];
-      out.push({
-        role: "tool",
-        tool_call_id: typeof tr.toolCallId === "string" ? tr.toolCallId : "",
-        content: contentToText(tr.content),
-        ...(tr.isError ? { is_error: true } : {}),
-      });
-      continue;
-    }
-    if (role === "assistant") {
-      const text = contentToText(msg.content);
-      const toolCalls = blocks
-        .filter(isToolCallBlock)
-        .map((tc) => ({
-          id: typeof tc.id === "string" ? tc.id : typeof tc.callId === "string" ? tc.callId : "",
-          type: "function",
-          function: {
-            name: typeof tc.name === "string" ? tc.name : "",
-            arguments:
-              typeof tc.arguments === "string"
-                ? tc.arguments
-                : JSON.stringify(tc.arguments ?? {}),
-          },
-        }));
-      const assistant: Record<string, unknown> = { role: "assistant" };
-      if (text) {
-        assistant.content = text;
-      } else if (toolCalls.length === 0) {
-        assistant.content = "";
-      }
-      if (toolCalls.length > 0) {
-        assistant.tool_calls = toolCalls;
-      }
-      out.push(assistant);
-      continue;
-    }
-    const text = contentToText(msg.content);
-    out.push({ role, content: text });
-  }
-  return out;
+  /** Override the engine factory (for testing). Defaults to the real SDK. */
+  engineFactory?: EngineFactory;
 }
 
 export async function* toDshChunks(
-  events: AsyncIterable<EngineStreamEvent>,
+  events: AsyncIterable<EngineStreamEvent> | EngineStreamEvent[],
 ): AsyncGenerator<StreamChunk> {
   // Text and tool-call blocks share one index space, assigned in arrival order.
   const blockStack: ({ type: "text"; index: number; text: string } | { type: "tool-call"; index: number; wireIndex: number })[] =
@@ -198,51 +108,69 @@ export async function* toDshChunks(
 
 /** Duck-typed LlmAdapter: no runtime import of @deepseek-ai/dsh-llm (out-of-tree resolve). */
 export class AriaAdapter {
-  constructor(private readonly config: AriaAdapterConfig) {}
+  private readonly factory: EngineFactory;
+
+  constructor(private readonly config: AriaAdapterConfig) {
+    this.factory = config.engineFactory ?? defaultEngineFactory;
+  }
 
   providerInfo(provider: string): { id: string; name: string } {
     return { id: provider, name: "Aria Engine" };
   }
 
-  async listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string }>> {
-    const models = await listModels(this.config.engineUrl, {
-      fetchImpl: this.config.fetchImpl,
-      headers: { "user-agent": ARIA_USER_AGENT },
-    });
-    return models.map((m) => ({ provider, id: m.id, name: m.id }));
+  async listModels(
+    provider: string,
+  ): Promise<Array<{ provider: string; id: string; name: string }>> {
+    if (!this.config.defaultModel) {
+      throw new AriaError(
+        "in-process engine has no model registry; set adapter config.defaultModel",
+        ErrorCode.ENGINE,
+      );
+    }
+    return [{ provider, id: this.config.defaultModel, name: this.config.defaultModel }];
   }
 
   async resolveModel(
     provider: string,
     model: string,
-    signal?: AbortSignal,
   ): Promise<{ provider: string; id: string; name: string }> {
-    const models = await listModels(this.config.engineUrl, {
-      signal,
-      fetchImpl: this.config.fetchImpl,
-      headers: { "user-agent": ARIA_USER_AGENT },
-    });
-    const hit = models.find((m) => m.id === model);
-    return { provider, id: model, name: hit?.id ?? model };
+    const id = model || this.config.defaultModel;
+    if (!id) {
+      throw new AriaError(
+        "in-process engine requires an explicit model (config.defaultModel or request model)",
+        ErrorCode.ENGINE,
+      );
+    }
+    return { provider, id, name: id };
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (options.stop && options.stop.length > 0) {
-      const err = new Error("aria-engine does not support stop sequences") as Error & { code: string };
+      const err = new Error("aria-engine does not support stop sequences") as Error & {
+        code: string;
+      };
       err.code = "UNSUPPORTED";
       throw err;
     }
-    const events = chatStream({
-      engineUrl: this.config.engineUrl,
-      messages: openaiMessagesFrom(options),
-      model: options.model || this.config.defaultModel,
-      temperature: options.temperature,
-      maxTokens: options.maxTokens,
-      tools: serializeTools(options.tools),
-      signal: options.signal,
-      fetchImpl: this.config.fetchImpl,
-      headers: { "user-agent": ARIA_USER_AGENT },
-    });
+    const model = options.model || this.config.defaultModel;
+    if (!model) {
+      throw new AriaError(
+        "in-process engine requires a model (config.defaultModel or request model)",
+        ErrorCode.ENGINE,
+      );
+    }
+    const events = generate(
+      this.factory,
+      this.config.bundlePath,
+      this.config.ffiLib,
+      openaiMessagesFrom(options),
+      {
+        model,
+        temperature: options.temperature,
+        max_tokens: options.maxTokens,
+      },
+      serializeTools(options.tools),
+    );
     yield* toDshChunks(events);
   }
 }

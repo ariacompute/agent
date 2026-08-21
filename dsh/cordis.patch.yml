@@ -3,7 +3,11 @@
     - id: aria-engine
       name: AGENT_ROOT/dsh/plugins/aria-engine/src/index.ts
       config:
-        baseUrl: http://127.0.0.1:8080/v1
+        # Local engine bundle (in-process FFI). Set ARIA_ENGINE_BUNDLE + ARIA_FFI_LIB,
+        # or pass bundle/ffiLib here. HTTP `aria-engine serve` is no longer used.
+        bundle: /path/to/engine.bundle
+        ffiLib: /usr/lib/libaria_ffi.so
+        model: aria-tiny
     - id: aria-memo
       name: AGENT_ROOT/dsh/plugins/aria-memo/src/index.ts
       config:

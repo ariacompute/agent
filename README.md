@@ -4,7 +4,7 @@
 
 Out-of-tree integration of Aria components into **DeepSeek Harness (`dsh`)**.
 
-- **LLM backend**: `engine` as an OpenAI-compatible server via the `aria-engine` plugin.
+- **LLM backend**: `engine` in-process via the `aria-engine` plugin (`@ariacompute/engine-ts` FFI SDK).
 - **Context memory**: `memo` via the `aria-memo` plugin (tools `aria_memo_*`, optional `autoInject`).
 - **Agent sandbox**: [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) (E2B-compatible)
   via the `aria-sandbox` plugin — each agent gets an isolated, persistent workspace.
@@ -14,7 +14,7 @@ Out-of-tree integration of Aria components into **DeepSeek Harness (`dsh`)**.
 ```
 dsh/plugins/
 ├── shared/          config / AriaError / spawn helpers (replaced aria-bridge)
-├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE (tool calls)
+├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine in-process FFI (tool calls)
 ├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject (off by default)
 └── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
                      sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /
@@ -25,7 +25,7 @@ scripts/cube-sandbox-up.sh   one-shot local CubeSandbox bootstrap + template
 ## Requirements
 
 - Node >= 18.18, pnpm.
-- `aria-engine` binary reachable at `ARIA_ENGINE_URL` (default `http://127.0.0.1:8080/v1`).
+- `aria-engine` bundle at `ARIA_ENGINE_BUNDLE` and native lib at `ARIA_FFI_LIB` (no HTTP server needed).
 - `aria-memo` CLI reachable at `ARIA_MEMO_BIN` (default `aria-memo`).
 - CubeSandbox: x86_64 Linux with KVM (`/dev/kvm`); see [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
 
@@ -39,7 +39,8 @@ scripts/cube-sandbox-up.sh   # checks KVM, installs CubeSandbox, creates the tem
 ## Run
 
 ```sh
-aria-engine serve <bundle> --bind 127.0.0.1:8080 &
+export ARIA_ENGINE_BUNDLE=/path/to/engine.bundle
+export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
 pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
 
@@ -58,7 +59,8 @@ Select provider route `aria`. The sandbox template id is read from `CUBE_TEMPLAT
 
 ## Configuration
 
-See `requirements.md` §2 for the full env table (`ARIA_ENGINE_URL`, `ARIA_MEMO_*`,
+See `requirements.md` §2 for the full env table (`ARIA_ENGINE_BUNDLE`, `ARIA_FFI_LIB`,
+`ARIA_ENGINE_MODEL`, `ARIA_MEMO_*`,
 `E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`, `E2B_TIMEOUT_MS`,
 `ARIA_WORKSPACE_ROOT`, `ARIA_WORKSPACE_SYNC_AFTER_EXEC`, `ARIA_WORKSPACE_ID`).
 

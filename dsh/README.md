@@ -2,8 +2,8 @@
 
 [English](README.md) | [中文](README_cn.md)
 
-Out-of-tree Cordis plugins. Start `aria-engine serve` first and bring up CubeSandbox
-(`../scripts/cube-sandbox-up.sh`), then from a dsh checkout:
+Out-of-tree Cordis plugins. Set `ARIA_ENGINE_BUNDLE` + `ARIA_FFI_LIB` for the engine,
+bring up CubeSandbox (`../scripts/cube-sandbox-up.sh`), then from a dsh checkout:
 
 ```sh
 pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
@@ -15,7 +15,7 @@ Plugin paths must be absolute ([dsh plugin tutorial](https://deepseek-harness.gi
 | Plugin | Role |
 |--------|------|
 | `plugins/shared` | config / `AriaError` / spawn helpers (in-repo, not a package) |
-| `plugins/aria-engine` | `ctx.llm.registerAdapter(['aria'], …)` → OpenAI HTTP |
+| `plugins/aria-engine` | `ctx.llm.registerAdapter(['aria'], …)` → engine in-process FFI |
 | `plugins/aria-memo` | tools `aria_memo_*`; optional `autoInject` on `agent/pre-step` |
 | `plugins/aria-sandbox` | CubeSandbox (E2B) sandbox tools `sandbox_*` + `workspace_status`; isolated persistent per-agent workspaces |
 

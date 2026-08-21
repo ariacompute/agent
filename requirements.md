@@ -3,6 +3,7 @@
 > 功能边界 / 配置 / API / 异常 / 验收。本文件为人审规格的落地清单来源。
 > v2：移除 `pi/` 与独立 `packages/aria-bridge`；仅 dsh；CubeSandbox 沙盒；memo 记忆；隔离持久化工作空间。
 > v3：同步 `harness/ariatag` 的 dsh 接入层修正——tool_calls 流翻译（wire index → block index 映射 + canonical `id`）。
+> v4：采用 `@ariacompute/engine-ts` SDK（进程内 FFI）取代 `aria-engine serve` HTTP/SSE 接入；新增 `ARIA_ENGINE_BUNDLE` + `ARIA_FFI_LIB`。
 
 ## 1. 功能边界
 
@@ -24,7 +25,10 @@
 
 | 变量 | 默认 | 含义 |
 |------|------|------|
-| `ARIA_ENGINE_URL` | `http://127.0.0.1:8080/v1` | engine OpenAI 兼容根路径；无 `/v1` 自动补 |
+| `ARIA_ENGINE_BUNDLE` | — | engine 本地 bundle 路径（**v4 进程内 FFI 必填**） |
+| `ARIA_FFI_LIB` | — | 原生 FFI 动态库路径（`libaria_ffi.so`），供 `@ariacompute/engine-ts` |
+| `ARIA_ENGINE_MODEL` | — | in-process 引擎默认模型 id（`adapter.config.defaultModel` 回退） |
+| `ARIA_ENGINE_URL` | `http://127.0.0.1:8080/v1` | engine OpenAI 兼容根路径（**v4 已弃用**，仅 HTTP 回退分支保留，in-process adapter 不支持） |
 | `ARIA_MEMO_BIN` | `aria-memo` | memo CLI（PATH 或绝对路径） |
 | `ARIA_MEMO_DB` | `~/.ariacompute/memo.db` | memo SQLite |
 | `E2B_API_URL` | `http://127.0.0.1:3000` | CubeAPI（E2B 兼容） |
@@ -35,15 +39,17 @@
 | `ARIA_WORKSPACE_SYNC_AFTER_EXEC` | `false` | `sandbox_exec` 后自动 `sync_to_host` |
 | `ARIA_WORKSPACE_ID` | — | 默认工作空间 id（工具参数/会话 id 优先） |
 
-dsh plugin Config：engine `baseUrl`/`model`；memo `autoInject`/`topK`；sandbox 同 env 各字段，`workspaceRoot`/`syncAfterExec` 可用 `.env` 覆盖。
+dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）；memo `autoInject`/`topK`；sandbox 同 env 各字段，`workspaceRoot`/`syncAfterExec` 可用 `.env` 覆盖。
 
-## 3. Engine 接入
-- 协议同 v1：SSE `data:` JSON + `[DONE]`；`AbortSignal`；无 key；`User-Agent`。
+## 3. Engine 接入（v4：进程内 FFI SDK）
+- 采用 `@ariacompute/engine-ts`（`Engine` 类，基于 koffi 原生 FFI）：`new Engine(bundlePath)` + `engine.complete(messages, options, tools)`，进程内加载，无 HTTP、无 SSE。
+- `engine-binding.ts` 封装生命周期：`createEngineFactory(sdk)` 注入 SDK（测试用 fake）；`generate()` 调 `complete` 并把返回 JSON 经 `parseEngineResult` 归一化为 `EngineStreamEvent[]`；加载失败 → `AriaError ENGINE_UNREACHABLE`，`complete` 失败 → `AriaError ENGINE`。
+- `parseEngineResult`：取 `choices[0].message.{content, tool_calls}` + `usage` + `finish_reason` → text/tool-call/usage/finish 事件。
 - dsh `StreamChunk`：`block-start`→`text-delta`→`block-end`→（可选 `usage`）→`finish`，finish 后无 chunk。
-- engine 不可达：`AriaError` `ENGINE_UNREACHABLE`，文案含 `aria-engine serve <bundle> --bind 127.0.0.1:8080`。
+- 模型：`listModels`/`resolveModel` 在 in-process 模式下返回 `config.defaultModel`（SDK 无 `/models` 端点；无默认模型则报错而非静默）。
+- 无 bundle 配置（`ARIA_ENGINE_BUNDLE` 与 config.bundle 均缺）时插件注册失败并明确报错（不再回退 HTTP）。
 
-### 3.1 Tool-call 流翻译（v3，同步 ariatag 修正）
-- `parseSseBody` 解析 `delta.tool_calls[]`（id/name/arguments 增量按 **wire index** 累积），finish 前输出完整 `tool-call` 事件（arguments 已拼接）。
+### 3.1 Tool-call 流翻译（v3 成果，v4 保留）
 - `toDshChunks`：文本与工具块共用 dsh block index 空间，**按到达顺序 `blockStack.length` 分配**——OpenAI wire index 不是 block index（文本先出现时工具块 index 必为 1，否则会被文本块覆盖而静默丢失）。
 - 工具块结束 `block-end` 使用 **canonical `id`** 字段（不是 `callId`）：dsh-session 会丢弃无 `id` 的 tool-call 块，导致工具永不执行。
 - 历史序列化 `openaiMessagesFrom`：assistant `tool-call` 块 → OpenAI `tool_calls`（arguments 对象 JSON 化）；user 单 `tool-result` 块 → `role:"tool"` + `tool_call_id`（`isError` → `is_error:true`）。

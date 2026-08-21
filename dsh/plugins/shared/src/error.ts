@@ -11,6 +11,7 @@ export class AriaError extends Error {
 
 export const ErrorCode = {
   ENGINE_UNREACHABLE: "ENGINE_UNREACHABLE",
+  ENGINE: "ENGINE",
   ENGINE_HTTP: "ENGINE_HTTP",
   MEMO_CLI: "MEMO_CLI",
   INVALID_PARAM: "INVALID_PARAM",

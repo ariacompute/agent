@@ -3,7 +3,20 @@ import { describe, it } from "node:test";
 import type { GenerateOptions, StreamChunk } from "../../../stubs/dsh-llm.ts";
 import { apply, AriaAdapter, toDshChunks } from "../src/index.ts";
 import { openaiMessagesFrom, serializeTools } from "../src/adapter.ts";
+import type { EngineFactory, EngineLike } from "../src/engine-binding.ts";
 import type { EngineStreamEvent } from "../src/engine.ts";
+
+function fakeFactory(result: unknown): { factory: EngineFactory; last: { options?: unknown; tools?: unknown } } {
+  const last: { options?: unknown; tools?: unknown } = {};
+  const engine: EngineLike = {
+    complete(_messages, options, tools) {
+      last.options = options;
+      last.tools = tools;
+      return result;
+    },
+  };
+  return { factory: () => engine, last };
+}
 
 async function* events(list: EngineStreamEvent[]): AsyncGenerator<EngineStreamEvent> {
   for (const e of list) {
@@ -189,7 +202,7 @@ describe("openaiMessagesFrom / serializeTools", () => {
 });
 
 describe("AriaAdapter / apply", () => {
-  it("registers provider route aria", () => {
+  it("registers provider route aria from cordis config.bundle", () => {
     const registered: Array<{ routes: string[]; adapter: AriaAdapter }> = [];
     apply(
       {
@@ -202,20 +215,34 @@ describe("AriaAdapter / apply", () => {
         tools: { register() {} },
         on() {},
       },
-      { baseUrl: "http://127.0.0.1:8080/v1" },
+      { bundle: "/my.bundle", ffiLib: "/my/lib.so", model: "aria-tiny" },
     );
     assert.deepEqual(registered[0]?.routes, ["aria"]);
+    assert.ok(registered[0]?.adapter instanceof AriaAdapter);
   });
 
-  it("streams OpenAI SSE into dsh chunks", async () => {
-    const fetchImpl: typeof fetch = async () =>
-      new Response(
-        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: [DONE]\n\n',
-        { status: 200 },
-      );
+  it("throws when no bundle is configured", () => {
+    assert.throws(() =>
+      apply(
+        {
+          llm: { registerAdapter() { return () => undefined; } },
+          tools: { register() {} },
+          on() {},
+        },
+        {},
+      ),
+    );
+  });
+
+  it("streams engine result into dsh chunks via in-process engine", async () => {
+    const { factory, last } = fakeFactory({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    });
     const adapter = new AriaAdapter({
-      engineUrl: "http://127.0.0.1:8080/v1",
-      fetchImpl,
+      bundlePath: "/my.bundle",
+      ffiLib: "/my/lib.so",
+      defaultModel: "aria-tiny",
+      engineFactory: factory,
     });
     const options: GenerateOptions = {
       provider: "aria",
@@ -228,10 +255,15 @@ describe("AriaAdapter / apply", () => {
     }
     assert.equal(types.at(-1), "finish");
     assert.ok(types.includes("text-delta"));
+    assert.deepEqual(last.options, { model: "tiny", temperature: undefined, max_tokens: undefined });
   });
 
   it("rejects stop sequences", async () => {
-    const adapter = new AriaAdapter({ engineUrl: "http://127.0.0.1:8080/v1" });
+    const adapter = new AriaAdapter({
+      bundlePath: "/my.bundle",
+      defaultModel: "aria-tiny",
+      engineFactory: fakeFactory({ choices: [{ message: { content: "" } }] }).factory,
+    });
     await assert.rejects(async () => {
       for await (const _ of adapter.stream({
         provider: "aria",
@@ -244,29 +276,47 @@ describe("AriaAdapter / apply", () => {
     });
   });
 
-  it("streams tool-call SSE into dsh tool-call blocks with canonical id", async () => {
-    const fetchImpl: typeof fetch = async () =>
-      new Response(
-        [
-          'data: {"choices":[{"delta":{"content":"running"},"finish_reason":null}]}',
-          "",
-          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"sandbox_exec","arguments":""}}]},"finish_reason":null}]}',
-          "",
-          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"cmd\\":\\"ls\\"}"}}]},"finish_reason":null}]}',
-          "",
-          'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
-          "",
-          "data: [DONE]",
-          "",
-        ].join("\n"),
-        { status: 200 },
-      );
-    const adapter = new AriaAdapter({ engineUrl: "http://127.0.0.1:8080/v1", fetchImpl });
+  it("requires a model (config.defaultModel or request model)", async () => {
+    const adapter = new AriaAdapter({
+      bundlePath: "/my.bundle",
+      engineFactory: fakeFactory({ choices: [{ message: { content: "" } }] }).factory,
+    });
+    await assert.rejects(async () => {
+      for await (const _ of adapter.stream({
+        provider: "aria",
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        /* drain */
+      }
+    });
+  });
+
+  it("streams tool-call engine result into dsh tool-call blocks with canonical id", async () => {
+    const { factory } = fakeFactory({
+      choices: [
+        {
+          message: {
+            content: "running",
+            tool_calls: [
+              { id: "call_1", function: { name: "sandbox_exec", arguments: '{"cmd":"ls"}' } },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    });
+    const adapter = new AriaAdapter({
+      bundlePath: "/my.bundle",
+      ffiLib: "/my/lib.so",
+      defaultModel: "aria-tiny",
+      engineFactory: factory,
+    });
     const chunks: StreamChunk[] = [];
     for await (const c of adapter.stream({
       provider: "aria",
       model: "tiny",
       messages: [{ role: "user", content: "run ls" }],
+      tools: [{ name: "sandbox_exec", description: "run", parameters: { type: "object" } }],
     })) {
       chunks.push(c);
     }

@@ -4,7 +4,7 @@
 
 将 Aria 组件接入 **DeepSeek Harness（`dsh`）** 的 out-of-tree 接入层。
 
-- **LLM 后端**：`engine` 以 OpenAI 兼容服务运行，由 `aria-engine` 插件接入。
+- **LLM 后端**：`engine` 以进程内方式接入，由 `aria-engine` 插件（`@ariacompute/engine-ts` FFI SDK）接入。
 - **Context memory**：`memo` 经 `aria-memo` 插件接入（tools `aria_memo_*`，可选 `autoInject`）。
 - **Agent 沙盒**：[CubeSandbox](https://github.com/TencentCloud/CubeSandbox)（E2B 兼容）
   经 `aria-sandbox` 插件接入——每个 agent 拥有一个隔离的持久化工作空间。
@@ -14,7 +14,7 @@
 ```
 dsh/plugins/
 ├── shared/          config / AriaError / spawn 助手（替代 aria-bridge）
-├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE（支持 tool calls）
+├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine 进程内 FFI（支持 tool calls）
 ├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject（默认关闭）
 └── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
                      sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /
@@ -25,7 +25,7 @@ scripts/cube-sandbox-up.sh   本地一键拉起 CubeSandbox + 建模板
 ## 依赖
 
 - Node >= 18.18、pnpm。
-- `aria-engine` 可执行，地址 `ARIA_ENGINE_URL`（默认 `http://127.0.0.1:8080/v1`）。
+- `aria-engine` bundle 路径 `ARIA_ENGINE_BUNDLE` 与 原生库 `ARIA_FFI_LIB`（无需 HTTP 服务）。
 - `aria-memo` CLI，路径 `ARIA_MEMO_BIN`（默认 `aria-memo`）。
 - CubeSandbox：x86_64 Linux + KVM（`/dev/kvm`），见 [CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。
 
@@ -39,7 +39,8 @@ scripts/cube-sandbox-up.sh   # 检查 KVM、安装 CubeSandbox、创建模板、
 ## 运行
 
 ```sh
-aria-engine serve <bundle> --bind 127.0.0.1:8080 &
+export ARIA_ENGINE_BUNDLE=/path/to/engine.bundle
+export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
 pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 ```
 
@@ -55,7 +56,7 @@ pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 
 ## 配置
 
-完整环境变量表见 `requirements.md` §2（`ARIA_ENGINE_URL`、`ARIA_MEMO_*`、`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`、`E2B_TIMEOUT_MS`、`ARIA_WORKSPACE_ROOT`、`ARIA_WORKSPACE_SYNC_AFTER_EXEC`、`ARIA_WORKSPACE_ID`）。
+完整环境变量表见 `requirements.md` §2（`ARIA_ENGINE_BUNDLE`、`ARIA_FFI_LIB`、`ARIA_ENGINE_MODEL`、`ARIA_MEMO_*`、`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`、`E2B_TIMEOUT_MS`、`ARIA_WORKSPACE_ROOT`、`ARIA_WORKSPACE_SYNC_AFTER_EXEC`、`ARIA_WORKSPACE_ID`）。
 
 ## 开发
 

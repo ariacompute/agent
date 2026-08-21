@@ -1,6 +1,6 @@
 export interface GenerateOptions {
   provider: string;
-  model: string;
+  model?: string;
   messages: unknown[];
   system?: string;
   tools?: unknown[];

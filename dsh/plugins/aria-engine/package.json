@@ -6,5 +6,8 @@
   "description": "DeepSeek Harness LLM adapter for aria-engine",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ariacompute/engine-ts": "^1.4.9"
   }
 }
