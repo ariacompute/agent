@@ -15,15 +15,25 @@ export interface TokenUsage {
 
 export type EngineStreamEvent =
   | { type: "text"; text: string }
+  | {
+      /** A complete tool call (arguments already assembled across SSE deltas). `index` is the OpenAI wire index. */
+      type: "tool-call";
+      index: number;
+      id: string;
+      name: string;
+      arguments: string;
+    }
   | { type: "usage"; usage: TokenUsage }
   | { type: "finish"; reason: "stop" | "length" | "tool_calls" };
 
 export interface ChatStreamRequest {
   engineUrl: string;
-  messages: ChatMessage[];
+  messages: unknown[];
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  /** OpenAI-compatible tool definitions (function type). */
+  tools?: unknown[];
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
@@ -108,6 +118,19 @@ function finishReason(raw: unknown): Extract<EngineStreamEvent, { type: "finish"
 export function* parseSseBody(body: string): Generator<EngineStreamEvent> {
   const blocks = body.replace(/\r\n/g, "\n").split("\n\n");
   let emittedFinish = false;
+  // Accumulate tool calls by OpenAI wire index across deltas.
+  const pendingToolCalls: { id: string; name: string; arguments: string }[] = [];
+  const emitToolCalls = (): EngineStreamEvent[] => {
+    const out: EngineStreamEvent[] = [];
+    for (let i = 0; i < pendingToolCalls.length; i++) {
+      const tc = pendingToolCalls[i];
+      if (!tc) {
+        continue;
+      }
+      out.push({ type: "tool-call", index: i, id: tc.id, name: tc.name, arguments: tc.arguments });
+    }
+    return out;
+  };
   for (const block of blocks) {
     const dataLines = block
       .split("\n")
@@ -120,6 +143,9 @@ export function* parseSseBody(body: string): Generator<EngineStreamEvent> {
     if (data === "[DONE]") {
       if (!emittedFinish) {
         emittedFinish = true;
+        for (const ev of emitToolCalls()) {
+          yield ev;
+        }
         yield { type: "finish", reason: "stop" };
       }
       return;
@@ -132,23 +158,58 @@ export function* parseSseBody(body: string): Generator<EngineStreamEvent> {
     }
     const obj = parsed as {
       usage?: unknown;
-      choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }>;
+      choices?: Array<{
+        delta?: {
+          content?: string;
+          tool_calls?: Array<{
+            index?: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+        finish_reason?: string | null;
+      }>;
     };
     const usage = parseUsage(obj.usage);
     if (usage) {
       yield { type: "usage", usage };
     }
     const choice = obj.choices?.[0];
-    const text = choice?.delta?.content;
+    const delta = choice?.delta;
+    if (Array.isArray(delta?.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        const wireIndex = tc.index ?? 0;
+        while (pendingToolCalls.length <= wireIndex) {
+          pendingToolCalls.push({ id: "", name: "", arguments: "" });
+        }
+        if (tc.id) {
+          pendingToolCalls[wireIndex].id = tc.id;
+        }
+        const fn = tc.function;
+        if (fn?.name) {
+          pendingToolCalls[wireIndex].name = fn.name;
+        }
+        if (typeof fn?.arguments === "string" && fn.arguments.length > 0) {
+          pendingToolCalls[wireIndex].arguments += fn.arguments;
+        }
+      }
+    }
+    const text = delta?.content;
     if (typeof text === "string" && text.length > 0) {
       yield { type: "text", text };
     }
     if (choice?.finish_reason) {
       emittedFinish = true;
+      for (const ev of emitToolCalls()) {
+        yield ev;
+      }
       yield { type: "finish", reason: finishReason(choice.finish_reason) };
     }
   }
   if (!emittedFinish) {
+    for (const ev of emitToolCalls()) {
+      yield ev;
+    }
     yield { type: "finish", reason: "stop" };
   }
 }
@@ -172,6 +233,7 @@ export async function* chatStream(
         stream: true,
         temperature: req.temperature,
         max_tokens: req.maxTokens,
+        ...(req.tools ? { tools: req.tools } : {}),
       }),
     },
     fetchImpl,

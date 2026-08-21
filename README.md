@@ -14,7 +14,7 @@ Out-of-tree integration of Aria components into **DeepSeek Harness (`dsh`)**.
 ```
 dsh/plugins/
 ├── shared/          config / AriaError / spawn helpers (replaced aria-bridge)
-├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE
+├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE (tool calls)
 ├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject (off by default)
 └── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
                      sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { GenerateOptions, StreamChunk } from "../../../stubs/dsh-llm.ts";
 import { apply, AriaAdapter, toDshChunks } from "../src/index.ts";
+import { openaiMessagesFrom, serializeTools } from "../src/adapter.ts";
 import type { EngineStreamEvent } from "../src/engine.ts";
 
 async function* events(list: EngineStreamEvent[]): AsyncGenerator<EngineStreamEvent> {
@@ -26,6 +27,164 @@ describe("toDshChunks", () => {
     assert.deepEqual(types, ["block-start", "text-delta", "block-end", "usage", "finish"]);
     assert.equal(types.indexOf("usage") < types.indexOf("finish"), true);
     assert.equal(types.at(-1), "finish");
+  });
+
+  it("maps wire tool-call indices to distinct block indices when text precedes", async () => {
+    const chunks: StreamChunk[] = [];
+    for await (const c of toDshChunks(
+      events([
+        { type: "text", text: "ok" },
+        { type: "tool-call", index: 0, id: "call_a", name: "sandbox_exec", arguments: '{"cmd":"ls"}' },
+        { type: "finish", reason: "tool_calls" },
+      ]),
+    )) {
+      chunks.push(c);
+    }
+    const types = chunks.map((c) => c.type);
+    assert.deepEqual(types, [
+      "block-start",
+      "text-delta",
+      "block-start",
+      "tool-call-delta",
+      "block-end",
+      "block-end",
+      "finish",
+    ]);
+    const toolStart = chunks.find((c) => c.type === "block-start" && c.blockType === "tool-call");
+    assert.equal(toolStart?.type === "block-start" ? toolStart.index : -1, 1);
+    const toolDelta = chunks.find((c) => c.type === "tool-call-delta");
+    assert.deepEqual(
+      toolDelta && toolDelta.type === "tool-call-delta"
+        ? {
+            index: toolDelta.index,
+            id: toolDelta.id,
+            name: toolDelta.name,
+            argumentsDelta: toolDelta.argumentsDelta,
+          }
+        : null,
+      { index: 1, id: "call_a", name: "sandbox_exec", argumentsDelta: '{"cmd":"ls"}' },
+    );
+    const blocks = chunks.filter((c) => c.type === "block-end").map((c) => c.block);
+    assert.deepEqual(blocks, [
+      { type: "text", text: "ok" },
+      { type: "tool-call", id: "call_a", name: "sandbox_exec", arguments: '{"cmd":"ls"}' },
+    ]);
+  });
+
+  it("emits tool-call block with canonical id when only tool calls are present", async () => {
+    const chunks: StreamChunk[] = [];
+    for await (const c of toDshChunks(
+      events([
+        { type: "tool-call", index: 0, id: "call_1", name: "memo_add", arguments: '{"text":"x"}' },
+        { type: "finish", reason: "tool_calls" },
+      ]),
+    )) {
+      chunks.push(c);
+    }
+    const start = chunks[0];
+    assert.equal(start?.type, "block-start");
+    assert.equal(start.type === "block-start" ? start.index : -1, 0);
+    const end = chunks.find((c) => c.type === "block-end");
+    assert.deepEqual(
+      end && end.type === "block-end" ? end.block : null,
+      { type: "tool-call", id: "call_1", name: "memo_add", arguments: '{"text":"x"}' },
+    );
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    assert.equal(finish.type === "finish" ? finish.reason.kind : "", "tool-calls");
+  });
+});
+
+describe("openaiMessagesFrom / serializeTools", () => {
+  it("serializes tool-call history and tool results", () => {
+    const messages = openaiMessagesFrom({
+      provider: "aria",
+      model: "tiny",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "run ls" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", id: "call_a", name: "sandbox_exec", arguments: { cmd: "ls" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool-result", toolCallId: "call_a", content: "bin  src" }],
+        },
+      ],
+    });
+    assert.deepEqual(messages, [
+      { role: "user", content: "run ls" },
+      {
+        role: "assistant",
+        tool_calls: [
+          {
+            id: "call_a",
+            type: "function",
+            function: { name: "sandbox_exec", arguments: '{"cmd":"ls"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_a", content: "bin  src" },
+    ]);
+  });
+
+  it("marks failed tool results with is_error and falls back to callId", () => {
+    const messages = openaiMessagesFrom({
+      provider: "aria",
+      model: "tiny",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", callId: "c_fb", name: "sandbox_exec", arguments: "{}" }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "c_fb",
+              content: [{ type: "text", text: "boom" }],
+              isError: true,
+            },
+          ],
+        },
+      ],
+    });
+    assert.deepEqual(messages, [
+      {
+        role: "assistant",
+        tool_calls: [
+          { id: "c_fb", type: "function", function: { name: "sandbox_exec", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "c_fb", content: "boom", is_error: true },
+    ]);
+  });
+
+  it("serializes dsh tools to OpenAI function tools", () => {
+    const tools = serializeTools([
+      {
+        name: "sandbox_exec",
+        description: "run command",
+        parameters: { type: "object", properties: { cmd: { type: "string" } } },
+      },
+      { name: "memo_add", description: "add memory" },
+    ]);
+    assert.deepEqual(tools, [
+      {
+        type: "function",
+        function: {
+          name: "sandbox_exec",
+          description: "run command",
+          parameters: { type: "object", properties: { cmd: { type: "string" } } },
+        },
+      },
+      { type: "function", function: { name: "memo_add", description: "add memory" } },
+    ]);
+    assert.equal(serializeTools(undefined), undefined);
+    assert.equal(serializeTools([]), undefined);
   });
 });
 
@@ -83,5 +242,45 @@ describe("AriaAdapter / apply", () => {
         /* drain */
       }
     });
+  });
+
+  it("streams tool-call SSE into dsh tool-call blocks with canonical id", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        [
+          'data: {"choices":[{"delta":{"content":"running"},"finish_reason":null}]}',
+          "",
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"sandbox_exec","arguments":""}}]},"finish_reason":null}]}',
+          "",
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"cmd\\":\\"ls\\"}"}}]},"finish_reason":null}]}',
+          "",
+          'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+          "",
+          "data: [DONE]",
+          "",
+        ].join("\n"),
+        { status: 200 },
+      );
+    const adapter = new AriaAdapter({ engineUrl: "http://127.0.0.1:8080/v1", fetchImpl });
+    const chunks: StreamChunk[] = [];
+    for await (const c of adapter.stream({
+      provider: "aria",
+      model: "tiny",
+      messages: [{ role: "user", content: "run ls" }],
+    })) {
+      chunks.push(c);
+    }
+    const toolEnd = chunks.find(
+      (c) => c.type === "block-end" && c.block.type === "tool-call",
+    );
+    assert.deepEqual(
+      toolEnd && toolEnd.type === "block-end" && toolEnd.block.type === "tool-call"
+        ? toolEnd.block
+        : null,
+      { type: "tool-call", id: "call_1", name: "sandbox_exec", arguments: '{"cmd":"ls"}' },
+    );
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    assert.equal(finish.type === "finish" ? finish.reason.kind : "", "tool-calls");
   });
 });

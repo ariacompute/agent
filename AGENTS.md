@@ -38,7 +38,7 @@
 - `pnpm dsh web --patch <agent>/dsh/cordis.patch.yml`
 
 ## 进行中需求
-Spec 见 `requirements.md`（v2）。清单见 `task.md`。
+Spec 见 `requirements.md`（v3，含 ariatag dsh 接入层修正：tool_calls 流翻译）。清单见 `task.md`。
 
 ## 注意事项
 - 黄金路径：engine HTTP 可达 → adapter 出流；memo CLI add → search；CubeSandbox 就绪（`E2B_API_URL`/`CUBE_TEMPLATE_ID`）→ `sandbox_exec`。

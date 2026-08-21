@@ -31,6 +31,44 @@ describe("parseSseBody", () => {
     assert.equal(events[1].type === "finish" ? events[1].reason : "", "stop");
   });
 
+  it("assembles tool-call deltas by wire index before finish", () => {
+    const body = [
+      'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"sandbox_exec","arguments":""}}]},"finish_reason":null}]}',
+      "",
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"cmd\\":"}}]},"finish_reason":null}]}',
+      "",
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"ls\\"}"}}]},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const events = [...parseSseBody(body)];
+    const tc = events.find((e) => e.type === "tool-call");
+    assert.ok(tc && tc.type === "tool-call");
+    assert.equal(tc.index, 0);
+    assert.equal(tc.id, "call_1");
+    assert.equal(tc.name, "sandbox_exec");
+    assert.equal(tc.arguments, '{"cmd":"ls"}');
+    const finish = events.at(-1);
+    assert.equal(finish?.type, "finish");
+    assert.equal(finish.type === "finish" ? finish.reason : "", "tool_calls");
+  });
+
+  it("emits text then tool-call then finish when both are present", () => {
+    const body = [
+      'data: {"choices":[{"delta":{"content":"thinking"},"finish_reason":null}]}',
+      "",
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"memo_add","arguments":"{}"}}]},"finish_reason":null}]}',
+      "",
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const types = [...parseSseBody(body)].map((e) => e.type);
+    assert.deepEqual(types, ["text", "tool-call", "finish"]);
+  });
+
   it("emits usage before finish when usage is present", () => {
     const body = [
       'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}',
@@ -93,6 +131,25 @@ describe("listModels / chatStream", () => {
       events.push(ev);
     }
     assert.equal(events[0]?.type, "text");
+    assert.equal(events.at(-1)?.type, "finish");
+  });
+
+  it("passes tools through to the engine request body", async () => {
+    let sentTools: unknown;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      sentTools = JSON.parse(String(init?.body)).tools;
+      return sseResponse('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    };
+    const events = [];
+    for await (const ev of chatStream({
+      engineUrl: "http://127.0.0.1:8080/v1",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "sandbox_exec" } }],
+      fetchImpl,
+    })) {
+      events.push(ev);
+    }
+    assert.deepEqual(sentTools, [{ type: "function", function: { name: "sandbox_exec" } }]);
     assert.equal(events.at(-1)?.type, "finish");
   });
 

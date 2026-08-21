@@ -14,7 +14,7 @@
 ```
 dsh/plugins/
 ├── shared/          config / AriaError / spawn 助手（替代 aria-bridge）
-├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE
+├── aria-engine/     ctx.llm.registerAdapter(['aria'], …) → engine OpenAI SSE（支持 tool calls）
 ├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject（默认关闭）
 └── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
                      sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /

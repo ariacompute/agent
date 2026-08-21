@@ -22,7 +22,14 @@ export interface TokenUsage {
 export type StreamChunk =
   | { type: "block-start"; index: number; blockType: string }
   | { type: "text-delta"; index: number; text: string }
-  | { type: "block-end"; index: number; block: { type: "text"; text: string } }
+  | { type: "tool-call-delta"; index: number; id: string; name: string; argumentsDelta: string }
+  | {
+      type: "block-end";
+      index: number;
+      block:
+        | { type: "text"; text: string }
+        | { type: "tool-call"; id: string; name: string; arguments: string };
+    }
   | { type: "usage"; usage: TokenUsage }
   | {
       type: "finish";

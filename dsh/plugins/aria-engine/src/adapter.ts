@@ -1,10 +1,5 @@
 import type { GenerateOptions, StreamChunk } from "@deepseek-ai/dsh-llm";
-import {
-  chatStream,
-  listModels,
-  type ChatMessage,
-  type EngineStreamEvent,
-} from "./engine.ts";
+import { chatStream, listModels, type EngineStreamEvent } from "./engine.ts";
 
 export const ARIA_USER_AGENT =
   "deepseek-harness/aria-adapter (+https://github.com/deepseek-ai/deepseek-harness)";
@@ -32,8 +27,35 @@ function contentToText(content: unknown): string {
     .join("");
 }
 
-export function openaiMessagesFrom(options: GenerateOptions): ChatMessage[] {
-  const out: ChatMessage[] = [];
+function isToolCallBlock(block: unknown): block is { id?: unknown; callId?: unknown; name?: unknown; arguments?: unknown } {
+  return !!block && typeof block === "object" && (block as { type?: string }).type === "tool-call";
+}
+
+function isToolResultBlock(block: unknown): block is { toolCallId?: unknown; content?: unknown; isError?: boolean } {
+  return !!block && typeof block === "object" && (block as { type?: string }).type === "tool-result";
+}
+
+/** dsh tools (function tools) -> OpenAI wire `tools` (function type). */
+export function serializeTools(tools?: unknown[]): unknown[] | undefined {
+  if (!tools || tools.length === 0) {
+    return undefined;
+  }
+  return tools.map((tool) => {
+    const t = (tool ?? {}) as { name?: string; description?: string; parameters?: unknown };
+    return {
+      type: "function",
+      function: {
+        name: t.name ?? "",
+        description: t.description ?? "",
+        ...(t.parameters !== undefined ? { parameters: t.parameters } : {}),
+      },
+    };
+  });
+}
+
+/** Serialize dsh conversation history to OpenAI wire messages (tool calls + tool results included). */
+export function openaiMessagesFrom(options: GenerateOptions): unknown[] {
+  const out: unknown[] = [];
   if (options.system && options.system.length > 0) {
     out.push({ role: "system", content: options.system });
   }
@@ -43,6 +65,44 @@ export function openaiMessagesFrom(options: GenerateOptions): ChatMessage[] {
     }
     const msg = raw as { role?: string; content?: unknown };
     const role = msg.role ?? "user";
+    const blocks = Array.isArray(msg.content) ? msg.content : [];
+    if (role === "user" && blocks.length === 1 && isToolResultBlock(blocks[0])) {
+      const tr = blocks[0];
+      out.push({
+        role: "tool",
+        tool_call_id: typeof tr.toolCallId === "string" ? tr.toolCallId : "",
+        content: contentToText(tr.content),
+        ...(tr.isError ? { is_error: true } : {}),
+      });
+      continue;
+    }
+    if (role === "assistant") {
+      const text = contentToText(msg.content);
+      const toolCalls = blocks
+        .filter(isToolCallBlock)
+        .map((tc) => ({
+          id: typeof tc.id === "string" ? tc.id : typeof tc.callId === "string" ? tc.callId : "",
+          type: "function",
+          function: {
+            name: typeof tc.name === "string" ? tc.name : "",
+            arguments:
+              typeof tc.arguments === "string"
+                ? tc.arguments
+                : JSON.stringify(tc.arguments ?? {}),
+          },
+        }));
+      const assistant: Record<string, unknown> = { role: "assistant" };
+      if (text) {
+        assistant.content = text;
+      } else if (toolCalls.length === 0) {
+        assistant.content = "";
+      }
+      if (toolCalls.length > 0) {
+        assistant.tool_calls = toolCalls;
+      }
+      out.push(assistant);
+      continue;
+    }
     const text = contentToText(msg.content);
     out.push({ role, content: text });
   }
@@ -52,19 +112,59 @@ export function openaiMessagesFrom(options: GenerateOptions): ChatMessage[] {
 export async function* toDshChunks(
   events: AsyncIterable<EngineStreamEvent>,
 ): AsyncGenerator<StreamChunk> {
-  let started = false;
-  let assembled = "";
+  // Text and tool-call blocks share one index space, assigned in arrival order.
+  const blockStack: ({ type: "text"; index: number; text: string } | { type: "tool-call"; index: number; wireIndex: number })[] =
+    [];
+  // OpenAI wire tool-call index -> dsh block index (wire indices are NOT block indices).
+  const toolCallBlockIndex = new Map<number, number>();
+  const pendingToolCalls: { id: string; name: string; arguments: string }[] = [];
   let pendingUsage: { inputTokens: number; outputTokens: number } | undefined;
   let finish: StreamChunk | undefined;
 
+  const pushText = (text: string): StreamChunk[] => {
+    if (!text) {
+      return [];
+    }
+    const top = blockStack[blockStack.length - 1];
+    if (top && top.type === "text") {
+      top.text += text;
+      return [{ type: "text-delta", index: top.index, text }];
+    }
+    const index = blockStack.length;
+    blockStack.push({ type: "text", index, text });
+    return [
+      { type: "block-start", index, blockType: "text" },
+      { type: "text-delta", index, text },
+    ];
+  };
+
   for await (const ev of events) {
     if (ev.type === "text") {
-      if (!started) {
-        yield { type: "block-start", index: 0, blockType: "text" };
-        started = true;
+      for (const chunk of pushText(ev.text)) {
+        yield chunk;
       }
-      assembled += ev.text;
-      yield { type: "text-delta", index: 0, text: ev.text };
+    } else if (ev.type === "tool-call") {
+      const wireIndex = ev.index;
+      while (pendingToolCalls.length <= wireIndex) {
+        pendingToolCalls.push({ id: "", name: "", arguments: "" });
+      }
+      pendingToolCalls[wireIndex] = { id: ev.id, name: ev.name, arguments: ev.arguments };
+      let index = toolCallBlockIndex.get(wireIndex);
+      if (index === undefined) {
+        index = blockStack.length;
+        toolCallBlockIndex.set(wireIndex, index);
+        blockStack.push({ type: "tool-call", index, wireIndex });
+        yield { type: "block-start", index, blockType: "tool-call" };
+      }
+      if (ev.arguments) {
+        yield {
+          type: "tool-call-delta",
+          index,
+          id: ev.id,
+          name: ev.name,
+          argumentsDelta: ev.arguments,
+        };
+      }
     } else if (ev.type === "usage") {
       pendingUsage = ev.usage;
     } else if (ev.type === "finish") {
@@ -74,8 +174,18 @@ export async function* toDshChunks(
     }
   }
 
-  if (started) {
-    yield { type: "block-end", index: 0, block: { type: "text", text: assembled } };
+  for (const top of blockStack) {
+    if (top.type === "text") {
+      yield { type: "block-end", index: top.index, block: { type: "text", text: top.text } };
+    } else {
+      const tc = pendingToolCalls[top.wireIndex] ?? { id: "", name: "", arguments: "" };
+      // Canonical `id` field (not callId): dsh-session drops tool-call blocks without it.
+      yield {
+        type: "block-end",
+        index: top.index,
+        block: { type: "tool-call", id: tc.id, name: tc.name, arguments: tc.arguments },
+      };
+    }
   }
   if (pendingUsage) {
     yield {
@@ -128,6 +238,7 @@ export class AriaAdapter {
       model: options.model || this.config.defaultModel,
       temperature: options.temperature,
       maxTokens: options.maxTokens,
+      tools: serializeTools(options.tools),
       signal: options.signal,
       fetchImpl: this.config.fetchImpl,
       headers: { "user-agent": ARIA_USER_AGENT },

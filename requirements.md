@@ -2,6 +2,7 @@
 
 > 功能边界 / 配置 / API / 异常 / 验收。本文件为人审规格的落地清单来源。
 > v2：移除 `pi/` 与独立 `packages/aria-bridge`；仅 dsh；CubeSandbox 沙盒；memo 记忆；隔离持久化工作空间。
+> v3：同步 `harness/ariatag` 的 dsh 接入层修正——tool_calls 流翻译（wire index → block index 映射 + canonical `id`）。
 
 ## 1. 功能边界
 
@@ -40,6 +41,13 @@ dsh plugin Config：engine `baseUrl`/`model`；memo `autoInject`/`topK`；sandbo
 - 协议同 v1：SSE `data:` JSON + `[DONE]`；`AbortSignal`；无 key；`User-Agent`。
 - dsh `StreamChunk`：`block-start`→`text-delta`→`block-end`→（可选 `usage`）→`finish`，finish 后无 chunk。
 - engine 不可达：`AriaError` `ENGINE_UNREACHABLE`，文案含 `aria-engine serve <bundle> --bind 127.0.0.1:8080`。
+
+### 3.1 Tool-call 流翻译（v3，同步 ariatag 修正）
+- `parseSseBody` 解析 `delta.tool_calls[]`（id/name/arguments 增量按 **wire index** 累积），finish 前输出完整 `tool-call` 事件（arguments 已拼接）。
+- `toDshChunks`：文本与工具块共用 dsh block index 空间，**按到达顺序 `blockStack.length` 分配**——OpenAI wire index 不是 block index（文本先出现时工具块 index 必为 1，否则会被文本块覆盖而静默丢失）。
+- 工具块结束 `block-end` 使用 **canonical `id`** 字段（不是 `callId`）：dsh-session 会丢弃无 `id` 的 tool-call 块，导致工具永不执行。
+- 历史序列化 `openaiMessagesFrom`：assistant `tool-call` 块 → OpenAI `tool_calls`（arguments 对象 JSON 化）；user 单 `tool-result` 块 → `role:"tool"` + `tool_call_id`（`isError` → `is_error:true`）。
+- `tools` 透传：dsh tools → OpenAI function tools（`{type:"function", function:{name, description, parameters}}`），请求体 `tools` 仅在非空时发送。
 
 ## 4. Memo 接入
 - Tools：`aria_memo_add` / `aria_memo_search` / `aria_memo_get` / `aria_memo_list` / `aria_memo_forget`。
@@ -80,4 +88,5 @@ dsh plugin Config：engine `baseUrl`/`model`；memo `autoInject`/`topK`；sandbo
 - `npm test` 全绿（shared + aria-engine + aria-memo + aria-sandbox，均为离线 mock）。
 - `npm run typecheck` 全绿。
 - sandbox 单测：7 工具注册；sessionId/显式 workspace 归因；同 id 复用沙箱、异 id 隔离；路径逃逸拒绝；create 失败包装 `SANDBOX`；registry 注册一次且容错；`syncAfterExec` 自动拉回；dispose kill；sync 双向 round-trip 与逃逸拒绝。
+- v3 tool-call 单测：`parseSseBody` 按 wire index 累积 tool-call（arguments 跨 delta 拼接）；文本+工具混合事件顺序；`chatStream` 请求体 `tools` 透传；`toDshChunks` 文本+工具混合时工具块 index=1（不冲突）；仅工具时工具块 index=0 且 `block-end` 为 canonical `id`；`openaiMessagesFrom` assistant tool-call / tool-result（含 `isError`）序列化；`serializeTools` 转换与空输入返回 undefined；端到端 SSE tool_calls → dsh 工具块。
 - 文档：配置表、`scripts/cube-sandbox-up.sh` 用法、限制（search 无 id；须先 `serve`；不接入 model；KVM 要求）。
