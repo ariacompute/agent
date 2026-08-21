@@ -47,7 +47,7 @@ export function generate(
     engine = factory(bundlePath, ffiLib);
   } catch (err) {
     throw new AriaError(
-      `failed to load engine bundle at ${bundlePath}${ffiLib ? ` (ARIA_FFI_LIB=${ffiLib})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
+      `failed to load model bundle at ${bundlePath}${ffiLib ? ` (ARIA_FFI_LIB=${ffiLib})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
       ErrorCode.ENGINE_UNREACHABLE,
     );
   }

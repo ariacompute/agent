@@ -3,9 +3,9 @@
     - id: aria-engine
       name: AGENT_ROOT/dsh/plugins/aria-engine/src/index.ts
       config:
-        # Local engine bundle (in-process FFI). Set ARIA_ENGINE_BUNDLE + ARIA_FFI_LIB,
+        # Local model bundle (in-process FFI). Set ARIA_MODEL_BUNDLE + ARIA_FFI_LIB,
         # or pass bundle/ffiLib here. HTTP `aria-engine serve` is no longer used.
-        bundle: /path/to/engine.bundle
+        bundle: /path/to/aria/model/bundle
         ffiLib: /usr/lib/libaria_ffi.so
         model: aria-tiny
     - id: aria-memo

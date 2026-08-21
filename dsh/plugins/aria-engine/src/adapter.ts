@@ -10,7 +10,7 @@ import { openaiMessagesFrom, serializeTools, type EngineStreamEvent } from "./en
 export { openaiMessagesFrom, serializeTools } from "./engine.ts";
 
 export interface AriaAdapterConfig {
-  /** Local engine bundle path for in-process FFI. */
+  /** Local model bundle path for in-process FFI. */
   bundlePath: string;
   /** Path to the native FFI shared library (ARIA_FFI_LIB). */
   ffiLib?: string;

@@ -40,7 +40,7 @@
 Spec 见 `requirements.md`（v4，engine 接入改为 `@ariacompute/engine-ts` 进程内 FFI）。清单见 `task.md`。
 
 ## 注意事项
-- 黄金路径：设置 `ARIA_ENGINE_BUNDLE` + `ARIA_FFI_LIB` → adapter 进程内 `Engine.complete` 出流；memo CLI add → search；CubeSandbox 就绪（`E2B_API_URL`/`CUBE_TEMPLATE_ID`）→ `sandbox_exec`。
+- 黄金路径：设置 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` → adapter 进程内 `Engine.complete` 出流；memo CLI add → search；CubeSandbox 就绪（`E2B_API_URL`/`CUBE_TEMPLATE_ID`）→ `sandbox_exec`。
 - `E2B_API_URL` 默认 `http://127.0.0.1:3000`（CubeAPI）；模板须先建（`cubemastercli tpl create-from-image`）。
 - 网络：GitHub/registry 直连失败时 `export https_proxy=http://127.0.0.1:7897`。
 - memo search stdout 无 id（`score\tcontent`）；`ARIA_MEMO_DB` 默认 `~/.ariacompute/memo.db`。

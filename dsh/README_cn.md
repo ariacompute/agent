@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_cn.md)
 
-Out-of-tree Cordis 插件。设置 `ARIA_ENGINE_BUNDLE` + `ARIA_FFI_LIB` 接入 engine，并用 `../scripts/cube-sandbox-up.sh` 拉起 CubeSandbox，再在 dsh checkout 里执行：
+Out-of-tree Cordis 插件。设置 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` 接入 model bundle，并用 `../scripts/cube-sandbox-up.sh` 拉起 CubeSandbox，再在 dsh checkout 里执行：
 
 ```sh
 pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml

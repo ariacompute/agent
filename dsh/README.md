@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_cn.md)
 
-Out-of-tree Cordis plugins. Set `ARIA_ENGINE_BUNDLE` + `ARIA_FFI_LIB` for the engine,
+Out-of-tree Cordis plugins. Set `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` for the model bundle,
 bring up CubeSandbox (`../scripts/cube-sandbox-up.sh`), then from a dsh checkout:
 
 ```sh

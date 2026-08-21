@@ -25,7 +25,7 @@ scripts/cube-sandbox-up.sh   one-shot local CubeSandbox bootstrap + template
 ## Requirements
 
 - Node >= 18.18, pnpm.
-- `aria-engine` bundle at `ARIA_ENGINE_BUNDLE` and native lib at `ARIA_FFI_LIB` (no HTTP server needed).
+- `aria-engine` bundle at `ARIA_MODEL_BUNDLE` and native lib at `ARIA_FFI_LIB` (no HTTP server needed).
 - `aria-memo` CLI reachable at `ARIA_MEMO_BIN` (default `aria-memo`).
 - CubeSandbox: x86_64 Linux with KVM (`/dev/kvm`); see [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
 
@@ -39,7 +39,7 @@ scripts/cube-sandbox-up.sh   # checks KVM, installs CubeSandbox, creates the tem
 ## Run
 
 ```sh
-export ARIA_ENGINE_BUNDLE=/path/to/engine.bundle
+export ARIA_MODEL_BUNDLE=/path/to/aria/model/bundle
 export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
 pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
@@ -59,7 +59,7 @@ Select provider route `aria`. The sandbox template id is read from `CUBE_TEMPLAT
 
 ## Configuration
 
-See `requirements.md` §2 for the full env table (`ARIA_ENGINE_BUNDLE`, `ARIA_FFI_LIB`,
+See `requirements.md` §2 for the full env table (`ARIA_MODEL_BUNDLE`, `ARIA_FFI_LIB`,
 `ARIA_ENGINE_MODEL`, `ARIA_MEMO_*`,
 `E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`, `E2B_TIMEOUT_MS`,
 `ARIA_WORKSPACE_ROOT`, `ARIA_WORKSPACE_SYNC_AFTER_EXEC`, `ARIA_WORKSPACE_ID`).

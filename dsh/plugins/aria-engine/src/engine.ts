@@ -1,7 +1,7 @@
 import type { GenerateOptions } from "@deepseek-ai/dsh-llm";
 
 export const ENGINE_BUNDLE_HINT =
-  "set ARIA_ENGINE_BUNDLE to the engine bundle path and ARIA_FFI_LIB to the native lib (libaria_ffi.so)";
+  "set ARIA_MODEL_BUNDLE to the model bundle path and ARIA_FFI_LIB to the native lib (libaria_ffi.so)";
 
 export interface ChatMessage {
   role: string;

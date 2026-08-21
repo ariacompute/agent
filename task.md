@@ -17,11 +17,11 @@
 13. [x] v3 单测：engine（tool-call 累积/混合顺序/tools 透传）+ adapter（index 映射/canonical id/历史序列化/端到端）共 9 个新用例，60 全绿
 14. [x] v3 文档：requirements.md 3.1 节 + task.md v3 条目
 15. [x] v4 依赖：`@ariacompute/engine-ts@^1.4.9`（koffi 原生 FFI）加入 `dsh/plugins/aria-engine/package.json` + 根 `npm install`
-16. [x] v4 config：`shared/src/config.ts` `AriaBridgeConfig` 加 `engineBundle`/`engineFfiLib`/`defaultModel`，`loadConfig` 读 `ARIA_ENGINE_BUNDLE`/`ARIA_FFI_LIB`/`ARIA_ENGINE_MODEL`；`ARIA_ENGINE_URL` 保留但 in-process adapter 不再使用
+16. [x] v4 config：`shared/src/config.ts` `AriaBridgeConfig` 加 `modelBundle`/`engineFfiLib`/`defaultModel`，`loadConfig` 读 `ARIA_MODEL_BUNDLE`/`ARIA_FFI_LIB`/`ARIA_ENGINE_MODEL`；`ARIA_ENGINE_URL` 保留但 in-process adapter 不再使用
 17. [x] v4 engine-binding.ts（新增）：`EngineLike`/`EngineFactory` 契约；`createEngineFactory(sdk)` 注入 SDK（测试用 fake）；`generate()` 调 `complete` + `parseEngineResult`，加载失败→`ENGINE_UNREACHABLE`，complete 失败→`ENGINE`；调用后 `close()`
 18. [x] v4 engine.ts：移除 SSE 解析（`chatStream`/`parseSseBody`/`listModels` HTTP/`ENGINE_SERVE_HINT`），新增 `parseEngineResult(json)`；保留 `EngineStreamEvent`/`openaiMessagesFrom`/`serializeTools`
 19. [x] v4 adapter.ts：`AriaAdapterConfig` 改 `{bundlePath, ffiLib?, defaultModel?, engineFactory?}`；`stream()` 经 `generate` 取事件 + `toDshChunks`，保留 v3 翻译；`listModels`/`resolveModel` 返回 `defaultModel`（无则报错）
-20. [x] v4 index.ts：`apply` 读 `engineBundle`/`engineFfiLib`，构造 in-process adapter；无 bundle 则明确抛出（不再回退 HTTP）；cordis.patch.yml 配置改 `bundle`/`ffiLib`/`model`
+20. [x] v4 index.ts：`apply` 读 `modelBundle`/`engineFfiLib`，构造 in-process adapter；无 bundle 则明确抛出（不再回退 HTTP）；cordis.patch.yml 配置改 `bundle`/`ffiLib`/`model`
 21. [x] v4 单测：新增 `engine-binding.test.ts`（fake Engine：parseEngineResult 解析/异常映射/close/工厂）；`engine.test.ts` 重写为 parseEngineResult + 序列化 + 异常；`adapter.test.ts` 改用 fake Engine（注册/无 bundle 报错/出流/拒绝 stop/需 model/工具块 canonical id）；丢弃 SSE/fetch mock；66 全绿
 22. [x] v4 文档：requirements.md v4（§3 进程内 FFI + 配置表）+ AGENTS.md + README 双语 + dsh/README 双语（移除 serve、加 FFI 配置）
 23. [x] v4 验收：`npm run typecheck` + `npm test`（66/66）全绿；无 SSE/fetch 残留引用

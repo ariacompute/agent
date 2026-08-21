@@ -6,7 +6,7 @@ export const name = "aria-engine";
 export const inject = ["llm"];
 
 export interface Config {
-  /** Local engine bundle path (overrides ARIA_ENGINE_BUNDLE). */
+  /** Local model bundle path (overrides ARIA_MODEL_BUNDLE). */
   bundle?: string;
   /** Native FFI lib path (overrides ARIA_FFI_LIB). */
   ffiLib?: string;
@@ -16,12 +16,12 @@ export interface Config {
 
 export function apply(ctx: Context, config: Config = {}): void {
   const bridge = loadConfig();
-  const bundle = config.bundle ?? bridge.engineBundle;
+  const bundle = config.bundle ?? bridge.modelBundle;
   const ffiLib = config.ffiLib ?? bridge.engineFfiLib;
 
   if (!bundle) {
     throw new Error(
-      "aria-engine: no bundle configured. Set ARIA_ENGINE_BUNDLE (or cordis config.bundle). " +
+      "aria-engine: no bundle configured. Set ARIA_MODEL_BUNDLE (or cordis config.bundle). " +
         "Optional HTTP fallback via ARIA_ENGINE_URL is not supported by the in-process adapter.",
     );
   }

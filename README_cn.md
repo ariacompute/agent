@@ -25,7 +25,7 @@ scripts/cube-sandbox-up.sh   本地一键拉起 CubeSandbox + 建模板
 ## 依赖
 
 - Node >= 18.18、pnpm。
-- `aria-engine` bundle 路径 `ARIA_ENGINE_BUNDLE` 与 原生库 `ARIA_FFI_LIB`（无需 HTTP 服务）。
+- `aria-engine` bundle 路径 `ARIA_MODEL_BUNDLE` 与 原生库 `ARIA_FFI_LIB`（无需 HTTP 服务）。
 - `aria-memo` CLI，路径 `ARIA_MEMO_BIN`（默认 `aria-memo`）。
 - CubeSandbox：x86_64 Linux + KVM（`/dev/kvm`），见 [CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。
 
@@ -39,7 +39,7 @@ scripts/cube-sandbox-up.sh   # 检查 KVM、安装 CubeSandbox、创建模板、
 ## 运行
 
 ```sh
-export ARIA_ENGINE_BUNDLE=/path/to/engine.bundle
+export ARIA_MODEL_BUNDLE=/path/to/aria/model/bundle
 export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
 pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 ```
@@ -56,7 +56,7 @@ pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 
 ## 配置
 
-完整环境变量表见 `requirements.md` §2（`ARIA_ENGINE_BUNDLE`、`ARIA_FFI_LIB`、`ARIA_ENGINE_MODEL`、`ARIA_MEMO_*`、`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`、`E2B_TIMEOUT_MS`、`ARIA_WORKSPACE_ROOT`、`ARIA_WORKSPACE_SYNC_AFTER_EXEC`、`ARIA_WORKSPACE_ID`）。
+完整环境变量表见 `requirements.md` §2（`ARIA_MODEL_BUNDLE`、`ARIA_FFI_LIB`、`ARIA_ENGINE_MODEL`、`ARIA_MEMO_*`、`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`、`E2B_TIMEOUT_MS`、`ARIA_WORKSPACE_ROOT`、`ARIA_WORKSPACE_SYNC_AFTER_EXEC`、`ARIA_WORKSPACE_ID`）。
 
 ## 开发
 
