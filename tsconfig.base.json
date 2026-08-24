@@ -1,5 +1,8 @@
 {
   "compilerOptions": {
+    // Bun v1.4 toolchain: `bun test` runs the sources directly; `bunx tsc --noEmit`
+    // (via the typecheck script) provides the strict type gate. NodeNext + the
+    // .ts extension imports are understood by both Bun and tsc.
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
@@ -10,6 +13,6 @@
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "bun"]
   }
 }

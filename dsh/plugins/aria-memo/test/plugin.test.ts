@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, expect } from "bun:test";
 import type { RunCommand } from "../../shared/src/index.ts";
 import { loadConfig } from "../../shared/src/index.ts";
 import { apply, lastUserText } from "../src/index.ts";
@@ -19,7 +18,7 @@ describe("aria-memo plugin", () => {
       },
       {},
     );
-    assert.deepEqual(names, [
+    expect(names).toEqual([
       "aria_memo_add",
       "aria_memo_search",
       "aria_memo_get",
@@ -31,7 +30,7 @@ describe("aria-memo plugin", () => {
   it("autoInject rewrites pre-step messages and calls next", async () => {
     let listener: ((value: unknown, next: (v?: unknown) => unknown) => unknown) | undefined;
     const runCommand: RunCommand = async (_cmd, args) => {
-      assert.ok(args.includes("search"));
+      expect(args.includes("search")).toBe(true);
       return { code: 0, stdout: "0.800\tuser likes rust\n", stderr: "" };
     };
     apply(
@@ -47,7 +46,7 @@ describe("aria-memo plugin", () => {
       { autoInject: true, topK: 3 },
       { config: loadConfig({ ARIA_MEMO_DB: "/tmp/t.db" }), runCommand },
     );
-    assert.ok(listener);
+    expect(listener).toBeDefined();
     let nextCalled = false;
     const out = await listener?.(
       { messages: [{ role: "user", content: "rust?" }] },
@@ -56,16 +55,15 @@ describe("aria-memo plugin", () => {
         return v;
       },
     );
-    assert.equal(nextCalled, true);
+    expect(nextCalled).toBe(true);
     const messages = (out as { messages: Array<{ content: string }> }).messages;
-    assert.match(messages[0].content, /aria-memo/);
-    assert.match(messages[0].content, /user likes rust/);
+    expect(messages[0].content).toMatch(/aria-memo/);
+    expect(messages[0].content).toMatch(/user likes rust/);
   });
 
   it("extracts last user text", () => {
-    assert.equal(
+    expect(
       lastUserText({ messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] }),
-      "hello",
-    );
+    ).toBe("hello");
   });
 });

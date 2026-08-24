@@ -24,7 +24,7 @@ scripts/cube-sandbox-up.sh   本地一键拉起 CubeSandbox + 建模板
 
 ## 依赖
 
-- Node >= 18.18、pnpm。
+- [Bun](https://bun.com) >= 1.4（`bun install` / `bun test` / `bunx tsc`）。
 - `aria-engine` bundle 路径 `ARIA_MODEL_BUNDLE` 与 原生库 `ARIA_FFI_LIB`（无需 HTTP 服务）。
 - `aria-memo` CLI，路径 `ARIA_MEMO_BIN`（默认 `aria-memo`）。
 - CubeSandbox：x86_64 Linux + KVM（`/dev/kvm`），见 [CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。
@@ -32,7 +32,7 @@ scripts/cube-sandbox-up.sh   本地一键拉起 CubeSandbox + 建模板
 ## 安装
 
 ```sh
-pnpm install          # 网络受限时先 export https_proxy=http://127.0.0.1:7897
+bun install          # 网络受限时先 export https_proxy=http://127.0.0.1:7897
 scripts/cube-sandbox-up.sh   # 检查 KVM、安装 CubeSandbox、创建模板、写 .env
 ```
 
@@ -41,7 +41,7 @@ scripts/cube-sandbox-up.sh   # 检查 KVM、安装 CubeSandbox、创建模板、
 ```sh
 export ARIA_MODEL_BUNDLE=/path/to/aria/model/bundle
 export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
-pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
+bun dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 ```
 
 选择 provider 路由 `aria`。沙盒模板 id 由 `CUBE_TEMPLATE_ID` 读取（env 或 `.env`）；未设置时 `sandbox_*` 工具会明确报错。
@@ -61,8 +61,8 @@ pnpm dsh web --patch /绝对路径/agent/dsh/cordis.patch.yml
 ## 开发
 
 ```sh
-npm test            # 离线单测（shared + engine + memo + sandbox）
-npm run typecheck
+bun test            # 离线单测（shared + engine + memo + sandbox）
+bun run typecheck   # bunx tsc --noEmit 各插件
 ```
 
 注意：memo `search` 返回 `score\tcontent` 行（无 id）；`engine` 需先启动；`model/` 不在范围；GitHub/registry 访问可能需要 `export https_proxy=http://127.0.0.1:7897`。

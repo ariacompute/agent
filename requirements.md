@@ -4,16 +4,17 @@
 > v2：移除 `pi/` 与独立 `packages/aria-bridge`；仅 dsh；CubeSandbox 沙盒；memo 记忆；隔离持久化工作空间。
 > v3：同步 `harness/ariatag` 的 dsh 接入层修正——tool_calls 流翻译（wire index → block index 映射 + canonical `id`）。
 > v4：采用 `@ariacompute/engine-ts` SDK（进程内 FFI）取代 `aria-engine serve` HTTP/SSE 接入；新增 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB`。
+> v5：工具链全量迁移到 **Bun v1.4**（`bun install` / `bun test` / 原生 `bun:test` / `bunx tsc` typecheck；`bun.lock` 取代 pnpm-lock）；测试由 `node:test`+`node:assert` 改写为 `bun:test`+`expect`。
 
 ## 1. 功能边界
 
 ### 1.1 范围内
-- dsh 插件族（`dsh/plugins/*`，pnpm workspace）：
+- dsh 插件族（`dsh/plugins/*`，Bun workspace）：
   - `shared`：engine/memo 环境配置、`AriaError`/`ErrorCode`、spawn 助手（原 `aria-bridge` 代码并入，非独立包）。
   - `aria-engine`：`ctx.llm.registerAdapter(['aria'], …)`，engine OpenAI 兼容 SSE（`GET /v1/models`、`POST /v1/chat/completions` stream）。
   - `aria-memo`：5 个记忆 tools + 可选 `agent/pre-step` `autoInject`（默认关闭）。
   - `aria-sandbox`：CubeSandbox（E2B 兼容）沙盒 tools + 每 agent 一个持久化、相互隔离的工作空间。
-- 加载方式：`pnpm dsh web --patch <agent>/dsh/cordis.patch.yml`。
+- 加载方式：`bun dsh web --patch <agent>/dsh/cordis.patch.yml`（dsh 经由 Bun/Node 运行）。
 - 单测：mock `fetch` / spawn / `ctx` / 沙盒 factory，不联网、不打真实 CubeAPI。
 
 ### 1.2 范围外
@@ -91,8 +92,8 @@ dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）�
 | get/forget 未找到 | 成功返回，不抛 |
 
 ## 7. 验收
-- `npm test` 全绿（shared + aria-engine + aria-memo + aria-sandbox，均为离线 mock）。
-- `npm run typecheck` 全绿。
+- `bun test` 全绿（shared + aria-engine + aria-memo + aria-sandbox，均为离线 mock）。
+- `bunx tsc --noEmit` 各插件 typecheck 全绿（根 `bun run typecheck`）。
 - sandbox 单测：7 工具注册；sessionId/显式 workspace 归因；同 id 复用沙箱、异 id 隔离；路径逃逸拒绝；create 失败包装 `SANDBOX`；registry 注册一次且容错；`syncAfterExec` 自动拉回；dispose kill；sync 双向 round-trip 与逃逸拒绝。
 - v3 tool-call 单测：`parseSseBody` 按 wire index 累积 tool-call（arguments 跨 delta 拼接）；文本+工具混合事件顺序；`chatStream` 请求体 `tools` 透传；`toDshChunks` 文本+工具混合时工具块 index=1（不冲突）；仅工具时工具块 index=0 且 `block-end` 为 canonical `id`；`openaiMessagesFrom` assistant tool-call / tool-result（含 `isError`）序列化；`serializeTools` 转换与空输入返回 undefined；端到端 SSE tool_calls → dsh 工具块。
 - 文档：配置表、`scripts/cube-sandbox-up.sh` 用法、限制（search 无 id；须先 `serve`；不接入 model；KVM 要求）。

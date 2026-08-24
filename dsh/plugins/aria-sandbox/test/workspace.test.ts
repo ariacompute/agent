@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
+import { afterAll, describe, it, expect } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
@@ -90,34 +89,35 @@ function fakeSandbox(initial?: Record<string, string>): SandboxClient {
 
 describe("normalizeWorkspaceId", () => {
   it("keeps safe ids and sanitizes others", () => {
-    assert.equal(normalizeWorkspaceId("ws-a_1.x"), "ws-a_1.x");
-    assert.equal(normalizeWorkspaceId("a b/c"), "a-b-c");
-    assert.equal(normalizeWorkspaceId(".."), "default");
-    assert.equal(normalizeWorkspaceId(""), "default");
-    assert.equal(normalizeWorkspaceId(undefined), "default");
+    expect(normalizeWorkspaceId("ws-a_1.x")).toBe("ws-a_1.x");
+    expect(normalizeWorkspaceId("a b/c")).toBe("a-b-c");
+    expect(normalizeWorkspaceId("..")).toBe("default");
+    expect(normalizeWorkspaceId("")).toBe("default");
+    expect(normalizeWorkspaceId(undefined)).toBe("default");
   });
 });
 
 describe("assertSandboxPath", () => {
   it("accepts paths under /workspace", () => {
-    assert.equal(assertSandboxPath("/workspace/a.txt"), "/workspace/a.txt");
-    assert.equal(assertSandboxPath("/workspace"), "/workspace");
+    expect(assertSandboxPath("/workspace/a.txt")).toBe("/workspace/a.txt");
+    expect(assertSandboxPath("/workspace")).toBe("/workspace");
   });
 
   it("rejects escapes and relatives", () => {
     for (const bad of ["/etc/passwd", "/workspace/../x", "a/b", "/", "/workspace-other/x"]) {
-      assert.throws(() => assertSandboxPath(bad), (err: unknown) => {
-        assert.ok(err instanceof AriaError);
-        assert.equal(err.code, ErrorCode.INVALID_PARAM);
-        return true;
-      }, `should reject ${bad}`);
+      expect(() => assertSandboxPath(bad)).toThrowError(AriaError);
+      try {
+        assertSandboxPath(bad);
+      } catch (err) {
+        expect((err as AriaError).code).toBe(ErrorCode.INVALID_PARAM);
+      }
     }
   });
 });
 
 describe("host workspace isolation", () => {
   let root = "";
-  after(async () => {
+  afterAll(async () => {
     if (root) {
       await rm(root, { recursive: true, force: true });
     }
@@ -127,26 +127,26 @@ describe("host workspace isolation", () => {
     root = await mkdtemp(join(tmpdir(), "aria-ws-"));
     const dirA = await ensureHostWorkspace(root, "agent-A");
     const dirB = await ensureHostWorkspace(root, "agent-B");
-    assert.notEqual(dirA, dirB);
+    expect(dirA).not.toBe(dirB);
     await writeFile(join(dirA, "secret.txt"), "a");
     const filesA = (await collectHostFiles(dirA)).map((f) => f.rel);
     const filesB = (await collectHostFiles(dirB)).map((f) => f.rel);
-    assert.deepEqual(filesA, ["secret.txt"]);
-    assert.deepEqual(filesB, []);
+    expect(filesA).toEqual(["secret.txt"]);
+    expect(filesB).toEqual([]);
   });
 
   it("collects nested files and reports status", async () => {
     await mkdir(join(root, "agent-C", "sub"), { recursive: true });
     await writeFile(join(root, "agent-C", "sub", "f.txt"), "hello");
     const status = await workspaceStatus(join(root, "agent-C"), "agent-C");
-    assert.equal(status.files, 1);
-    assert.equal(status.totalBytes, 5);
+    expect(status.files).toBe(1);
+    expect(status.totalBytes).toBe(5);
   });
 });
 
 describe("syncFromHost / syncToHost", () => {
   let root = "";
-  after(async () => {
+  afterAll(async () => {
     if (root) {
       await rm(root, { recursive: true, force: true });
     }
@@ -161,12 +161,12 @@ describe("syncFromHost / syncToHost", () => {
 
     const sandbox = fakeSandbox();
     const pushed = await syncFromHost(sandbox, hostDir);
-    assert.equal(pushed, 2);
+    expect(pushed).toBe(2);
 
     const pulled = await syncToHost(sandbox, hostDir);
-    assert.equal(pulled, 2);
-    assert.equal(await readFile(join(hostDir, "README.md"), "utf8"), "# hi");
-    assert.equal(await readFile(join(hostDir, "src", "main.rs"), "utf8"), "fn main() {}");
+    expect(pulled).toBe(2);
+    expect(await readFile(join(hostDir, "README.md"), "utf8")).toBe("# hi");
+    expect(await readFile(join(hostDir, "src", "main.rs"), "utf8")).toBe("fn main() {}");
   });
 
   it("syncToHost rejects entries that escape /workspace", async () => {
@@ -186,11 +186,14 @@ describe("syncFromHost / syncToHost", () => {
         async makeDir() {},
       },
     };
-    await assert.rejects(() => syncToHost(evil, hostDir), (err: unknown) => {
-      assert.ok(err instanceof AriaError);
-      assert.equal(err.code, ErrorCode.WORKSPACE);
-      return true;
-    });
+    let err: unknown;
+    try {
+      await syncToHost(evil, hostDir);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).code).toBe(ErrorCode.WORKSPACE);
   });
 });
 
@@ -208,7 +211,7 @@ describe("registerWorkspace", () => {
       },
     };
     await registerWorkspace(registry, "/tmp/x", "a");
-    assert.equal(created, "/tmp/x:a");
+    expect(created).toBe("/tmp/x:a");
 
     const broken: WorkspaceRegistryLike = {
       get: () => [],
@@ -222,6 +225,6 @@ describe("registerWorkspace", () => {
 
 describe("sandbox dir constants", () => {
   it("workspace dir is /workspace", () => {
-    assert.equal(SANDBOX_WORKSPACE_DIR, "/workspace");
+    expect(SANDBOX_WORKSPACE_DIR).toBe("/workspace");
   });
 });

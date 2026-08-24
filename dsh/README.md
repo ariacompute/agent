@@ -6,7 +6,7 @@ Out-of-tree Cordis plugins. Set `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` for the mod
 bring up CubeSandbox (`../scripts/cube-sandbox-up.sh`), then from a dsh checkout:
 
 ```sh
-pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
+bun dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
 
 Replace `AGENT_ROOT` in [cordis.patch.yml](cordis.patch.yml) with that absolute path.

@@ -1,26 +1,25 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, expect } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { defaultMemoDb, loadConfig, normalizeEngineUrl } from "../src/config.ts";
 
 describe("normalizeEngineUrl", () => {
   it("appends /v1 when missing", () => {
-    assert.equal(normalizeEngineUrl("http://127.0.0.1:8080"), "http://127.0.0.1:8080/v1");
+    expect(normalizeEngineUrl("http://127.0.0.1:8080")).toBe("http://127.0.0.1:8080/v1");
   });
 
   it("strips trailing slashes and keeps /v1", () => {
-    assert.equal(normalizeEngineUrl("http://127.0.0.1:8080/v1/"), "http://127.0.0.1:8080/v1");
+    expect(normalizeEngineUrl("http://127.0.0.1:8080/v1/")).toBe("http://127.0.0.1:8080/v1");
   });
 });
 
 describe("loadConfig", () => {
   it("uses defaults", () => {
     const cfg = loadConfig({});
-    assert.equal(cfg.engineUrl, "http://127.0.0.1:8080/v1");
-    assert.equal(cfg.memoBin, "aria-memo");
-    assert.equal(cfg.memoDb, join(homedir(), ".ariacompute", "memo.db"));
-    assert.equal(defaultMemoDb(), cfg.memoDb);
+    expect(cfg.engineUrl).toBe("http://127.0.0.1:8080/v1");
+    expect(cfg.memoBin).toBe("aria-memo");
+    expect(cfg.memoDb).toBe(join(homedir(), ".ariacompute", "memo.db"));
+    expect(defaultMemoDb()).toBe(cfg.memoDb);
   });
 
   it("reads env overrides", () => {
@@ -29,8 +28,8 @@ describe("loadConfig", () => {
       ARIA_MEMO_BIN: "/opt/aria-memo",
       ARIA_MEMO_DB: "/tmp/m.db",
     });
-    assert.equal(cfg.engineUrl, "http://localhost:9/v1");
-    assert.equal(cfg.memoBin, "/opt/aria-memo");
-    assert.equal(cfg.memoDb, "/tmp/m.db");
+    expect(cfg.engineUrl).toBe("http://localhost:9/v1");
+    expect(cfg.memoBin).toBe("/opt/aria-memo");
+    expect(cfg.memoDb).toBe("/tmp/m.db");
   });
 });

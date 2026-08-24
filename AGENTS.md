@@ -9,7 +9,7 @@
 本里程碑不接入 sibling `model/`。已移除 `pi/` 与独立 `packages/aria-bridge/`。
 
 ## 架构
-`dsh/plugins/*`（Cordis plugin，pnpm workspace）：
+`dsh/plugins/*`（Cordis plugin，Bun workspace）：
 - `shared`：config / `AriaError` / spawn（原 aria-bridge 并入，非独立包）
 - `aria-engine`：`ctx.llm.registerAdapter(['aria'], …)` → `Engine` 进程内 FFI（`@ariacompute/engine-ts`，bundle + `libaria_ffi.so`）
 - `aria-memo`：tools `aria_memo_*` + 可选 `agent/pre-step` autoInject（默认关闭）
@@ -19,7 +19,7 @@
 
 ## 目录
 - `dsh/plugins/shared|aria-engine|aria-memo|aria-sandbox`：插件源码 + `test/`
-- `dsh/cordis.patch.yml`：`pnpm dsh web --patch` 加载清单（含 aria-sandbox）
+- `dsh/cordis.patch.yml`：`bun dsh web --patch` 加载清单（含 aria-sandbox）
 - `dsh/stubs/`：cordis/dsh-llm/dsh-tools 最小类型 stub（仅 typecheck/单测）
 - `scripts/`：CubeSandbox 一键引导
 - 根：`AGENTS.md` / `requirements.md` / `task.md` / `README.md` / `README_cn.md`
@@ -32,12 +32,12 @@
 - 工作空间隔离是硬约束：`assertSandboxPath` 只放行 `/workspace` 下路径；宿主目录 0700。
 
 ## 常用命令
-- `npm test` / `npm run typecheck`
+- `bun test` / `bun run typecheck`（typecheck = `bunx tsc --noEmit` 各插件）
 - `scripts/cube-sandbox-up.sh`（KVM + cubemastercli + 模板 + `.env`）
-- `pnpm dsh web --patch <agent>/dsh/cordis.patch.yml`
+- `bun dsh web --patch <agent>/dsh/cordis.patch.yml`
 
 ## 进行中需求
-Spec 见 `requirements.md`（v4，engine 接入改为 `@ariacompute/engine-ts` 进程内 FFI）。清单见 `task.md`。
+Spec 见 `requirements.md`（v5，工具链已迁移到 Bun v1.4）。清单见 `task.md`。
 
 ## 注意事项
 - 黄金路径：设置 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` → adapter 进程内 `Engine.complete` 出流；memo CLI add → search；CubeSandbox 就绪（`E2B_API_URL`/`CUBE_TEMPLATE_ID`）→ `sandbox_exec`。

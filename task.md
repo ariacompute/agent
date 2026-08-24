@@ -25,3 +25,7 @@
 21. [x] v4 单测：新增 `engine-binding.test.ts`（fake Engine：parseEngineResult 解析/异常映射/close/工厂）；`engine.test.ts` 重写为 parseEngineResult + 序列化 + 异常；`adapter.test.ts` 改用 fake Engine（注册/无 bundle 报错/出流/拒绝 stop/需 model/工具块 canonical id）；丢弃 SSE/fetch mock；66 全绿
 22. [x] v4 文档：requirements.md v4（§3 进程内 FFI + 配置表）+ AGENTS.md + README 双语 + dsh/README 双语（移除 serve、加 FFI 配置）
 23. [x] v4 验收：`npm run typecheck` + `npm test`（66/66）全绿；无 SSE/fetch 残留引用
+24. [x] v5 工具链：Bun v1.4 全量化——删除 `pnpm-workspace.yaml` 与 `pnpm-lock.yaml`/`package-lock.json`，改用根 `package.json` `workspaces` 字段 + `bun.lock`；根 `package.json` 脚本 `test`→`bun test`、`typecheck`→`bunx tsc --noEmit`（保留 `tsc` 严格门禁）、新增 `build`（`bun build --compile` 单文件可执行）；`engines` 加 `bun>=1.4.0`、移除 `tsx` devDep；装 `@types/bun`
+25. [x] v5 测试：10 个 `*.test.ts` 从 `node:test`+`node:assert` 改写为 `bun:test`（`describe`/`it`/`expect`），断言等价迁移（`equal`→`toBe`、`deepEqual`→`toEqual`、`throws`→`toThrow`/属性再断言）；Bun 的 `after` 不存在→改用 `afterAll`
+26. [x] v5 tsconfig：`tsconfig.base.json` 保留 `NodeNext` + `allowImportingTsExtensions` + `verbatimModuleSyntax`（Bun 原生支持 `.ts` 导入）；`types` 加 `bun` 以解析 `bun:test`
+27. [x] v5 验收：`bun install` 生成 `bun.lock` 且无 pnpm/package 锁残留；`bun test` 66/66 全绿；`bunx tsc --noEmit` 各插件全绿；文档命令统一为 bun

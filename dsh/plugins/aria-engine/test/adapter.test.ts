@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, expect } from "bun:test";
 import type { GenerateOptions, StreamChunk } from "../../../stubs/dsh-llm.ts";
 import { apply, AriaAdapter, toDshChunks } from "../src/index.ts";
 import { openaiMessagesFrom, serializeTools } from "../src/adapter.ts";
@@ -37,9 +36,9 @@ describe("toDshChunks", () => {
       chunks.push(c);
     }
     const types = chunks.map((c) => c.type);
-    assert.deepEqual(types, ["block-start", "text-delta", "block-end", "usage", "finish"]);
-    assert.equal(types.indexOf("usage") < types.indexOf("finish"), true);
-    assert.equal(types.at(-1), "finish");
+    expect(types).toEqual(["block-start", "text-delta", "block-end", "usage", "finish"]);
+    expect(types.indexOf("usage") < types.indexOf("finish")).toBe(true);
+    expect(types.at(-1)).toBe("finish");
   });
 
   it("maps wire tool-call indices to distinct block indices when text precedes", async () => {
@@ -54,7 +53,7 @@ describe("toDshChunks", () => {
       chunks.push(c);
     }
     const types = chunks.map((c) => c.type);
-    assert.deepEqual(types, [
+    expect(types).toEqual([
       "block-start",
       "text-delta",
       "block-start",
@@ -64,9 +63,9 @@ describe("toDshChunks", () => {
       "finish",
     ]);
     const toolStart = chunks.find((c) => c.type === "block-start" && c.blockType === "tool-call");
-    assert.equal(toolStart?.type === "block-start" ? toolStart.index : -1, 1);
+    expect(toolStart?.type === "block-start" ? toolStart.index : -1).toBe(1);
     const toolDelta = chunks.find((c) => c.type === "tool-call-delta");
-    assert.deepEqual(
+    expect(
       toolDelta && toolDelta.type === "tool-call-delta"
         ? {
             index: toolDelta.index,
@@ -75,10 +74,9 @@ describe("toDshChunks", () => {
             argumentsDelta: toolDelta.argumentsDelta,
           }
         : null,
-      { index: 1, id: "call_a", name: "sandbox_exec", argumentsDelta: '{"cmd":"ls"}' },
-    );
+    ).toEqual({ index: 1, id: "call_a", name: "sandbox_exec", argumentsDelta: '{"cmd":"ls"}' });
     const blocks = chunks.filter((c) => c.type === "block-end").map((c) => c.block);
-    assert.deepEqual(blocks, [
+    expect(blocks).toEqual([
       { type: "text", text: "ok" },
       { type: "tool-call", id: "call_a", name: "sandbox_exec", arguments: '{"cmd":"ls"}' },
     ]);
@@ -95,16 +93,15 @@ describe("toDshChunks", () => {
       chunks.push(c);
     }
     const start = chunks[0];
-    assert.equal(start?.type, "block-start");
-    assert.equal(start.type === "block-start" ? start.index : -1, 0);
+    expect(start?.type).toBe("block-start");
+    expect(start?.type === "block-start" ? start.index : -1).toBe(0);
     const end = chunks.find((c) => c.type === "block-end");
-    assert.deepEqual(
+    expect(
       end && end.type === "block-end" ? end.block : null,
-      { type: "tool-call", id: "call_1", name: "memo_add", arguments: '{"text":"x"}' },
-    );
+    ).toEqual({ type: "tool-call", id: "call_1", name: "memo_add", arguments: '{"text":"x"}' });
     const finish = chunks.at(-1);
-    assert.equal(finish?.type, "finish");
-    assert.equal(finish.type === "finish" ? finish.reason.kind : "", "tool-calls");
+    expect(finish?.type).toBe("finish");
+    expect(finish?.type === "finish" ? finish.reason.kind : "").toBe("tool-calls");
   });
 });
 
@@ -127,7 +124,7 @@ describe("openaiMessagesFrom / serializeTools", () => {
         },
       ],
     });
-    assert.deepEqual(messages, [
+    expect(messages).toEqual([
       { role: "user", content: "run ls" },
       {
         role: "assistant",
@@ -165,7 +162,7 @@ describe("openaiMessagesFrom / serializeTools", () => {
         },
       ],
     });
-    assert.deepEqual(messages, [
+    expect(messages).toEqual([
       {
         role: "assistant",
         tool_calls: [
@@ -185,7 +182,7 @@ describe("openaiMessagesFrom / serializeTools", () => {
       },
       { name: "memo_add", description: "add memory" },
     ]);
-    assert.deepEqual(tools, [
+    expect(tools).toEqual([
       {
         type: "function",
         function: {
@@ -196,8 +193,8 @@ describe("openaiMessagesFrom / serializeTools", () => {
       },
       { type: "function", function: { name: "memo_add", description: "add memory" } },
     ]);
-    assert.equal(serializeTools(undefined), undefined);
-    assert.equal(serializeTools([]), undefined);
+    expect(serializeTools(undefined)).toBeUndefined();
+    expect(serializeTools([])).toBeUndefined();
   });
 });
 
@@ -217,12 +214,12 @@ describe("AriaAdapter / apply", () => {
       },
       { bundle: "/my.bundle", ffiLib: "/my/lib.so", model: "aria-tiny" },
     );
-    assert.deepEqual(registered[0]?.routes, ["aria"]);
-    assert.ok(registered[0]?.adapter instanceof AriaAdapter);
+    expect(registered[0]?.routes).toEqual(["aria"]);
+    expect(registered[0]?.adapter instanceof AriaAdapter).toBe(true);
   });
 
   it("throws when no bundle is configured", () => {
-    assert.throws(() =>
+    expect(() =>
       apply(
         {
           llm: { registerAdapter() { return () => undefined; } },
@@ -231,7 +228,7 @@ describe("AriaAdapter / apply", () => {
         },
         {},
       ),
-    );
+    ).toThrow();
   });
 
   it("streams engine result into dsh chunks via in-process engine", async () => {
@@ -253,9 +250,9 @@ describe("AriaAdapter / apply", () => {
     for await (const c of adapter.stream(options)) {
       types.push(c.type);
     }
-    assert.equal(types.at(-1), "finish");
-    assert.ok(types.includes("text-delta"));
-    assert.deepEqual(last.options, { model: "tiny", temperature: undefined, max_tokens: undefined });
+    expect(types.at(-1)).toBe("finish");
+    expect(types.includes("text-delta")).toBe(true);
+    expect(last.options).toEqual({ model: "tiny", temperature: undefined, max_tokens: undefined });
   });
 
   it("rejects stop sequences", async () => {
@@ -264,16 +261,18 @@ describe("AriaAdapter / apply", () => {
       defaultModel: "aria-tiny",
       engineFactory: fakeFactory({ choices: [{ message: { content: "" } }] }).factory,
     });
-    await assert.rejects(async () => {
-      for await (const _ of adapter.stream({
-        provider: "aria",
-        model: "tiny",
-        messages: [],
-        stop: ["\n"],
-      })) {
-        /* drain */
-      }
-    });
+    await expect(
+      (async () => {
+        for await (const _ of adapter.stream({
+          provider: "aria",
+          model: "tiny",
+          messages: [],
+          stop: ["\n"],
+        })) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toThrow();
   });
 
   it("requires a model (config.defaultModel or request model)", async () => {
@@ -281,17 +280,19 @@ describe("AriaAdapter / apply", () => {
       bundlePath: "/my.bundle",
       engineFactory: fakeFactory({ choices: [{ message: { content: "" } }] }).factory,
     });
-    await assert.rejects(async () => {
-      for await (const _ of adapter.stream({
-        provider: "aria",
-        messages: [{ role: "user", content: "hi" }],
-      })) {
-        /* drain */
-      }
-    });
+    await expect(
+      (async () => {
+        for await (const _ of adapter.stream({
+          provider: "aria",
+          messages: [{ role: "user", content: "hi" }],
+        })) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toThrow();
   });
 
-  it("streams tool-call engine result into dsh tool-call blocks with canonical id", async () => {
+  it("second engine result into dsh tool-call blocks with canonical id", async () => {
     const { factory } = fakeFactory({
       choices: [
         {
@@ -323,14 +324,13 @@ describe("AriaAdapter / apply", () => {
     const toolEnd = chunks.find(
       (c) => c.type === "block-end" && c.block.type === "tool-call",
     );
-    assert.deepEqual(
+    expect(
       toolEnd && toolEnd.type === "block-end" && toolEnd.block.type === "tool-call"
         ? toolEnd.block
         : null,
-      { type: "tool-call", id: "call_1", name: "sandbox_exec", arguments: '{"cmd":"ls"}' },
-    );
+    ).toEqual({ type: "tool-call", id: "call_1", name: "sandbox_exec", arguments: '{"cmd":"ls"}' });
     const finish = chunks.at(-1);
-    assert.equal(finish?.type, "finish");
-    assert.equal(finish.type === "finish" ? finish.reason.kind : "", "tool-calls");
+    expect(finish?.type).toBe("finish");
+    expect(finish?.type === "finish" ? finish.reason.kind : "").toBe("tool-calls");
   });
 });

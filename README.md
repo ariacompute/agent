@@ -24,7 +24,7 @@ scripts/cube-sandbox-up.sh   one-shot local CubeSandbox bootstrap + template
 
 ## Requirements
 
-- Node >= 18.18, pnpm.
+- [Bun](https://bun.com) >= 1.4 (`bun install` / `bun test` / `bunx tsc`).
 - `aria-engine` bundle at `ARIA_MODEL_BUNDLE` and native lib at `ARIA_FFI_LIB` (no HTTP server needed).
 - `aria-memo` CLI reachable at `ARIA_MEMO_BIN` (default `aria-memo`).
 - CubeSandbox: x86_64 Linux with KVM (`/dev/kvm`); see [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
@@ -32,7 +32,7 @@ scripts/cube-sandbox-up.sh   one-shot local CubeSandbox bootstrap + template
 ## Setup
 
 ```sh
-pnpm install            # use https_proxy=http://127.0.0.1:7897 if the network requires it
+bun install             # use https_proxy=http://127.0.0.1:7897 if the network requires it
 scripts/cube-sandbox-up.sh   # checks KVM, installs CubeSandbox, creates the template, writes .env
 ```
 
@@ -41,7 +41,7 @@ scripts/cube-sandbox-up.sh   # checks KVM, installs CubeSandbox, creates the tem
 ```sh
 export ARIA_MODEL_BUNDLE=/path/to/aria/model/bundle
 export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
-pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
+bun dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
 
 Select provider route `aria`. The sandbox template id is read from `CUBE_TEMPLATE_ID`
@@ -67,8 +67,8 @@ See `requirements.md` §2 for the full env table (`ARIA_MODEL_BUNDLE`, `ARIA_FFI
 ## Development
 
 ```sh
-npm test            # offline unit tests (shared + engine + memo + sandbox)
-npm run typecheck
+bun test            # offline unit tests (shared + engine + memo + sandbox)
+bun run typecheck   # bunx tsc --noEmit across plugins
 ```
 
 Notes: memo `search` returns `score\tcontent` lines (no ids). `engine` must be

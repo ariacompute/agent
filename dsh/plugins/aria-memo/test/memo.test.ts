@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, expect } from "bun:test";
 import { AriaError, ErrorCode } from "../../shared/src/error.ts";
 import { loadConfig } from "../../shared/src/config.ts";
 import type { RunCommand } from "../../shared/src/spawn.ts";
@@ -27,24 +26,24 @@ describe("memo CLI wrapper", () => {
       {
         config: cfg,
         runCommand: script((args) => {
-          assert.ok(args.includes("--db"));
-          assert.ok(args.includes("add"));
+          expect(args.includes("--db")).toBe(true);
+          expect(args.includes("add")).toBe(true);
           return { code: 0, stdout: "m123\n" };
         }),
       },
     );
-    assert.equal(id, "m123");
+    expect(id).toBe("m123");
   });
 
   it("rejects empty content", async () => {
-    await assert.rejects(
-      () => memoAdd({ content: "  " }, { config: cfg, runCommand: script(() => ({ code: 0, stdout: "x" })) }),
-      (err: unknown) => {
-        assert.ok(err instanceof AriaError);
-        assert.equal(err.code, ErrorCode.EMPTY_CONTENT);
-        return true;
-      },
-    );
+    let err: unknown;
+    try {
+      await memoAdd({ content: "  " }, { config: cfg, runCommand: script(() => ({ code: 0, stdout: "x" })) });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).code).toBe(ErrorCode.EMPTY_CONTENT);
   });
 
   it("parses search lines", async () => {
@@ -55,9 +54,9 @@ describe("memo CLI wrapper", () => {
         runCommand: script(() => ({ code: 0, stdout: "0.900\tuser likes rust\n0.100\tother\n" })),
       },
     );
-    assert.equal(hits.length, 2);
-    assert.equal(hits[0].score, 0.9);
-    assert.equal(hits[0].content, "user likes rust");
+    expect(hits.length).toBe(2);
+    expect(hits[0].score).toBe(0.9);
+    expect(hits[0].content).toBe("user likes rust");
   });
 
   it("get returns null for not found", async () => {
@@ -65,7 +64,7 @@ describe("memo CLI wrapper", () => {
       config: cfg,
       runCommand: script(() => ({ code: 0, stdout: "not found\n" })),
     });
-    assert.equal(rec, null);
+    expect(rec).toBe(null);
   });
 
   it("get parses JSON", async () => {
@@ -73,7 +72,7 @@ describe("memo CLI wrapper", () => {
       config: cfg,
       runCommand: script(() => ({ code: 0, stdout: '{"id":"m1","content":"hi"}\n' })),
     });
-    assert.equal(rec?.id, "m1");
+    expect(rec?.id).toBe("m1");
   });
 
   it("list parses debug lines", async () => {
@@ -87,46 +86,47 @@ describe("memo CLI wrapper", () => {
         })),
       },
     );
-    assert.equal(rows.length, 2);
-    assert.equal(rows[0].id, "m1");
-    assert.equal(rows[1].content, "world");
+    expect(rows.length).toBe(2);
+    expect(rows[0].id).toBe("m1");
+    expect(rows[1].content).toBe("world");
   });
 
   it("forget found vs missing", async () => {
-    assert.equal(
+    expect(
       await memoForget("m1", {
         config: cfg,
         runCommand: script(() => ({ code: 0, stdout: "forgotten\n" })),
       }),
-      true,
-    );
-    assert.equal(
+    ).toBe(true);
+    expect(
       await memoForget("m2", {
         config: cfg,
         runCommand: script(() => ({ code: 0, stdout: "not found\n" })),
       }),
-      false,
-    );
+    ).toBe(false);
   });
 
   it("non-zero exit is MEMO_CLI", async () => {
-    await assert.rejects(
-      () =>
-        memoSearch(
-          { text: "x" },
-          { config: cfg, runCommand: script(() => ({ code: 1, stdout: "", stderr: "error: boom" })) },
-        ),
-      (err: unknown) => {
-        assert.ok(err instanceof AriaError);
-        assert.equal(err.code, ErrorCode.MEMO_CLI);
-        assert.match(err.message, /boom/);
-        return true;
-      },
-    );
+    let err: unknown;
+    try {
+      await memoSearch(
+        { text: "x" },
+        { config: cfg, runCommand: script(() => ({ code: 1, stdout: "", stderr: "error: boom" })) },
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).code).toBe(ErrorCode.MEMO_CLI);
+    expect((err as AriaError).message).toMatch(/boom/);
   });
 
   it("rejects invalid type and topK", async () => {
-    await assert.rejects(() => memoAdd({ content: "x", type: "nope" }, { config: cfg, runCommand: script(() => ({ code: 0, stdout: "id" })) }));
-    await assert.rejects(() => memoSearch({ text: "x", topK: 0 }, { config: cfg, runCommand: script(() => ({ code: 0, stdout: "" })) }));
+    await expect(
+      memoAdd({ content: "x", type: "nope" }, { config: cfg, runCommand: script(() => ({ code: 0, stdout: "id" })) }),
+    ).rejects.toThrow();
+    await expect(
+      memoSearch({ text: "x", topK: 0 }, { config: cfg, runCommand: script(() => ({ code: 0, stdout: "" })) }),
+    ).rejects.toThrow();
   });
 });

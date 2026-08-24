@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
+import { afterAll, describe, it, expect } from "bun:test";
 import { rm } from "node:fs/promises";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -121,8 +120,8 @@ function buildCtx(opts: {
 
 function tool(ctx: Ctx, name: string): RegisteredTool {
   const found = ctx.toolsList.find((t) => t.name === name);
-  assert.ok(found, `tool ${name} registered`);
-  return found;
+  expect(found, `tool ${name} registered`).toBeDefined();
+  return found!;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -131,7 +130,7 @@ function sleep(ms: number): Promise<void> {
 
 describe("aria-sandbox plugin", () => {
   let root = "";
-  after(async () => {
+  afterAll(async () => {
     if (root) {
       await rm(root, { recursive: true, force: true });
     }
@@ -140,18 +139,15 @@ describe("aria-sandbox plugin", () => {
   it("registers all seven tools", () => {
     root = makeTmpRoot();
     const ctx = buildCtx({ workspaceRoot: root });
-    assert.deepEqual(
-      ctx.toolsList.map((t) => t.name),
-      [
-        "sandbox_exec",
-        "sandbox_read_file",
-        "sandbox_write_file",
-        "sandbox_list_files",
-        "sandbox_sync_to_host",
-        "sandbox_sync_from_host",
-        "workspace_status",
-      ],
-    );
+    expect(ctx.toolsList.map((t) => t.name)).toEqual([
+      "sandbox_exec",
+      "sandbox_read_file",
+      "sandbox_write_file",
+      "sandbox_list_files",
+      "sandbox_sync_to_host",
+      "sandbox_sync_from_host",
+      "workspace_status",
+    ]);
   });
 
   it("exec runs inside the sandbox and keys workspace by sessionId", async () => {
@@ -162,8 +158,8 @@ describe("aria-sandbox plugin", () => {
       { command: "ls" },
       { sessionId: "sess-1" },
     );
-    assert.deepEqual(result, { stdout: "out:ls", stderr: "", exitCode: 0 });
-    assert.equal(counts.created, 1);
+    expect(result).toEqual({ stdout: "out:ls", stderr: "", exitCode: 0 });
+    expect(counts.created).toBe(1);
   });
 
   it("same workspace reuses the sandbox; different ids get separate ones", async () => {
@@ -173,7 +169,7 @@ describe("aria-sandbox plugin", () => {
     await tool(ctx, "sandbox_exec").execute({ command: "a" }, { sessionId: "s1" });
     await tool(ctx, "sandbox_exec").execute({ command: "b" }, { sessionId: "s1" });
     await tool(ctx, "sandbox_exec").execute({ command: "c" }, { sessionId: "s2" });
-    assert.equal(counts.created, 2);
+    expect(counts.created).toBe(2);
   });
 
   it("explicit workspace arg overrides session id", async () => {
@@ -185,7 +181,7 @@ describe("aria-sandbox plugin", () => {
       { sessionId: "s1" },
     );
     await tool(ctx, "sandbox_exec").execute({ command: "y" }, { sessionId: "s1" });
-    assert.equal(counts.created, 2);
+    expect(counts.created).toBe(2);
   });
 
   it("syncAfterExec pulls files back after exec", async () => {
@@ -200,25 +196,24 @@ describe("aria-sandbox plugin", () => {
     await tool(ctx, "sandbox_exec").execute({ command: "touch" }, { sessionId: "s1" });
     // f.txt was written to sandbox; sync after exec must persist it to host
     const status = await tool(ctx, "workspace_status").execute({}, { sessionId: "s1" });
-    assert.equal((status as { files: number }).files, 1);
+    expect((status as { files: number }).files).toBe(1);
   });
 
   it("rejects sandbox paths outside /workspace", async () => {
     root = makeTmpRoot();
     const { factory } = fakeFactory();
     const ctx = buildCtx({ workspaceRoot: root, factory });
-    await assert.rejects(
-      () =>
-        tool(ctx, "sandbox_read_file").execute(
-          { path: "/etc/passwd" },
-          { sessionId: "s1" },
-        ),
-      (err: unknown) => {
-        assert.ok(err instanceof AriaError);
-        assert.equal(err.code, ErrorCode.INVALID_PARAM);
-        return true;
-      },
-    );
+    let err: unknown;
+    try {
+      await tool(ctx, "sandbox_read_file").execute(
+        { path: "/etc/passwd" },
+        { sessionId: "s1" },
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).code).toBe(ErrorCode.INVALID_PARAM);
   });
 
   it("wraps sandbox create failures as SANDBOX", async () => {
@@ -229,15 +224,15 @@ describe("aria-sandbox plugin", () => {
       },
     };
     const ctx = buildCtx({ workspaceRoot: root, factory: failing });
-    await assert.rejects(
-      () => tool(ctx, "sandbox_exec").execute({ command: "x" }, { sessionId: "s1" }),
-      (err: unknown) => {
-        assert.ok(err instanceof AriaError);
-        assert.equal(err.code, ErrorCode.SANDBOX);
-        assert.match(err.message, /KVM unavailable/);
-        return true;
-      },
-    );
+    let err: unknown;
+    try {
+      await tool(ctx, "sandbox_exec").execute({ command: "x" }, { sessionId: "s1" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).code).toBe(ErrorCode.SANDBOX);
+    expect((err as AriaError).message).toMatch(/KVM unavailable/);
   });
 
   it("registers workspace with dsh registry once per workspace", async () => {
@@ -253,8 +248,8 @@ describe("aria-sandbox plugin", () => {
     const ctx = buildCtx({ workspaceRoot: root, registry, factory });
     await tool(ctx, "sandbox_exec").execute({ command: "a" }, { sessionId: "s1" });
     await tool(ctx, "sandbox_exec").execute({ command: "b" }, { sessionId: "s1" });
-    assert.equal(created.length, 1);
-    assert.match(created[0], /s1/);
+    expect(created.length).toBe(1);
+    expect(created[0]).toMatch(/s1/);
   });
 
   it("dispose kills sandboxes", async () => {
@@ -263,14 +258,14 @@ describe("aria-sandbox plugin", () => {
     const ctx = buildCtx({ workspaceRoot: root, factory });
     await tool(ctx, "sandbox_exec").execute({ command: "a" }, { sessionId: "s1" });
     await tool(ctx, "sandbox_exec").execute({ command: "b" }, { sessionId: "s2" });
-    assert.equal(counts.killed, 0);
+    expect(counts.killed).toBe(0);
     ctx.fire("dispose");
     await sleep(30);
-    assert.equal(counts.killed, 2);
+    expect(counts.killed).toBe(2);
   });
 
   it("exports the real e2b factory", () => {
-    assert.equal(typeof e2bSandboxFactory.create, "function");
+    expect(typeof e2bSandboxFactory.create).toBe("function");
   });
 });
 

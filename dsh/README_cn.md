@@ -5,7 +5,7 @@
 Out-of-tree Cordis 插件。设置 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` 接入 model bundle，并用 `../scripts/cube-sandbox-up.sh` 拉起 CubeSandbox，再在 dsh checkout 里执行：
 
 ```sh
-pnpm dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
+bun dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
 
 把 [cordis.patch.yml](cordis.patch.yml) 中的 `AGENT_ROOT` 换成该绝对路径。插件路径必须是绝对路径（[dsh 插件教程](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/)）。

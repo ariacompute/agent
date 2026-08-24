@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, expect } from "bun:test";
 import { AriaError, ErrorCode } from "../../shared/src/error.ts";
 import { createEngineFactory, generate, type EngineFactory, type EngineLike } from "../src/engine-binding.ts";
 
@@ -45,52 +44,49 @@ describe("engine-binding generate()", () => {
       { model: "aria-tiny" },
       [{ type: "function", function: { name: "sandbox_exec" } }],
     );
-    assert.equal(closed.value, true);
-    assert.deepEqual(last.messages, [{ role: "user", content: "run ls" }]);
-    assert.deepEqual(last.options, { model: "aria-tiny" });
-    assert.deepEqual(last.tools, [{ type: "function", function: { name: "sandbox_exec" } }]);
+    expect(closed.value).toBe(true);
+    expect(last.messages).toEqual([{ role: "user", content: "run ls" }]);
+    expect(last.options).toEqual({ model: "aria-tiny" });
+    expect(last.tools).toEqual([{ type: "function", function: { name: "sandbox_exec" } }]);
     const types = events.map((e) => e.type);
-    assert.deepEqual(types, ["text", "tool-call", "usage", "finish"]);
+    expect(types).toEqual(["text", "tool-call", "usage", "finish"]);
     const tc = events.find((e) => e.type === "tool-call");
-    assert.deepEqual(
+    expect(
       tc && tc.type === "tool-call" ? { id: tc.id, name: tc.name, arguments: tc.arguments, index: tc.index } : null,
-      { id: "call_1", name: "sandbox_exec", arguments: '{"cmd":"ls"}', index: 0 },
-    );
+    ).toEqual({ id: "call_1", name: "sandbox_exec", arguments: '{"cmd":"ls"}', index: 0 });
     const finish = events.at(-1);
-    assert.equal(finish?.type, "finish");
-    assert.equal(finish.type === "finish" ? finish.reason : "", "tool_calls");
+    expect(finish?.type).toBe("finish");
+    expect(finish?.type === "finish" ? finish.reason : "").toBe("tool_calls");
     const usage = events.find((e) => e.type === "usage");
-    assert.deepEqual(
+    expect(
       usage && usage.type === "usage" ? usage.usage : null,
-      { inputTokens: 3, outputTokens: 2 },
-    );
+    ).toEqual({ inputTokens: 3, outputTokens: 2 });
   });
 
   it("maps factory load failure to ENGINE_UNREACHABLE", () => {
     const factory: EngineFactory = () => {
       throw new Error("cannot open bundle");
     };
-    assert.throws(
-      () => generate(factory, "/missing", "/lib.so", [], {}, undefined),
-      (err) => err instanceof AriaError && err.code === ErrorCode.ENGINE_UNREACHABLE,
-    );
+    expect(() => generate(factory, "/missing", "/lib.so", [], {}, undefined)).toThrowError(AriaError);
+    try {
+      generate(factory, "/missing", "/lib.so", [], {}, undefined);
+    } catch (err) {
+      expect((err as AriaError).code).toBe(ErrorCode.ENGINE_UNREACHABLE);
+    }
   });
 
   it("maps complete() failure to ENGINE error", () => {
-    const { factory } = fakeEngine(null);
-    factory("destroy").complete = () => {
-      throw new Error("native crash");
-    };
-    // re-create a factory whose engine throws on complete
     const badFactory: EngineFactory = () => ({
       complete: () => {
         throw new Error("native crash");
       },
     });
-    assert.throws(
-      () => generate(badFactory, "/bundle", "/lib.so", [], {}, undefined),
-      (err) => err instanceof AriaError && err.code === ErrorCode.ENGINE,
-    );
+    expect(() => generate(badFactory, "/bundle", "/lib.so", [], {}, undefined)).toThrowError(AriaError);
+    try {
+      generate(badFactory, "/bundle", "/lib.so", [], {}, undefined);
+    } catch (err) {
+      expect((err as AriaError).code).toBe(ErrorCode.ENGINE);
+    }
   });
 
   it("createEngineFactory sets ARIA_FFI_LIB and constructs the sdk Engine", () => {
@@ -104,13 +100,13 @@ describe("engine-binding generate()", () => {
     };
     const factory = createEngineFactory(sdk);
     factory("/my.bundle", "/my/lib.so");
-    assert.deepEqual(constructed, [{ bundle: "/my.bundle" }]);
-    assert.equal(process.env.ARIA_FFI_LIB, "/my/lib.so");
+    expect(constructed).toEqual([{ bundle: "/my.bundle" }]);
+    expect(process.env.ARIA_FFI_LIB).toBe("/my/lib.so");
   });
 
   it("close() is optional on the engine", () => {
     const factory: EngineFactory = () => ({ complete: () => ({ choices: [{ message: { content: "x" }, finish_reason: "stop" }] }) });
     const events = generate(factory, "/b", undefined, [], {}, undefined);
-    assert.equal(events.at(-1)?.type, "finish");
+    expect(events.at(-1)?.type).toBe("finish");
   });
 });
