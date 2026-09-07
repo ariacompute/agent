@@ -5,6 +5,7 @@
 > v3：同步 `harness/ariatag` 的 dsh 接入层修正——tool_calls 流翻译（wire index → block index 映射 + canonical `id`）。
 > v4：采用 `@ariacompute/engine-ts` SDK（进程内 FFI）取代 `aria-engine serve` HTTP/SSE 接入；新增 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB`。
 > v5：工具链全量迁移到 **Bun v1.4**（`bun install` / `bun test` / 原生 `bun:test` / `bunx tsc` typecheck；`bun.lock` 取代 pnpm-lock）；测试由 `node:test`+`node:assert` 改写为 `bun:test`+`expect`。
+> v6：新增 `dsh/plugins/aria-reef`——Reef 式「持续自我改进 agent」闭环 **Serve → Observe → Grow → Commit → Surface**；既演化 harness 构件（技能/提示词/规则，本地 engine FFI），也经 ariapin 派发权重训练（Slime + SGLang）。
 
 ## 1. 功能边界
 
@@ -14,13 +15,16 @@
   - `aria-engine`：`ctx.llm.registerAdapter(['aria'], …)`，engine OpenAI 兼容 SSE（`GET /v1/models`、`POST /v1/chat/completions` stream）。
   - `aria-memo`：5 个记忆 tools + 可选 `agent/pre-step` `autoInject`（默认关闭）。
   - `aria-sandbox`：CubeSandbox（E2B 兼容）沙盒 tools + 每 agent 一个持久化、相互隔离的工作空间。
+  - `aria-reef`（v6）：持续自我改进闭环——记录回合 / 三路反馈 / recipe 演化 / 评估选胜者 / Git 版本化 / 热交付（**默认关闭**，见 §7）。
 - 加载方式：`bun dsh web --patch <agent>/dsh/cordis.patch.yml`（dsh 经由 Bun/Node 运行）。
-- 单测：mock `fetch` / spawn / `ctx` / 沙盒 factory，不联网、不打真实 CubeAPI。
+- 单测：mock `fetch` / spawn / `ctx` / 沙盒 factory / LLM proposer / git，不联网、不打真实 CubeAPI、不跑真实权重。
 
 ### 1.2 范围外
 - sibling `model/`；vendor/fork dsh；修改 `engine/` `memo/` 源码。
 - 非 E2B 沙盒后端（Docker 直跑、VM 直管）。
 - 工作空间内容级加密 / 配额 / GC（仅目录 0700 隔离 + 双向同步）。
+- 权重训练后端本身（Slime 训练 / SGLang 推理 / ariapin Go 服务）：**本仓库只做 TS 编排 + HTTP 客户端 + 离线 fake**，缺接口在需求/任务清单标注待办，不改 Go 源码。
+- Git 远端推送 / PR：reef 只写入本地专属 artifact 仓库（`ARIA_REEF_ARTIFACT_REPO`），不触碰主仓。
 
 ## 2. 配置
 
@@ -39,8 +43,29 @@
 | `ARIA_WORKSPACE_ROOT` | `~/.ariacompute/agent/workspaces` | 宿主工作空间根目录 |
 | `ARIA_WORKSPACE_SYNC_AFTER_EXEC` | `false` | `sandbox_exec` 后自动 `sync_to_host` |
 | `ARIA_WORKSPACE_ID` | — | 默认工作空间 id（工具参数/会话 id 优先） |
+| `ARIA_REEF_ENABLED` | `off` | reef 总开关；`off` 时插件不注册任何 hook/tool |
+| `ARIA_REEF_RELEASE` | `dev` | 当前 release id，打在每条 record 上（回滚/对照用） |
+| `ARIA_REEF_STORE_DIR` | `~/.ariacompute/agent/reef` | JSONL 存储目录（`records.jsonl` / `feedback.jsonl`） |
+| `ARIA_REEF_ARTIFACT_REPO` | `~/.ariacompute/agent/reef-artifacts` | 演化产物的本地 Git 仓库（权重走 Git LFS） |
+| `ARIA_REEF_BATCH_SIZE` | `16` | 每轮 Grow 消费的最大 record 数 |
+| `ARIA_REEF_MIN_FEEDBACK` | `1` | record 进入训练所需的最少反馈条数 |
+| `ARIA_REEF_RUBRIC` | `on` | 自动评分（确定性 rubric，不烧 LLM）开关 |
+| `ARIA_REEF_AUTO_APPLY` | `off` | 候选胜出后是否自动发布（关闭时仅产出候选待审） |
+| `ARIA_REEF_RECIPES` | `skillclaw,prompt,rules` | 启用的 recipe（加 `weight` 需同时给 base model） |
+| `ARIA_REEF_ARIAPIN_URL` | `http://127.0.0.1:8001` | ariapin 服务根地址（权重 recipe） |
+| `ARIA_REEF_ARIAPIN_KEY` | — | ariapin API key（`Authorization: Bearer`） |
+| `ARIA_REEF_ARIAPIN_TIMEOUT_MS` | `30000` | ariapin 单次 HTTP 超时 |
+| `ARIA_REEF_BASE_MODEL` | — | 权重训练 base model（也可 `config.weight.baseModel`） |
+| `ARIA_REEF_BUNDLE` | 回退 `ARIA_MODEL_BUNDLE` | harness recipe 提议用的本地 bundle |
+| `ARIA_REEF_FFI_LIB` | 回退 `ARIA_FFI_LIB` | harness recipe 提议用的 FFI 库 |
+| `ARIA_REEF_MODEL` | 回退 `ARIA_ENGINE_MODEL` | 提议用模型 id |
+| `ARIA_REEF_CYCLE` | `off` | 定时自动 cycle 开关；`off` 时不创建任何定时器 |
+| `ARIA_REEF_CYCLE_INTERVAL_MS` | `900000`（15min） | 距上次运行超过该间隔即触发一轮 |
+| `ARIA_REEF_CYCLE_MIN_SIGNALS` | `8` | 新信号（eligible 未训练 record）达到该数提前触发；`0` 关闭阈值触发 |
+| `ARIA_REEF_CYCLE_POLL_MS` | `min(interval, 60000)` | tick 探测周期（每 tick 最多两次 store 读，受 `BATCH_SIZE` 限流） |
+| `ARIA_REEF_CYCLE_MAX_BACKOFF_MS` | `interval × 4` | 连续失败退避上限 |
 
-dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）；memo `autoInject`/`topK`；sandbox 同 env 各字段，`workspaceRoot`/`syncAfterExec` 可用 `.env` 覆盖。
+dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）；memo `autoInject`/`topK`；sandbox 同 env 各字段，`workspaceRoot`/`syncAfterExec` 可用 `.env` 覆盖；reef 同 env 各字段 + `weight.{baseModel,jobType,minRollouts,minScore,lora,hyperparams,agentId}` + `targets.{skill,prompt,rules}` + `cycle*` 各字段。
 
 ## 3. Engine 接入（v4：进程内 FFI SDK）
 - 采用 `@ariacompute/engine-ts`（`Engine` 类，基于 koffi 原生 FFI）：`new Engine(bundlePath)` + `engine.complete(messages, options, tools)`，进程内加载，无 HTTP、无 SSE。
@@ -90,10 +115,85 @@ dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）�
 | 沙箱 create/操作失败 | `AriaError` `SANDBOX`（含 KVM 等根因） |
 | 同步文件逃逸 `/workspace` | `AriaError` `WORKSPACE` |
 | get/forget 未找到 | 成功返回，不抛 |
+| reef：无 LLM proposer（无 bundle 且未注入 `deps.llm`） | `AriaError` `REEF`，cycle 记 `error` 不中断其它 recipe |
+| reef：store 写入失败 / JSONL 损坏行 | `AriaError` `REEF_STORE`（记录落库在 detached promise 内，只记日志不打断 agent 回路） |
+| reef：rollout 不足 / 训练任务未成功 | `AriaError` `REEF_TRAIN` |
+| reef：git 命令失败（`add`/`commit` 之外） | `AriaError` `REEF_GIT`；`commit` 无变更返回 `null` 并记日志 |
+| reef：ariapin 非 2xx / `code != 0` / 无 `job_id` | `AriaError` `ARIAPIN` |
+| reef：非法评分 / `structured` 非 JSON 对象 / 未知 `record_id` / 非法 artifact 名 | `AriaError` `INVALID_PARAM` |
+| reef：权重重载接口缺失且无 `agentId` | 原样抛 `AriaError` `ARIAPIN`（不静默降级）；有 `agentId` 时回退 agent 重启并在 detail 注明 |
+| reef：自动 cycle 抛错 / 信号计数失败 | 只记日志（消息截断）+ 指数退避 / 跳过信号触发，调度器与 agent 主回路不受影响 |
 
-## 7. 验收
-- `bun test` 全绿（shared + aria-engine + aria-memo + aria-sandbox，均为离线 mock）。
+## 7. Reef 自我改进闭环（v6）
+
+### 7.1 阶段与数据流
+
+```
+Agent turn ──agent/pre-step──► Serve：签发 record_id（异步落库）
+        ──response/tool result──► Observe：三路反馈绑定 record_id
+                                    ├─ aria_reef_report（显式：评分/文本/结构化）
+                                    ├─ 任务结果信号（post-step 推断 success/failure）
+                                    └─ rubric 自动评分（确定性、不烧 LLM）
+Records + Feedback ──eligibility 门控──► Grow：recipe 产出 Candidate
+                                    ├─ harness（skillclaw / prompt / rules，engine FFI 提议）
+                                    └─ weight（聚合 scored rollout → ariapin 派发 Slime 训练）
+Candidate ──Evaluate（当前 vs 候选，保留胜者）──► Commit（Git + LFS）
+                                    └──► Surface（harness 热更新 / 权重热重载）
+```
+
+- `record_id` 以 `reef.recordId` 形式挂在 `agent/pre-step` 载荷上回传给 agent；落库为 detached promise，**失败只记日志，绝不 `await` 后阻塞 `next()`**。
+- 反馈三路统一为 `Feedback{recordId, source, score(0..1), text?, structured?, eligible}`；`1..5` 分制自动归一化（`/5`）。
+- eligibility：未消费（`trainedAt` 为空）+ 反馈数 >= `minFeedback` + 至少一条含 score。
+- 消费语义：recipe 一旦产出候选即标记 `trainedAt`，失败不会在同批数据上死循环。
+
+### 7.2 Recipes
+
+| recipe | kind | artifact | 触发条件 | 产物 |
+|--------|------|----------|----------|------|
+| `skillclaw` | harness | `skill` (`skills/agent`) | 样本数 >= `minSamples` 且均分 < `scoreThreshold`（默认 1 / 0.7） | 新的技能文件全文 + unified diff |
+| `prompt` | harness | `prompt` (`prompts/system`) | 同上 | 新的系统提示词全文 |
+| `rules` | harness | `rules` (`rules/guardrails`) | 同上 | 新的规则/护栏全文 |
+| `weight` | weight | `weight` (`weights/active`) | 高分 rollout（>= `minScore`，默认 0.6）数 >= `minRollouts`（默认 4） | ariapin dataset + job，候选内容为训练任务引用 |
+
+- harness recipe 经 `LlmProposer` 提议：默认走 `@ariacompute/engine-ts` 进程内 FFI（**动态 import**，未安装/无 bundle 时给出明确错误，不静默跳过；测试注入 `fakeProposer`）。
+- weight recipe 只写 TS 编排：`POST /v1/datasets`（multipart）→ `POST /v1/jobs` → `POST /v1/jobs/{id}/start`，可选 `waitForJob` 轮询到终态。
+- **权重重载（v6+ 已补齐后端）**：ariapin 提供 `POST /v1/models/{id}/reload`（模型 → `job_id` → `jobs.agent_id` 解析后重启承载 agent，`202` + `mode:"restart"`）。reef 优先调用模型重载；失败且已知 `agentId` 时回退 `POST /v1/agents/{id}/restart` 并在 detail 注明；两者皆不可用则原样抛 `AriaError(ARIAPIN)`（失败要响，不静默）。`agentId` 由 `config.weight.agentId` 写入候选 meta。
+
+### 7.3 评估与版本化
+
+- 评估：`tasksFromRecords` 由反馈文本抽关键词作 hints，默认 runner 计算「非空的 0.5 基础分 + hints 覆盖率的 0.5」；`candidate > current + minImprovement` 才取代（**平局保留当前版本**）。runner 可注入（在线可换成真实任务/LM 打分）。
+- 版本化：artifact 仓库布局 `artifacts/<kind>/<name>`（active）、`history/<kind>/<name>/vN`（快照）、`reef-state.json`（版本指针）、`.gitattributes`（`*.bin/*.safetensors/*.gguf/*.pt` 走 LFS）。
+- 每次发布：`write` 递增版本 → `git add -A` → `git commit` → `rev-parse HEAD` 记 sha；无变更返回 `null`。
+- `git lfs install --local` 失败仅记日志（权重退化为直接入库），不阻断。
+
+### 7.4 交付（Surface）
+
+- harness 构件：`surface.active(ref)` **每回合实时读盘**，不做进程内缓存 → 被接受的技能/提示词/规则改动无需重启即生效。
+- 权重：候选 `meta.modelId`/`agentId` 存在时经 ariapin 触发热重载；无客户端则明确降级并记日志。
+- `ARIA_REEF_AUTO_APPLY=off` 时只产出候选与评估报告，等人工/上层调用 `aria_reef_cycle` 决策。
+
+### 7.5 Tools
+
+| tool | 说明 |
+|------|------|
+| `aria_reef_report` | 显式反馈：`record_id`（缺省取最近一次回合）、`score`（0..1 或 1..5）、`text`、`structured`（JSON 字符串） |
+| `aria_reef_status` | 观测：release、record 总数、待消费数、反馈数、启用 recipes |
+| `aria_reef_cycle` | 手动触发一轮 Grow→Evaluate→Commit→Surface，返回 `CycleReport` |
+
+### 7.6 爆炸半径
+
+- `aria-engine` / `aria-memo` / `aria-sandbox` 零改动；`aria-reef` 只依赖 `shared`（新增 `REEF*` / `ARIAPIN` 错误码为纯增量）。
+- 默认 `ARIA_REEF_ENABLED=off`：`apply` 直接返回，不注册 hook/tool，不建目录。
+- Git 操作仅限 `ARIA_REEF_ARTIFACT_REPO`；artifact 名强制 `[A-Za-z0-9._-/]` 且拒绝 `..`。
+
+## 8. 验收
+- `bun test` 全绿（shared + aria-engine + aria-memo + aria-sandbox + aria-reef，均为离线 mock）。
 - `bunx tsc --noEmit` 各插件 typecheck 全绿（根 `bun run typecheck`）。
 - sandbox 单测：7 工具注册；sessionId/显式 workspace 归因；同 id 复用沙箱、异 id 隔离；路径逃逸拒绝；create 失败包装 `SANDBOX`；registry 注册一次且容错；`syncAfterExec` 自动拉回；dispose kill；sync 双向 round-trip 与逃逸拒绝。
 - v3 tool-call 单测：`parseSseBody` 按 wire index 累积 tool-call（arguments 跨 delta 拼接）；文本+工具混合事件顺序；`chatStream` 请求体 `tools` 透传；`toDshChunks` 文本+工具混合时工具块 index=1（不冲突）；仅工具时工具块 index=0 且 `block-end` 为 canonical `id`；`openaiMessagesFrom` assistant tool-call / tool-result（含 `isError`）序列化；`serializeTools` 转换与空输入返回 undefined；端到端 SSE tool_calls → dsh 工具块。
 - 文档：配置表、`scripts/cube-sandbox-up.sh` 用法、限制（search 无 id；须先 `serve`；不接入 model；KVM 要求）。
+- v6 reef 单测（85 例，全离线）：config 环境变量与非法值回退；store 内存/文件 JSONL 往返 + 损坏行 `REEF_STORE`；serve hook 必 `next()`、持久化失败不打断、post-step 补全 outcome；反馈归一化（1..5）/三路来源/eligibility/rubric 幂等/`aria_reef_report` 四类参数校验/`aria_reef_status` 计数；评估 runner hints 覆盖、平局保留当前、runner 非有限值与抛错映射；recipe 门控、diff 生成、registry 选择；weight rollout 门槛、dataset+job 派发、`waitForJob` 失败码；artifact 版本递增/历史快照/LFS 属性/git 失败码/commit 无变更 `null`；surface 热更新读盘与降级；ariapin 客户端 multipart/契约键/终态轮询/超时/三类错误映射；插件：默认关闭零注册、启用注册 3 工具、完整 cycle 落版本并标记消费、`autoApply=off` 不发布、recipe 失败记 `error` 不中断。
+- v6 验收命令：`bun test`（含 `dsh/plugins/aria-reef/test/*.test.ts`）+ `bun run typecheck`（含 aria-reef）全绿。
+- v6+ 定时自动 cycle 单测（离线假时钟，不真实睡眠）：关闭时零定时器（`setTimer` 未被调用）；间隔未满不跑、满间隔跑一轮；信号达阈值提前触发（受 60s gate 约束）、未达阈值不触发；在飞时 tick 跳过并计 `skipped`；连续失败按 `pollMs → 2× → …` 退避且封顶、成功归零、调度器不中断；`stop()` 清定时器且等在飞 cycle；信号计数失败只记日志不影响间隔触发；插件 `dispose` 后调度器 `started=false`。
+- v6+ 权重重载：`POST /v1/models/{id}/reload` 成功路径；模型重载失败且有 `agentId` 时回退 `POST /v1/agents/{id}/restart`（detail 含 `fell back`）；无 `agentId` 时原样抛 `ARIAPIN`；weight recipe 写入 `meta.agentId`。
+- v6+ ariapin（harness 仓库）验收：`go build ./... && go vet ./... && go test ./...` 全绿 + `python3 -m unittest discover -s tests -p "test_*.py"` 全绿；`ResolveReloadTarget` 纯函数覆盖正常与三类 422 + nil model 404。

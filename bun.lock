@@ -21,6 +21,10 @@
       "name": "@ariacompute/dsh-aria-memo",
       "version": "0.1.0",
     },
+    "dsh/plugins/aria-reef": {
+      "name": "@ariacompute/dsh-aria-reef",
+      "version": "0.1.0",
+    },
     "dsh/plugins/aria-sandbox": {
       "name": "@ariacompute/aria-sandbox",
       "version": "0.0.0",
@@ -39,6 +43,8 @@
     "@ariacompute/dsh-aria-engine": ["@ariacompute/dsh-aria-engine@workspace:dsh/plugins/aria-engine"],
 
     "@ariacompute/dsh-aria-memo": ["@ariacompute/dsh-aria-memo@workspace:dsh/plugins/aria-memo"],
+
+    "@ariacompute/dsh-aria-reef": ["@ariacompute/dsh-aria-reef@workspace:dsh/plugins/aria-reef"],
 
     "@ariacompute/dsh-shared": ["@ariacompute/dsh-shared@workspace:dsh/plugins/shared"],
 

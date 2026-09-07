@@ -2,10 +2,10 @@
   "name": "aria-agent",
   "private": true,
   "type": "module",
-  "description": "Aria dsh plugins: engine adapter, memo context memory, CubeSandbox agent sandbox with isolated persistent workspaces",
+  "description": "Aria dsh plugins: engine adapter, memo context memory, CubeSandbox agent sandbox with isolated persistent workspaces, aria-reef continuous self-improvement loop",
   "scripts": {
-    "test": "bun test dsh/plugins/shared/test/*.test.ts dsh/plugins/aria-engine/test/*.test.ts dsh/plugins/aria-memo/test/*.test.ts dsh/plugins/aria-sandbox/test/*.test.ts",
-    "typecheck": "tsc --noEmit -p dsh/plugins/shared/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-engine/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-memo/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-sandbox/tsconfig.json",
+    "test": "bun test dsh/plugins/shared/test/*.test.ts dsh/plugins/aria-engine/test/*.test.ts dsh/plugins/aria-memo/test/*.test.ts dsh/plugins/aria-sandbox/test/*.test.ts dsh/plugins/aria-reef/test/*.test.ts",
+    "typecheck": "tsc --noEmit -p dsh/plugins/shared/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-engine/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-memo/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-sandbox/tsconfig.json && tsc --noEmit -p dsh/plugins/aria-reef/tsconfig.json",
     "build": "bun build --compile ./dsh/plugins/aria-engine/src/index.ts --outfile aria-engine"
   },
   "workspaces": [

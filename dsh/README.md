@@ -18,6 +18,7 @@ Plugin paths must be absolute ([dsh plugin tutorial](https://deepseek-harness.gi
 | `plugins/aria-engine` | `ctx.llm.registerAdapter(['aria'], …)` → engine in-process FFI |
 | `plugins/aria-memo` | tools `aria_memo_*`; optional `autoInject` on `agent/pre-step` |
 | `plugins/aria-sandbox` | CubeSandbox (E2B) sandbox tools `sandbox_*` + `workspace_status`; isolated persistent per-agent workspaces |
+| `plugins/aria-reef` | Self-improvement loop (`ARIA_REEF_ENABLED=on`, off by default): record turns → feedback (`aria_reef_report` / outcome / rubric) → evolve `skillclaw`/`prompt`/`rules` (local engine) or dispatch weight training (ariapin) → keep the winner, commit to git, hot-serve; tools `aria_reef_report` / `aria_reef_status` / `aria_reef_cycle`; optional automatic cycles via `ARIA_REEF_CYCLE=on` (interval OR signal-threshold trigger, single flight, backoff) |
 
 Select provider route `aria`. Local engine has no API key. Sandbox needs a CubeSandbox
 template (`CUBE_TEMPLATE_ID`) — see `../scripts/cube-sandbox-up.sh`.

@@ -19,6 +19,12 @@ export const ErrorCode = {
   SANDBOX: "SANDBOX",
   SANDBOX_TIMEOUT: "SANDBOX_TIMEOUT",
   WORKSPACE: "WORKSPACE",
+  // aria-reef (self-improvement loop)
+  REEF: "REEF",
+  REEF_STORE: "REEF_STORE",
+  REEF_TRAIN: "REEF_TRAIN",
+  REEF_GIT: "REEF_GIT",
+  ARIAPIN: "ARIAPIN",
 } as const;
 
 export type ErrorCodeName = (typeof ErrorCode)[keyof typeof ErrorCode];

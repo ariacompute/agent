@@ -14,7 +14,11 @@ function toFileInfo(info: { name: string; path: string; type?: unknown }): Sandb
   };
 }
 
-function toClient(sandbox: Sandbox): SandboxClient {
+/**
+ * Wrap an e2b `Sandbox` into the injectable `SandboxClient` contract.
+ * This is the only place bound to the real SDK.
+ */
+export function toSandboxClient(sandbox: Sandbox): SandboxClient {
   return {
     async kill() {
       await sandbox.kill();
@@ -36,7 +40,12 @@ function toClient(sandbox: Sandbox): SandboxClient {
     },
     files: {
       async write(path, data) {
-        await sandbox.files.write(path, data);
+        // Normalize every payload to a Blob: the SDK exposes several write
+        // overloads and a bare `string | Uint8Array` union is dispatched
+        // ambiguously (and `Uint8Array` is not even in its input type), which
+        // aborts the upload mid-flight. A Blob pins the byte overload and keeps
+        // `string` (UTF-8) and `Uint8Array` (raw view) semantics intact.
+        await sandbox.files.write(path, new Blob([data]));
       },
       async read(path) {
         // e2b returns Uint8Array when format:'bytes' is requested.
@@ -66,6 +75,6 @@ export const e2bSandboxFactory: SandboxFactory = {
       metadata: { name: "aria-agent" },
       lifecycle: { onTimeout: "kill" },
     });
-    return toClient(sandbox);
+    return toSandboxClient(sandbox);
   },
 };

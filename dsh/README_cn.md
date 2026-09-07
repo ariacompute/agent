@@ -16,5 +16,6 @@ bun dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 | `plugins/aria-engine` | `ctx.llm.registerAdapter(['aria'], …)` → engine 进程内 FFI |
 | `plugins/aria-memo` | tools `aria_memo_*`；可选 `autoInject`（`agent/pre-step`） |
 | `plugins/aria-sandbox` | CubeSandbox（E2B）沙盒 tools `sandbox_*` + `workspace_status`；每 agent 一个隔离的持久化工作空间 |
+| `plugins/aria-reef` | 自我改进闭环（`ARIA_REEF_ENABLED=on`，默认关闭）：记录回合 → 反馈（`aria_reef_report` / 任务结果 / rubric）→ 演化 `skillclaw`/`prompt`/`rules`（本地引擎）或派发权重训练（ariapin）→ 保留胜者、Git 入库、热交付；tools `aria_reef_report` / `aria_reef_status` / `aria_reef_cycle`；可选定时自动 cycle（`ARIA_REEF_CYCLE=on`，间隔或信号阈值双触发、单飞、失败退避） |
 
 选择 provider 路由 `aria`。本地 engine 无 API key。沙盒需要先创建 CubeSandbox 模板（`CUBE_TEMPLATE_ID`）——见 `../scripts/cube-sandbox-up.sh`。

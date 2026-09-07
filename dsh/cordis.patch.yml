@@ -26,3 +26,49 @@
         # Persistent host dir for per-agent workspaces (0700, isolated).
         workspaceRoot: ~/.ariacompute/agent/workspaces
         syncAfterExec: false
+    - id: aria-reef
+      name: AGENT_ROOT/dsh/plugins/aria-reef/src/index.ts
+      config:
+        # Continuous self-improvement loop. `off` by default: nothing is
+        # registered (no hooks, no tools) until it is switched on.
+        enabled: off
+        # Release id stamped on every captured turn.
+        release: dev
+        # JSONL record/feedback store + git repo holding evolved artifacts.
+        storeDir: ~/.ariacompute/agent/reef
+        artifactRepo: ~/.ariacompute/agent/reef-artifacts
+        batchSize: 16
+        minFeedback: 1
+        # Automatic (LLM-free) rubric scoring of captured turns.
+        rubric: true
+        # Publish accepted candidates without manual approval.
+        autoApply: false
+        # skillclaw / prompt / rules need `bundle`; weight needs ariapin + baseModel.
+        recipes:
+          - skillclaw
+          - prompt
+          - rules
+        # Model bundle used to propose harness edits (or set ARIA_REEF_BUNDLE).
+        bundle: /path/to/aria/model/bundle
+        ffiLib: /usr/lib/libaria_ffi.so
+        model: aria-tiny
+        # ariapin (Slime training + SGLang serving) for the weight recipe.
+        ariapinUrl: http://127.0.0.1:8001
+        ariapinKey: ""
+        # Add "weight" to `recipes` and set a base model to enable training.
+        weight:
+          baseModel: ""
+          jobType: sft
+          minRollouts: 4
+          minScore: 0.6
+          # Agent serving the weights; enables the agent-restart reload fallback.
+          agentId: ""
+        # Automatic cycles: off by default (no timer is created while off).
+        # Env: ARIA_REEF_CYCLE / _CYCLE_INTERVAL_MS / _CYCLE_MIN_SIGNALS /
+        #      _CYCLE_POLL_MS / _CYCLE_MAX_BACKOFF_MS
+        cycle: off
+        cycleIntervalMs: 900000
+        # Trigger early once this many new eligible signals accumulated (0 disables).
+        cycleMinSignals: 8
+        cyclePollMs: 60000
+        cycleMaxBackoffMs: 3600000

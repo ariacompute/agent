@@ -1,0 +1,10 @@
+{
+  "name": "@ariacompute/dsh-aria-reef",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Reef-style continuous self-improvement loop (Serve -> Observe -> Grow -> Commit -> Surface) for aria dsh agents.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
