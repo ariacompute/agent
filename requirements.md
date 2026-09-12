@@ -14,14 +14,14 @@
   - `shared`：engine/memo 环境配置、`AriaError`/`ErrorCode`、spawn 助手（原 `aria-bridge` 代码并入，非独立包）。
   - `aria-engine`：`ctx.llm.registerAdapter(['aria'], …)`，engine OpenAI 兼容 SSE（`GET /v1/models`、`POST /v1/chat/completions` stream）。
   - `aria-memo`：5 个记忆 tools + 可选 `agent/pre-step` `autoInject`（默认关闭）。
-  - `aria-sandbox`：CubeSandbox（E2B 兼容）沙盒 tools + 每 agent 一个持久化、相互隔离的工作空间。
+  - `aria-sandbox`：可切换沙盒后端（docker / kata / cubesandbox）的沙盒 tools + 每 agent 一个持久化、相互隔离的工作空间。
   - `aria-reef`（v6）：持续自我改进闭环——记录回合 / 三路反馈 / recipe 演化 / 评估选胜者 / Git 版本化 / 热交付（**默认关闭**，见 §7）。
 - 加载方式：`bun dsh web --patch <agent>/dsh/cordis.patch.yml`（dsh 经由 Bun/Node 运行）。
 - 单测：mock `fetch` / spawn / `ctx` / 沙盒 factory / LLM proposer / git，不联网、不打真实 CubeAPI、不跑真实权重。
 
 ### 1.2 范围外
 - sibling `model/`；vendor/fork dsh；修改 `engine/` `memo/` 源码。
-- 非 E2B 沙盒后端（Docker 直跑、VM 直管）。
+- 其它沙盒后端（除 docker / kata / cubesandbox 以外的沙盒 provider）。
 - 工作空间内容级加密 / 配额 / GC（仅目录 0700 隔离 + 双向同步）。
 - 权重训练后端本身（Slime 训练 / SGLang 推理 / ariapin Go 服务）：**本仓库只做 TS 编排 + HTTP 客户端 + 离线 fake**，缺接口在需求/任务清单标注待办，不改 Go 源码。
 - Git 远端推送 / PR：reef 只写入本地专属 artifact 仓库（`ARIA_REEF_ARTIFACT_REPO`），不触碰主仓。
@@ -36,10 +36,14 @@
 | `ARIA_ENGINE_URL` | `http://127.0.0.1:8080/v1` | engine OpenAI 兼容根路径（**v4 已弃用**，仅 HTTP 回退分支保留，in-process adapter 不支持） |
 | `ARIA_MEMO_BIN` | `aria-memo` | memo CLI（PATH 或绝对路径） |
 | `ARIA_MEMO_DB` | `~/.ariacompute/memo.db` | memo SQLite |
-| `E2B_API_URL` | `http://127.0.0.1:3000` | CubeAPI（E2B 兼容） |
-| `E2B_API_KEY` | `e2b_000000` | 本地部署任意占位串 |
-| `CUBE_TEMPLATE_ID` | — | sandbox-code 模板（`scripts/cube-sandbox-up.sh` 创建） |
-| `E2B_TIMEOUT_MS` | `300000` | 沙箱空闲超时（超时 kill） |
+| `E2B_API_URL` | `http://127.0.0.1:3000` | CubeAPI（E2B 兼容）；仅 cubesandbox 后端使用 |
+| `E2B_API_KEY` | `e2b_000000` | 本地部署任意占位串；仅 cubesandbox 后端使用 |
+| `CUBE_TEMPLATE_ID` | — | sandbox-code 模板（`scripts/cube-sandbox-up.sh` 创建）；仅 cubesandbox 后端使用 |
+| `E2B_TIMEOUT_MS` | `300000` | 沙箱空闲超时（超时 kill）；仅 cubesandbox 后端使用 |
+| `ARIA_SANDBOX_TYPE` | `docker` | 沙盒后端：`docker` / `kata` / `cubesandbox`；非法值报错 |
+| `ARIA_SANDBOX_IMAGE` | `ubuntu:22.04` | docker/kata 容器镜像 |
+| `ARIA_SANDBOX_CLI` | `docker` | OCI CLI 二进制：`docker` 或 `nerdctl` |
+| `ARIA_SANDBOX_RUNTIME` | kata 时 `kata` | 容器运行时；kata 后端默认 `kata`，其它后端留空 |
 | `ARIA_WORKSPACE_ROOT` | `~/.ariacompute/agent/workspaces` | 宿主工作空间根目录 |
 | `ARIA_WORKSPACE_SYNC_AFTER_EXEC` | `false` | `sandbox_exec` 后自动 `sync_to_host` |
 | `ARIA_WORKSPACE_ID` | — | 默认工作空间 id（工具参数/会话 id 优先） |
@@ -65,7 +69,7 @@
 | `ARIA_REEF_CYCLE_POLL_MS` | `min(interval, 60000)` | tick 探测周期（每 tick 最多两次 store 读，受 `BATCH_SIZE` 限流） |
 | `ARIA_REEF_CYCLE_MAX_BACKOFF_MS` | `interval × 4` | 连续失败退避上限 |
 
-dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）；memo `autoInject`/`topK`；sandbox 同 env 各字段，`workspaceRoot`/`syncAfterExec` 可用 `.env` 覆盖；reef 同 env 各字段 + `weight.{baseModel,jobType,minRollouts,minScore,lora,hyperparams,agentId}` + `targets.{skill,prompt,rules}` + `cycle*` 各字段。
+dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）；memo `autoInject`/`topK`；sandbox 同 env 各字段（`type`/`apiUrl`/`apiKey`/`template`/`timeoutMs`/`image`/`cli`/`runtime`/`workspaceRoot`/`syncAfterExec`/`workspaceId`），`workspaceRoot`/`syncAfterExec` 可用 `.env` 覆盖；reef 同 env 各字段 + `weight.{baseModel,jobType,minRollouts,minScore,lora,hyperparams,agentId}` + `targets.{skill,prompt,rules}` + `cycle*` 各字段。
 
 ## 3. Engine 接入（v4：进程内 FFI SDK）
 - 采用 `@ariacompute/engine-ts`（`Engine` 类，基于 koffi 原生 FFI）：`new Engine(bundlePath)` + `engine.complete(messages, options, tools)`，进程内加载，无 HTTP、无 SSE。
@@ -86,21 +90,23 @@ dsh plugin Config：engine `bundle`/`ffiLib`/`model`（v4，取代 `baseUrl`）�
 - CLI 映射与校验同 v1（`--type` 枚举、`score\tcontent` 无 id、空 content/非法 type/非零退出失败要响）。
 - autoInject 默认关闭；开启时 `agent/pre-step` 瀑布必须 `next()`，命中写入下一轮上下文。
 
-## 5. Sandbox 接入（CubeSandbox）
-- SDK：官方 `e2b` npm SDK 直连 CubeAPI；`Sandbox.create({ apiKey, timeoutMs, template, lifecycle:{onTimeout:'kill'} })`；每 create 一个独立 KVM MicroVM。
+## 5. Sandbox 接入（docker / kata / cubesandbox）
+- 后端由 `ARIA_SANDBOX_TYPE` 切换（默认 `docker`）：`docker` / `kata` 共用基于 OCI CLI（`docker`/`nerdctl`）的容器客户端；`cubesandbox` 走原 e2b/CubeAPI 路径。插件 `apply` 经 `getSandboxFactory` 选择工厂；`deps.factory` 注入优先（测试用），`cubesandbox` 用 `e2bSandboxFactory`，`docker`/`kata` 用 `createContainerSandboxFactory`。
+- docker/kata 容器后端：`create` 时 `cli create --rm=false [--runtime=R] -v <hostDir>:/workspace -w /workspace <image> tail -f /dev/null` 拉起常驻容器并解析 cid；命令走 `cli exec -w <cwd> <cid> sh -c "<command>"`（可选 `timeout` 包裹）；`kill` 走 `cli rm -f <cid>`。文件读写/列举/建目录直接操作宿主 `hostDir`（卷挂载即 `/workspace`，复用 §5.1 的 `/workspace` 路径校验与 0700 隔离），不走 `docker cp`/网络。kata 仅多一个 `--runtime` 标志。
+- SDK（cubesandbox）：官方 `e2b` npm SDK 直连 CubeAPI；`Sandbox.create({ apiKey, timeoutMs, template, lifecycle:{onTimeout:'kill'} })`；每 create 一个独立 KVM MicroVM。
 - 沙箱内工作目录固定 `/workspace`（envd :49983，模板 expose 49983/49999）。
-- 懒加载：首次工具调用才 create；同一工作空间复用同一 Sandbox；插件 `dispose` 时全部 `kill()`。
-- 依赖注入：`deps.factory`（默认 `e2bSandboxFactory`）、`deps.registry`（dsh `ctx.workspaceRegistry`，可选）、`deps.workspaceRoot` 均可注入，便于离线单测。
+- 懒加载：首次工具调用才 create；同一工作空间复用同一 Sandbox/容器；插件 `dispose` 时全部 `kill()`。
+- 依赖注入：`deps.factory`（默认按 `sandboxType` 选）、`deps.registry`（dsh `ctx.workspaceRegistry`，可选）、`deps.workspaceRoot` 均可注入，便于离线单测。容器命令执行经可注入 `ContainerExecutor`（`run(args)=>{stdout,stderr,exitCode}`），真实实现用 `node:child_process` spawn。
 
 ### 5.1 工作空间（每 agent 一个，隔离）
 - 工作空间 id 解析优先级：工具参数 `workspace` → 执行上下文 `sessionId` → 插件配置 → `default`；`normalizeWorkspaceId` 只保留 `[A-Za-z0-9._-]`，其余折叠为 `-`。
 - 宿主目录：`ARIA_WORKSPACE_ROOT/<workspaceId>/`，`mkdir 0700`，互不重叠。
 - 注册：`ctx.workspaceRegistry.create(fs.realpath(dir), title=workspaceId)` 持久化记录；registry 缺失/重复注册静默回退纯目录。
 - 隔离三层：
-  1. 沙箱层：每工作空间独立 KVM MicroVM（CubeSandbox 硬件隔离）；
+  1. 沙箱层：cubesandbox 每工作空间独立 KVM MicroVM；docker/kata 每工作空间一个独立容器（kata 为 VM 隔离容器，docker 为进程/命名空间隔离）；
   2. 宿主层：目录互不重叠 + `0700`；
   3. 工具层：`assertSandboxPath` 仅允许 `/workspace` 下绝对路径、拒绝 `..` 与越界；`syncToHost` 校验相对路径不逃逸。
-- 同步：`sync_to_host`（沙箱→宿主）、`sync_from_host`（宿主→沙箱，沙箱重建后恢复现场）、`workspace_status`（文件数/字节）。
+- 同步：`sync_to_host`（沙箱→宿主）、`sync_from_host`（宿主→沙箱，沙箱重建后恢复现场）、`workspace_status`（文件数/字节）。**docker/kata 后端因卷挂载实时同步，`sync_to_host`/`sync_from_host` 为 no-op（返回 `{synced:0}`），`syncAfterExec` 对该类后端无意义（忽略）。**
 
 ### 5.2 Tools
 `sandbox_exec`（默认 cwd `/workspace`）、`sandbox_read_file`、`sandbox_write_file`、`sandbox_list_files`、`sandbox_sync_to_host`、`sandbox_sync_from_host`、`workspace_status`。
@@ -189,7 +195,7 @@ Candidate ──Evaluate（当前 vs 候选，保留胜者）──► Commit（
 ## 8. 验收
 - `bun test` 全绿（shared + aria-engine + aria-memo + aria-sandbox + aria-reef，均为离线 mock）。
 - `bunx tsc --noEmit` 各插件 typecheck 全绿（根 `bun run typecheck`）。
-- sandbox 单测：7 工具注册；sessionId/显式 workspace 归因；同 id 复用沙箱、异 id 隔离；路径逃逸拒绝；create 失败包装 `SANDBOX`；registry 注册一次且容错；`syncAfterExec` 自动拉回；dispose kill；sync 双向 round-trip 与逃逸拒绝。
+- sandbox 单测：7 工具注册；sessionId/显式 workspace 归因；同 id 复用沙箱、异 id 隔离；路径逃逸拒绝；create 失败包装 `SANDBOX`；registry 注册一次且容错；`syncAfterExec` 自动拉回（cubesandbox）；dispose kill；sync 双向 round-trip 与逃逸拒绝；`ARIA_SANDBOX_TYPE` 默认 `docker`、非法值报错；容器后端 create 参数含卷挂载与 kata runtime、`exec` 返回 stdout/stderr/exitCode、文件走宿主 FS、kill 发 `rm -f`；容器后端 `sync_*` 退化为 no-op。
 - v3 tool-call 单测：`parseSseBody` 按 wire index 累积 tool-call（arguments 跨 delta 拼接）；文本+工具混合事件顺序；`chatStream` 请求体 `tools` 透传；`toDshChunks` 文本+工具混合时工具块 index=1（不冲突）；仅工具时工具块 index=0 且 `block-end` 为 canonical `id`；`openaiMessagesFrom` assistant tool-call / tool-result（含 `isError`）序列化；`serializeTools` 转换与空输入返回 undefined；端到端 SSE tool_calls → dsh 工具块。
 - 文档：配置表、`scripts/cube-sandbox-up.sh` 用法、限制（search 无 id；须先 `serve`；不接入 model；KVM 要求）。
 - v6 reef 单测（85 例，全离线）：config 环境变量与非法值回退；store 内存/文件 JSONL 往返 + 损坏行 `REEF_STORE`；serve hook 必 `next()`、持久化失败不打断、post-step 补全 outcome；反馈归一化（1..5）/三路来源/eligibility/rubric 幂等/`aria_reef_report` 四类参数校验/`aria_reef_status` 计数；评估 runner hints 覆盖、平局保留当前、runner 非有限值与抛错映射；recipe 门控、diff 生成、registry 选择；weight rollout 门槛、dataset+job 派发、`waitForJob` 失败码；artifact 版本递增/历史快照/LFS 属性/git 失败码/commit 无变更 `null`；surface 热更新读盘与降级；ariapin 客户端 multipart/契约键/终态轮询/超时/三类错误映射；插件：默认关闭零注册、启用注册 3 工具、完整 cycle 落版本并标记消费、`autoApply=off` 不发布、recipe 失败记 `error` 不中断。

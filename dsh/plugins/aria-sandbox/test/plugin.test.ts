@@ -184,11 +184,15 @@ describe("aria-sandbox plugin", () => {
     expect(counts.created).toBe(2);
   });
 
-  it("syncAfterExec pulls files back after exec", async () => {
+  it("syncAfterExec pulls files back after exec (cubesandbox)", async () => {
     root = makeTmpRoot();
     const blobs = new Map<string, string>();
     const { factory } = fakeFactory(blobs);
-    const ctx = buildCtx({ workspaceRoot: root, factory, config: { syncAfterExec: true } });
+    const ctx = buildCtx({
+      workspaceRoot: root,
+      factory,
+      config: { sandboxType: "cubesandbox", syncAfterExec: true },
+    });
     await tool(ctx, "sandbox_write_file").execute(
       { path: `${SANDBOX_WORKSPACE_DIR}/f.txt`, content: "hi" },
       { sessionId: "s1" },
@@ -266,6 +270,59 @@ describe("aria-sandbox plugin", () => {
 
   it("exports the real e2b factory", () => {
     expect(typeof e2bSandboxFactory.create).toBe("function");
+  });
+});
+
+describe("aria-sandbox backend selection", () => {
+  let root = "";
+  afterAll(async () => {
+    if (root) {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("builds a real container factory for the default docker backend without breaking registration", () => {
+    root = makeTmpRoot();
+    const ctx = buildCtx({ workspaceRoot: root });
+    expect(ctx.toolsList.length).toBe(7);
+  });
+
+  it("fails loudly on an invalid ARIA_SANDBOX_TYPE", () => {
+    root = makeTmpRoot();
+    let err: unknown;
+    try {
+      buildCtx({
+        workspaceRoot: root,
+        config: { sandboxType: "podman" as unknown as string },
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).code).toBe(ErrorCode.INVALID_PARAM);
+  });
+
+  it("sync tools are no-ops for container backends", async () => {
+    root = makeTmpRoot();
+    const { factory } = fakeFactory();
+    const ctx = buildCtx({ workspaceRoot: root, factory, config: { sandboxType: "docker" } });
+    const toHost = await tool(ctx, "sandbox_sync_to_host").execute({}, { sessionId: "s1" });
+    const fromHost = await tool(ctx, "sandbox_sync_from_host").execute({}, { sessionId: "s1" });
+    expect(toHost).toEqual({ synced: 0 });
+    expect(fromHost).toEqual({ synced: 0 });
+  });
+
+  it("cubesandbox backend still routes sync through the client", async () => {
+    root = makeTmpRoot();
+    const blobs = new Map<string, string>();
+    const { factory } = fakeFactory(blobs);
+    const ctx = buildCtx({ workspaceRoot: root, factory, config: { sandboxType: "cubesandbox" } });
+    await tool(ctx, "sandbox_write_file").execute(
+      { path: `${SANDBOX_WORKSPACE_DIR}/f.txt`, content: "hi" },
+      { sessionId: "s1" },
+    );
+    const res = await tool(ctx, "sandbox_sync_to_host").execute({}, { sessionId: "s1" });
+    expect((res as { synced: number }).synced).toBe(1);
   });
 });
 

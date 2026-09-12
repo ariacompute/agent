@@ -6,8 +6,9 @@ Out-of-tree integration of Aria components into **DeepSeek Harness (`dsh`)**.
 
 - **LLM backend**: `engine` in-process via the `aria-engine` plugin (`@ariacompute/engine-ts` FFI SDK).
 - **Context memory**: `memo` via the `aria-memo` plugin (tools `aria_memo_*`, optional `autoInject`).
-- **Agent sandbox**: [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) (E2B-compatible)
-  via the `aria-sandbox` plugin — each agent gets an isolated, persistent workspace.
+- **Agent sandbox**: the `aria-sandbox` plugin supports three switchable backends — `docker` (default),
+  `kata`, and `cubesandbox` ([CubeSandbox](https://github.com/TencentCloud/CubeSandbox), E2B-compatible) —
+  each agent gets an isolated, persistent workspace.
 - **Self-improvement**: `aria-reef` — a Reef-style loop that records every turn, binds feedback to it,
   evolves skills / prompts / rules (local engine FFI) or dispatches weight training (ariapin),
   keeps the winner, versions it in Git and hot-serves it back. **Off by default.**
@@ -21,7 +22,7 @@ dsh/plugins/
 ├── aria-memo/       aria_memo_add/search/get/list/forget + autoInject (off by default)
 ├── aria-sandbox/    sandbox_exec / sandbox_read_file / sandbox_write_file /
 │                    sandbox_list_files / sandbox_sync_to_host / sandbox_sync_from_host /
-│                    workspace_status  (CubeSandbox via e2b SDK)
+│                    workspace_status  (docker / kata / cubesandbox, default docker)
 └── aria-reef/       Serve (record_id) → Observe (report/outcome/rubric) →
                      Grow (skillclaw / prompt / rules / weight) →
                      Commit (git + LFS) → Surface (hot reload)
@@ -33,7 +34,9 @@ scripts/cube-sandbox-up.sh   one-shot local CubeSandbox bootstrap + template
 - [Bun](https://bun.com) >= 1.4 (`bun install` / `bun test` / `bunx tsc`).
 - `aria-engine` bundle at `ARIA_MODEL_BUNDLE` and native lib at `ARIA_FFI_LIB` (no HTTP server needed).
 - `aria-memo` CLI reachable at `ARIA_MEMO_BIN` (default `aria-memo`).
-- CubeSandbox: x86_64 Linux with KVM (`/dev/kvm`); see [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
+- Sandbox backends: `docker` by default (needs a working `docker`/`nerdctl` CLI); `kata` is the same
+  with VM-isolated containers; `cubesandbox` needs x86_64 Linux with KVM (`/dev/kvm`), see
+  [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
 
 ## Setup
 
@@ -50,23 +53,29 @@ export ARIA_FFI_LIB=/usr/lib/libaria_ffi.so
 bun dsh web --patch /absolute/path/to/agent/dsh/cordis.patch.yml
 ```
 
-Select provider route `aria`. The sandbox template id is read from `CUBE_TEMPLATE_ID`
-(env or `.env`); without it `sandbox_*` tools will fail loudly.
+Select provider route `aria`. The sandbox backend is chosen via `ARIA_SANDBOX_TYPE`
+(default `docker`; `kata` / `cubesandbox` also supported). For `cubesandbox`, the template id is read
+from `CUBE_TEMPLATE_ID` (env or `.env`); without it `sandbox_*` tools will fail loudly.
+For `docker`/`kata`, configure the image/CLI/runtime via `ARIA_SANDBOX_IMAGE` / `ARIA_SANDBOX_CLI` /
+`ARIA_SANDBOX_RUNTIME`.
 
 ## Workspaces (isolation)
 
 - Each agent session maps to one workspace id: tool arg `workspace` → `sessionId` → config → `default`.
 - Host dir: `$ARIA_WORKSPACE_ROOT/<workspaceId>/` (default `~/.ariacompute/agent/workspaces`, mode 0700).
 - Registered with dsh `ctx.workspaceRegistry` when available (falls back to plain dirs).
-- Isolation: one KVM MicroVM per workspace (CubeSandbox) + separate 0700 host dirs +
+- Isolation: `cubesandbox` uses one KVM MicroVM per workspace; `docker`/`kata` use one isolated
+  container per workspace (kata = VM-isolated) + separate 0700 host dirs +
   tool-level path checks (`/workspace` only, no `..` escapes).
-- Persistence: `sandbox_sync_to_host` / `sandbox_sync_from_host`; optional
-  `ARIA_WORKSPACE_SYNC_AFTER_EXEC=true` to auto-pull after every `sandbox_exec`.
+- Persistence: `sandbox_sync_to_host` / `sandbox_sync_from_host` (no-ops for `docker`/`kata` since the
+  workspace is a live bind-mount; only `cubesandbox` syncs over the network); optional
+  `ARIA_WORKSPACE_SYNC_AFTER_EXEC=true` to auto-pull after every `sandbox_exec` (cubesandbox).
 
 ## Configuration
 
 See `requirements.md` §2 for the full env table (`ARIA_MODEL_BUNDLE`, `ARIA_FFI_LIB`,
 `ARIA_ENGINE_MODEL`, `ARIA_MEMO_*`,
+`ARIA_SANDBOX_TYPE`, `ARIA_SANDBOX_IMAGE`, `ARIA_SANDBOX_CLI`, `ARIA_SANDBOX_RUNTIME`,
 `E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`, `E2B_TIMEOUT_MS`,
 `ARIA_WORKSPACE_ROOT`, `ARIA_WORKSPACE_SYNC_AFTER_EXEC`, `ARIA_WORKSPACE_ID`,
 `ARIA_REEF_*`).

@@ -28,12 +28,39 @@ export interface SandboxClient {
   };
 }
 
+/** Selectable sandbox backend. `cubesandbox` is the legacy e2b/CubeAPI path. */
+export type SandboxType = "docker" | "kata" | "cubesandbox";
+
+/**
+ * Pluggable executor for the OCI CLI (docker/nerdctl). Implemented over
+ * `child_process.spawn` in production and a fake in tests so the container
+ * backend stays fully offline-testable.
+ */
+export interface ContainerExecutor {
+  run(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+}
+
 export interface SandboxFactory {
-  create(options: {
-    apiKey?: string;
-    timeoutMs?: number;
-    template?: string;
-  }): Promise<SandboxClient>;
+  create(options: SandboxCreateOptions): Promise<SandboxClient>;
+}
+
+/**
+ * Superset of create options accepted by every backend. CubeSandbox ignores
+ * the container-only fields (hostDir/image/runtime/cli); the container backend
+ * ignores apiKey/template.
+ */
+export interface SandboxCreateOptions {
+  apiKey?: string;
+  timeoutMs?: number;
+  template?: string;
+  /** Host workspace dir mounted into the container at /workspace (docker/kata). */
+  hostDir?: string;
+  /** Container image (docker/kata). */
+  image?: string;
+  /** Container runtime; kata defaults to "kata" (docker/nerdctl --runtime). */
+  runtime?: string;
+  /** OCI CLI binary: "docker" | "nerdctl". */
+  cli?: string;
 }
 
 /** Duck-type of dsh ctx.workspaceRegistry (from @deepseek-ai/dsh-workspace). */

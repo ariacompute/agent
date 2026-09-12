@@ -14,7 +14,7 @@
 - `shared`：config / `AriaError` / spawn（原 aria-bridge 并入，非独立包）
 - `aria-engine`：`ctx.llm.registerAdapter(['aria'], …)` → `Engine` 进程内 FFI（`@ariacompute/engine-ts`，bundle + `libaria_ffi.so`）
 - `aria-memo`：tools `aria_memo_*` + 可选 `agent/pre-step` autoInject（默认关闭）
-- `aria-sandbox`：e2b SDK 直连 CubeAPI；tools `sandbox_*` + `workspace_status`；隔离持久化工作空间
+- `aria-sandbox`：可切换沙盒后端（docker / kata / cubesandbox，默认 docker）；tools `sandbox_*` + `workspace_status`；隔离持久化工作空间（docker/kata 卷挂载宿主工作空间）
 - `aria-reef`（默认关闭）：
   - **Serve** `record.ts`：`agent/pre-step` 签发 `record_id` 并异步落库（detached，失败只记日志）
   - **Observe** `feedback.ts`：`aria_reef_report` + 任务结果信号 + 确定性 rubric + eligibility 门控
@@ -49,8 +49,9 @@
 Spec 见 `requirements.md`（v6：aria-reef 自我改进闭环；v6+：ariapin 权重重载接口 + 定时自动 cycle），清单见 `task.md`（第 28–43 项）。
 
 ## 注意事项
-- 黄金路径：设置 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` → adapter 进程内 `Engine.complete` 出流；memo CLI add → search；CubeSandbox 就绪（`E2B_API_URL`/`CUBE_TEMPLATE_ID`）→ `sandbox_exec`。
-- `E2B_API_URL` 默认 `http://127.0.0.1:3000`（CubeAPI）；模板须先建（`cubemastercli tpl create-from-image`）。
+- 黄金路径：设置 `ARIA_MODEL_BUNDLE` + `ARIA_FFI_LIB` → adapter 进程内 `Engine.complete` 出流；memo CLI add → search；沙盒就绪（默认 docker：`docker` 可用；cubesandbox 需 `E2B_API_URL`/`CUBE_TEMPLATE_ID`）→ `sandbox_exec`。
+- 沙盒后端由 `ARIA_SANDBOX_TYPE` 切换，默认 `docker`（`kata`/`cubesandbox` 也支持）；docker/kata 将宿主工作空间卷挂载进容器 `/workspace`（文件走宿主 FS、命令走 `docker exec`），`sync_*` 工具对该类后端为 no-op；继续使用 CubeSandbox 须显式 `ARIA_SANDBOX_TYPE=cubesandbox`。
+- `E2B_API_URL` 默认 `http://127.0.0.1:3000`（CubeAPI，仅 cubesandbox 后端）；模板须先建（`cubemastercli tpl create-from-image`）。
 - 网络：GitHub/registry 直连失败时 `export https_proxy=http://127.0.0.1:7897`。
 - memo search stdout 无 id（`score\tcontent`）；`ARIA_MEMO_DB` 默认 `~/.ariacompute/memo.db`。
 - reef 默认 `ARIA_REEF_ENABLED=off`（零注册）；开启后 `record_id` 以 `reef.recordId` 回传，存储 `ARIA_REEF_STORE_DIR`、产物仓库 `ARIA_REEF_ARTIFACT_REPO`（仅本地 Git，不推远端、不动主仓）。
