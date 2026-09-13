@@ -2,7 +2,8 @@
 //!
 //! It wraps the codex harness-style agent loop and guarantees the **memo
 //! contract**: every [`Agent::run`] first [`recall`](agent_memo::MemoStore::recall)s
-//! context from memo, then after producing a reply [`memorize`](agent_memo::MemoStore::memorize)s
+//! context from memo (now vector/semantic recall — see `agent_memo::embed`), then
+//! after producing a reply [`memorize`](agent_memo::MemoStore::memorize)s
 //! both the user turn and the assistant reply. Tool execution is isolated in a
 //! [`Sandbox`](agent_sandbox::Sandbox).
 //!

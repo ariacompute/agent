@@ -62,7 +62,8 @@ pub struct ContextFragment {
     pub content: String,
     /// Unix epoch milliseconds.
     pub created_at: i64,
-    /// Optional dense vector for semantic recall (left empty in the local impl).
+    /// Optional dense vector for semantic (vector) recall. Populated by the
+    /// local [`embed::LocalEmbedder`] when a fragment is memorized without one.
     pub embedding: Option<Vec<f32>>,
 }
 
@@ -118,6 +119,8 @@ pub enum MemoError {
     Serialization(#[from] serde_json::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }
 
 /// The unified context-memory contract. Everything that needs conversational
@@ -138,9 +141,11 @@ pub trait MemoStore: Send + Sync {
     ) -> Result<Option<ContextFragment>, MemoError>;
 }
 
-/// sled-backed implementation. Self-contained, no Postgres.
+/// sled-backed implementation. Self-contained, no Postgres. Uses a local
+/// [`embed::LocalEmbedder`] to compute dense vectors for semantic (vector) recall.
 pub struct SledMemoStore {
     fragments: sled::Tree,
+    embedder: Arc<dyn embed::Embedder>,
 }
 
 impl SledMemoStore {
@@ -150,7 +155,10 @@ impl SledMemoStore {
         let fragments = db
             .open_tree("fragments")
             .map_err(|e| MemoError::Storage(e.to_string()))?;
-        Ok(Arc::new(Self { fragments }))
+        Ok(Arc::new(Self {
+            fragments,
+            embedder: Arc::new(embed::LocalEmbedder::new(64)),
+        }))
     }
 
     /// In-memory variant (handy for tests and for the SDK default).
@@ -162,13 +170,22 @@ impl SledMemoStore {
         let fragments = db
             .open_tree("fragments")
             .map_err(|e| MemoError::Storage(e.to_string()))?;
-        Ok(Arc::new(Self { fragments }))
+        Ok(Arc::new(Self {
+            fragments,
+            embedder: Arc::new(embed::LocalEmbedder::new(64)),
+        }))
     }
 }
 
 #[async_trait]
 impl MemoStore for SledMemoStore {
-    async fn memorize(&self, frag: ContextFragment) -> Result<(), MemoError> {
+    async fn memorize(&self, mut frag: ContextFragment) -> Result<(), MemoError> {
+        // Compute a dense vector for semantic recall when one isn't supplied.
+        if frag.embedding.is_none() && !frag.content.trim().is_empty() {
+            if let Ok(v) = self.embedder.embed(&frag.content) {
+                frag.embedding = Some(v);
+            }
+        }
         let key = frag.id.as_bytes().to_vec();
         let value = serde_json::to_vec(&frag)?;
         self.fragments
@@ -179,6 +196,12 @@ impl MemoStore for SledMemoStore {
 
     async fn recall(&self, query: &RecallQuery) -> Result<Vec<ContextFragment>, MemoError> {
         let q = query.text.to_lowercase();
+        // Query vector for semantic (vector) recall; None when empty/unsupported.
+        let q_emb = if q.trim().is_empty() {
+            None
+        } else {
+            self.embedder.embed(&query.text).ok()
+        };
         let mut scored: Vec<(f32, ContextFragment)> = Vec::new();
         for item in self.fragments.iter() {
             let (_k, v) = item.map_err(|e| MemoError::Storage(e.to_string()))?;
@@ -194,9 +217,9 @@ impl MemoStore for SledMemoStore {
             // Keyword + length-weighted relevance (embeddings are optional).
             // An exact key match scores highest; otherwise we fall back to
             // substring/keyword matching against the content.
-            let mut score = 0.0f32;
+            let mut kw = 0.0f32;
             if frag.key.as_deref() == Some(query.text.as_str()) {
-                score = 1.0;
+                kw = 1.0;
             }
             let hay = frag.content.to_lowercase();
             if hay.contains(&q) {
@@ -204,8 +227,17 @@ impl MemoStore for SledMemoStore {
                     .split_whitespace()
                     .filter(|w| !w.is_empty() && hay.contains(*w))
                     .count() as f32;
-                score = score.max(hits / (hay.len() as f32).max(1.0).log10());
+                kw = kw.max(hits / (hay.len() as f32).max(1.0).log10());
             }
+            // Blend semantic (vector) similarity with the keyword score.
+            // Pure keyword when a vector isn't available on either side.
+            let score = match (&q_emb, &frag.embedding) {
+                (Some(a), Some(b)) => match embed::cosine(a, b) {
+                    Some(v) => 0.7 * v + 0.3 * kw,
+                    None => kw,
+                },
+                _ => kw,
+            };
             if score > 0.0 {
                 scored.push((score, frag));
             }
@@ -256,6 +288,139 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Local lightweight embedding + cosine similarity for vector recall.
+///
+/// Uses the hashing trick (word 1~2-grams + char 2-grams via FNV-1a) into a
+/// fixed-dim vector, TF-normalized then L2-normalized — the same approach as
+/// the `memo` product's `memo-embed::LocalEmbedder`. Zero external/ML deps.
+pub mod embed {
+    use super::MemoError;
+    use std::collections::HashMap;
+
+    /// Text embedding seam for the local memo store.
+    pub trait Embedder: Send + Sync {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, MemoError>;
+        fn dim(&self) -> usize;
+    }
+
+    /// Hashing-trick local embedder.
+    pub struct LocalEmbedder {
+        dim: usize,
+    }
+
+    impl LocalEmbedder {
+        pub fn new(dim: usize) -> Self {
+            Self { dim: dim.max(1) }
+        }
+
+        fn vectorize(&self, text: &str) -> Result<Vec<f32>, MemoError> {
+            let toks = tokenize(text);
+            if toks.is_empty() {
+                return Err(MemoError::Embedding("empty embedding text".into()));
+            }
+            let mut vec = vec![0.0f32; self.dim];
+            let mut counts: HashMap<usize, f32> = HashMap::new();
+            for t in &toks {
+                let h = hash_dim(t, self.dim);
+                *counts.entry(h).or_insert(0.0) += 1.0;
+            }
+            let max = counts.values().cloned().fold(1.0f32, f32::max);
+            for (h, c) in counts {
+                vec[h] = (c / max).sqrt();
+            }
+            let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm == 0.0 {
+                return Err(MemoError::Embedding("zero-magnitude vector".into()));
+            }
+            for v in vec.iter_mut() {
+                *v /= norm;
+            }
+            Ok(vec)
+        }
+    }
+
+    impl Embedder for LocalEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, MemoError> {
+            self.vectorize(text)
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+    }
+
+    /// Cosine similarity; `None` on empty/mismatched dims.
+    pub fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
+        if a.is_empty() || b.is_empty() || a.len() != b.len() {
+            return None;
+        }
+        let dot = a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 {
+            return Some(0.0);
+        }
+        Some(dot / (na * nb))
+    }
+
+    fn tokenize(text: &str) -> Vec<String> {
+        let lower = text.to_lowercase();
+        let mut toks: Vec<String> = Vec::new();
+        let words: Vec<&str> = lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        for w in &words {
+            toks.push((*w).to_string());
+        }
+        for pair in words.windows(2) {
+            toks.push(format!("{} {}", pair[0], pair[1]));
+        }
+        let chars: Vec<char> = lower.chars().filter(|c| c.is_alphanumeric()).collect();
+        for pair in chars.windows(2) {
+            toks.push(pair.iter().collect());
+        }
+        toks
+    }
+
+    fn hash_dim(s: &str, dim: usize) -> usize {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in s.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        (h as usize) % dim
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn similar_text_close_vectors() {
+            let e = LocalEmbedder::new(64);
+            let a = e.embed("user prefers rust programming language").unwrap();
+            let b = e.embed("user likes rust programming language").unwrap();
+            let c = e.embed("banana smoothie recipe with ice").unwrap();
+            assert!(cosine(&a, &b).unwrap() > cosine(&a, &c).unwrap());
+        }
+
+        #[test]
+        fn deterministic_and_dim() {
+            let e = LocalEmbedder::new(64);
+            let a = e.embed("the quick brown fox").unwrap();
+            let b = e.embed("the quick brown fox").unwrap();
+            assert_eq!(a.len(), 64);
+            assert_eq!(a, b);
+        }
+
+        #[test]
+        fn empty_text_is_error() {
+            let e = LocalEmbedder::new(64);
+            assert!(e.embed("   ").is_err());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +451,25 @@ mod tests {
             .unwrap();
         let c = store.compact("s2").await.unwrap();
         assert!(c.content.contains("a") && c.content.contains("b"));
+    }
+
+    #[tokio::test]
+    async fn vector_recall_prefers_similar() {
+        let store = SledMemoStore::memory().unwrap();
+        // Memorize without an explicit embedding; the store computes it.
+        let rust = ContextFragment::new("s3", FragmentKind::Message, "user prefers rust for systems programming");
+        let food = ContextFragment::new("s3", FragmentKind::Message, "banana smoothie recipe with ice");
+        store.memorize(rust).await.unwrap();
+        store.memorize(food).await.unwrap();
+
+        let frags = store
+            .recall(&RecallQuery::new("s3", "rust programming language"))
+            .await
+            .unwrap();
+        assert!(!frags.is_empty());
+        // The semantically closer rust memory must rank first.
+        assert!(frags[0].content.contains("rust"));
+        // Fragments are persisted with their dense vectors.
+        assert!(frags[0].embedding.is_some());
     }
 }
