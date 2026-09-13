@@ -13,6 +13,14 @@ build:
 test:
     cargo test --workspace
 
+# Run only the agent-reef self-improvement crate tests.
+reef-test:
+    cargo test -p agent-reef
+
+# Coverage hint (needs cargo-llvm-cov or cargo-tarpaulin installed).
+cov:
+    cargo llvm-cov --workspace --lcov --output-path lcov.info || cargo tarpaulin --workspace --out Xml
+
 # Generate UniFFI bindings for Swift and Kotlin from the agent-sdk crate.
 ffi:
     cargo build -p agent-sdk

@@ -6,6 +6,7 @@ members = [
     "crates/agent-core",
     "crates/agent-sdk",
     "crates/agent-cloud",
+    "crates/agent-reef",
     "crates/agent-ffigen",
     "tests",
 ]
@@ -35,6 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 agent-memo = { path = "crates/agent-memo" }
 agent-sandbox = { path = "crates/agent-sandbox" }
 agent-core = { path = "crates/agent-core" }
+agent-reef = { path = "crates/agent-reef" }
 
 [profile.release]
 opt-level = 2

@@ -426,7 +426,10 @@ mod tests {
 
     #[test]
     fn provider_parse_is_case_insensitive_and_rejects_unknown() {
-        assert_eq!(SandboxProvider::parse("DOCKER"), Some(SandboxProvider::Docker));
+        assert_eq!(
+            SandboxProvider::parse("DOCKER"),
+            Some(SandboxProvider::Docker)
+        );
         assert_eq!(SandboxProvider::parse("Kata"), Some(SandboxProvider::Kata));
         assert_eq!(SandboxProvider::parse("podman"), None);
         assert_eq!(SandboxProvider::parse(""), None);

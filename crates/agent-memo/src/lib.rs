@@ -457,8 +457,16 @@ mod tests {
     async fn vector_recall_prefers_similar() {
         let store = SledMemoStore::memory().unwrap();
         // Memorize without an explicit embedding; the store computes it.
-        let rust = ContextFragment::new("s3", FragmentKind::Message, "user prefers rust for systems programming");
-        let food = ContextFragment::new("s3", FragmentKind::Message, "banana smoothie recipe with ice");
+        let rust = ContextFragment::new(
+            "s3",
+            FragmentKind::Message,
+            "user prefers rust for systems programming",
+        );
+        let food = ContextFragment::new(
+            "s3",
+            FragmentKind::Message,
+            "banana smoothie recipe with ice",
+        );
         store.memorize(rust).await.unwrap();
         store.memorize(food).await.unwrap();
 
