@@ -7,7 +7,10 @@ cloud API plus native (Swift/Kotlin) SDKs.
 
 * `crates/agent-memo`, `agent-sandbox`, `agent-core`, `agent-sdk`,
   `agent-cloud`, `agent-reef`, `agent-ffigen`
-* `bindings/swift`, `bindings/kotlin` (generated; do not edit by hand)
+* `bindings/swift` (`Package.swift` SwiftPM + `AgentSDK.podspec` CocoaPods),
+  `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
+  Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
+  regenerate via `just ffi`; the podspec and Gradle publishing config are hand-maintained.
 * `codex/` is a **git submodule** (do not add it to the Cargo workspace).
 
 ## Rules
@@ -47,6 +50,18 @@ cloud API plus native (Swift/Kotlin) SDKs.
    `docs/adr/0006-reef-self-improvement.md`. Cloud routes: `POST /reef/report`,
    `POST /reef/evolve`, `GET /reef/versions`.
 
+9. **Releases & publishing.** On `release: created`, `.github/workflows/release.yml`
+   builds/tests/packages the `agent-cloud` binary and `agent-sdk` FFI cdylib across
+   linux-x86_64 / windows-x86_64 / linux-arm64 / macos and uploads them to the GitHub
+   Release (`secrets.ARIACOMPUTE_TOKEN`). Its `publish-packages` job is fail-pass
+   (`continue-on-error: true`) and only stubs language-package publishing so it never
+   blocks the CLI/FFI assets. Real publishes run in separate workflows:
+   `publish-cargo.yml` (crates.io: `agent-memo` → `agent-sandbox` → `agent-core` →
+   `agent-sdk`, topological order, `secrets.CARGO_REGISTRY_TOKEN`) and `publish-maven.yml`
+   (Maven Central `com.ariacompute:agent-sdk` via vanniktech, `secrets.SONATYPE_*` +
+   `secrets.GPG_*`). `agent-cloud` (CLI) and `agent-ffigen` (`publish = false`) are NOT
+   published to crates.io.
+
 ## Common commands
 
 * `just build` — build all crates
@@ -56,3 +71,6 @@ cloud API plus native (Swift/Kotlin) SDKs.
 * `just ffi` — regenerate Swift/Kotlin bindings
 * `just cloud` — run the cloud service
 * `just fmt` / `just lint` — formatting and clippy
+* Release & publish: see `.github/workflows/release.yml` (assets),
+  `publish-cargo.yml` (crates.io), `publish-maven.yml` (Maven Central); Swift also
+  via CocoaPods `bindings/swift/AgentSDK.podspec`.

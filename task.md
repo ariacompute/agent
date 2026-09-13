@@ -53,6 +53,25 @@
 - [x] Cross-crate integration test `tests/integration.rs` (no API key / Postgres);
       `cargo test --workspace`, clippy `-D warnings`, fmt all green.
 
+## Milestone 8 — Release & publishing workflows
+- [x] `.github/workflows/release.yml`: on `release: created`, build/test/`clippy` and
+      package the `agent-cloud` binary + `agent-sdk` FFI cdylib (`libagent_sdk`) across
+      linux-x86_64 / windows-x86_64 / linux-arm64 / macos; embed release tag via
+      `ARIA_AGENT_VERSION`; upload assets with `softprops/action-gh-release`
+      (`secrets.ARIACOMPUTE_TOKEN`).
+- [x] `release.yml` `publish-packages` job: fail-pass (`continue-on-error: true`),
+      stubs crates.io / CocoaPods Swift (`bindings/swift/AgentSDK.podspec`) / Maven
+      Central so language packages never block CLI/FFI assets.
+- [x] `.github/workflows/publish-cargo.yml`: topological crates.io publish of
+      `agent-memo` → `agent-sandbox` → `agent-core` → `agent-sdk` with version
+      injection + registry-lag/429 retries (`secrets.CARGO_REGISTRY_TOKEN`).
+- [x] `.github/workflows/publish-maven.yml`: publish the Kotlin/Android binding to
+      Maven Central via vanniktech (`secrets.SONATYPE_*` + `secrets.GPG_*`).
+- [x] `bindings/kotlin/agent-sdk/build.gradle.kts`: apply `com.vanniktech.maven.publish`
+      with `publishToMavenCentral(CENTRAL_PORTAL, automaticRelease)` +
+      `signAllPublications()` + in-memory GPG signing.
+- [x] `bindings/swift/AgentSDK.podspec`: CocoaPods spec wrapping `libagent_sdk` for Swift.
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.

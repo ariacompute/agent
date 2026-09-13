@@ -72,3 +72,26 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 * Records / feedback / versions live in **local sled + `.reef/`** — never in
   memo (context store) nor Postgres (metadata only). See
   `docs/adr/0006-reef-self-improvement.md`.
+
+## 7. Release & publishing
+* On `release: created`, `.github/workflows/release.yml` builds, tests, and packages
+  the `agent-cloud` binary and the `agent-sdk` FFI cdylib (`libagent_sdk`) across
+  linux-x86_64 / windows-x86_64 / linux-arm64 / macos, injects the release tag (sans
+  leading `v`) via `ARIA_AGENT_VERSION`, and uploads the archives to the GitHub Release
+  (`secrets.ARIACOMPUTE_TOKEN`). `agent-cloud` is the CLI/cloud binary (GitHub Release
+  asset, not on crates.io); `agent-ffigen` is `publish = false`.
+* Language-package publishing is a **fail-pass** `publish-packages` job
+  (`continue-on-error: true`) that only stubs crates.io / CocoaPods Swift /
+  Maven Central so it can never block the CLI/FFI assets.
+* `publish-cargo.yml` publishes to crates.io in topological order:
+  `agent-memo` → `agent-sandbox` → `agent-core` → `agent-sdk`, with version injection
+  into the workspace `Cargo.toml` and retries for registry lag / HTTP 429
+  (`secrets.CARGO_REGISTRY_TOKEN`).
+* `publish-maven.yml` publishes the Kotlin/Android binding to Maven Central
+  (`com.ariacompute:agent-sdk`) via the vanniktech plugin
+  (`bindings/kotlin/agent-sdk/build.gradle.kts`): `publishToMavenCentral` +
+  `signAllPublications()`, using `secrets.SONATYPE_USERNAME` / `SONATYPE_PASSWORD` and
+  `secrets.GPG_PRIVATE_KEY` / `GPG_PASSPHRASE`.
+* Swift is published via CocoaPods from `bindings/swift/AgentSDK.podspec`
+  (`pod trunk push`; `secrets.COCOAPODS_TRUNK_TOKEN`), wrapping the native
+  `libagent_sdk.a` built by `cargo build -p agent-sdk`.
