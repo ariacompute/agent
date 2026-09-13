@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-memo",
+    "crates/agent-sandbox",
+    "crates/agent-core",
+    "crates/agent-sdk",
+    "crates/agent-cloud",
+    "crates/agent-ffigen",
+    "tests",
+]
+
+# codex is consumed as a git submodule (see .gitmodules). We intentionally do
+# NOT pull codex-rs into this workspace as a member; our crates reference the
+# codex harness/sandbox/memories through the documented integration seam in
+# `agent-core` / `agent-sandbox` / `agent-memo` (see docs/adr/*).
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/openai/codex"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Cross-cutting crates (path deps within this workspace)
+agent-memo = { path = "crates/agent-memo" }
+agent-sandbox = { path = "crates/agent-sandbox" }
+agent-core = { path = "crates/agent-core" }
+
+[profile.release]
+opt-level = 2

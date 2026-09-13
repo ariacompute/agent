@@ -1,0 +1,23 @@
+[package]
+name = "agent-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agents Cloud API: axum + Postgres (metadata only) + OpenAI Agents API. Context comes from memo."
+
+[[bin]]
+name = "agent-cloud"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+axum = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures = "0.3"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+agent-core = { workspace = true, features = ["openai"] }
+agent-memo.workspace = true

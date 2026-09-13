@@ -1,0 +1,20 @@
+[package]
+name = "agent-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Cross-crate integration tests (memo / sandbox / core / cloud contract)."
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "integration"
+path = "integration.rs"
+
+[dev-dependencies]
+agent-memo.workspace = true
+agent-sandbox.workspace = true
+agent-core.workspace = true
+tokio.workspace = true

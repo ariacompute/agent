@@ -1,0 +1,16 @@
+[package]
+name = "agent-ffigen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Helper that generates Swift/Kotlin UniFFI bindings from the agent-sdk cdylib (matches uniffi 0.28.3)."
+
+[[bin]]
+name = "agent-ffigen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi_bindgen = "=0.28.3"
+camino = "1"
+anyhow = "1"

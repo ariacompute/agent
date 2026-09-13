@@ -1,0 +1,23 @@
+[package]
+name = "agent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified agent runtime: wraps the codex harness loop, injects memo context, isolates tools in a sandbox."
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+agent-memo.workspace = true
+agent-sandbox.workspace = true
+async-openai = { version = "0.24", optional = true }
+
+[features]
+default = []
+# Wire real OpenAI calls (Responses/Chat API) instead of the built-in stub model.
+openai = ["dep:async-openai"]

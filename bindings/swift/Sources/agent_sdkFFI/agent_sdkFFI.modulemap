@@ -1,0 +1,4 @@
+module agent_sdkFFI {
+    header "agent_sdkFFI.h"
+    export *
+}

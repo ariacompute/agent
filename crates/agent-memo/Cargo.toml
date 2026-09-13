@@ -1,0 +1,15 @@
+[package]
+name = "agent-memo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified context-memory (memo) store for the agent platform. Local/embedded storage, NOT Postgres."
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+sled = "0.34"

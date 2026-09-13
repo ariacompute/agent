@@ -1,0 +1,22 @@
+[package]
+name = "agent-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UniFFI FFI surface for the agent platform (Swift / Kotlin bindings)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+uniffi = "0.28"
+tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+agent-core = { workspace = true, features = ["openai"] }
+agent-memo.workspace = true
+
+[features]
+default = ["openai"]
+# Wire real OpenAI calls in the SDK agent runtime.
+openai = ["agent-core/openai"]
