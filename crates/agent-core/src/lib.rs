@@ -13,6 +13,7 @@
 use agent_memo::{ContextFragment, FragmentKind, MemoStore, RecallQuery, SledMemoStore};
 use agent_sandbox::{default_sandbox, Sandbox, SandboxProvider};
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -46,7 +47,19 @@ pub struct ModelResponse {
 /// LLM access seam. Implement this to plug in any backend.
 #[async_trait]
 pub trait ModelClient: Send + Sync {
+    /// Produce a complete reply in one shot.
     async fn complete(&self, req: &ModelRequest) -> Result<ModelResponse, CoreError>;
+
+    /// Stream the reply as a sequence of tokens. The default implementation
+    /// yields the full [`ModelResponse::text`] as a single chunk, so backends
+    /// that only support non-streaming calls work unchanged.
+    async fn stream(
+        &self,
+        req: &ModelRequest,
+    ) -> Result<BoxStream<'static, Result<String, CoreError>>, CoreError> {
+        let resp = self.complete(req).await?;
+        Ok(Box::pin(futures::stream::once(async move { Ok(resp.text) })))
+    }
 }
 
 /// Deterministic stand-in used when no API key / `openai` feature is present.
@@ -142,6 +155,59 @@ mod openai_impl {
                 .and_then(|c| c.message.content.clone())
                 .unwrap_or_default();
             Ok(ModelResponse { text })
+        }
+
+        async fn stream(
+            &self,
+            req: &ModelRequest,
+        ) -> Result<BoxStream<'static, Result<String, CoreError>>, CoreError> {
+            use async_openai::types::CreateChatCompletionRequestArgs;
+            use futures::StreamExt as _;
+            let messages = vec![
+                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                    content: req.system.clone().into(),
+                    ..Default::default()
+                }),
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(format!(
+                        "{}\n\nUSER: {}",
+                        req.context, req.input
+                    )),
+                    ..Default::default()
+                }),
+            ];
+            let request = CreateChatCompletionRequestArgs::default()
+                .model(self.model.clone())
+                .messages(messages)
+                .stream(true)
+                .build()
+                .map_err(|e| CoreError::Model(e.to_string()))?;
+            let client = self.client.clone();
+            let s = async_stream::stream! {
+                let mut stream = match client.chat().create_stream(request).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        yield Err(CoreError::Model(e.to_string()));
+                        return;
+                    }
+                };
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(resp) => {
+                            if let Some(tok) = resp
+                                .choices
+                                .into_iter()
+                                .next()
+                                .and_then(|c| c.delta.content)
+                            {
+                                yield Ok(tok);
+                            }
+                        }
+                        Err(e) => yield Err(CoreError::Model(e.to_string())),
+                    }
+                }
+            };
+            Ok(Box::pin(s))
         }
     }
 }
@@ -278,6 +344,68 @@ impl Agent {
             ))
             .await?;
         Ok(captured)
+    }
+
+    /// Stream one turn token-by-token. Mirrors [`Agent::run`] for the memo
+    /// contract (recall before / persist both turns after) but emits model
+    /// tokens as they arrive. The returned stream is `'static` and owns its
+    /// memo handle and model client, so the [`Agent`] may be dropped.
+    pub async fn run_stream(
+        &self,
+        input: &str,
+    ) -> Result<BoxStream<'static, Result<String, CoreError>>, CoreError> {
+        // 1) recall context from memo (the ONLY context source)
+        let fragments = self
+            .memo
+            .recall(&RecallQuery::new(&self.config.session, input))
+            .await?;
+        let context = fragments
+            .iter()
+            .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // 2) persist the user turn
+        self.memo
+            .memorize(ContextFragment::new(
+                &self.config.session,
+                FragmentKind::Message,
+                input,
+            ))
+            .await?;
+
+        // 3) call the model (streaming). The returned stream is owned / 'static.
+        let req = ModelRequest {
+            system: format!("You are {}.", self.config.agent_name),
+            context,
+            input: input.to_string(),
+        };
+        let upstream = self.model.stream(&req).await?;
+
+        // 4) wrap so we can collect + persist the assistant reply at the end.
+        let memo = self.memo.clone();
+        let session = self.config.session.clone();
+        let wrapped = async_stream::stream! {
+            let mut collected = String::new();
+            let mut upstream = upstream;
+            while let Some(item) = upstream.next().await {
+                match item {
+                    Ok(tok) => {
+                        collected.push_str(&tok);
+                        yield Ok(tok);
+                    }
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
+            // persist the assistant reply as a single memo fragment
+            let _ = memo
+                .memorize(ContextFragment::new(&session, FragmentKind::Message, collected))
+                .await;
+        };
+        Ok(Box::pin(wrapped))
     }
 }
 

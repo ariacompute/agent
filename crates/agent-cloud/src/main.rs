@@ -10,15 +10,19 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use agent_core::{Agent, AgentConfig, OpenAiModel};
+use agent_core::{Agent, AgentConfig, CoreError, OpenAiModel};
 use agent_memo::{MemoStore, SledMemoStore};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::Event;
 use axum::response::{sse::Sse, IntoResponse, Response};
+use axum::extract::Request;
+use axum::middleware::{from_fn_with_state, Next};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream;
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Executor;
@@ -82,6 +86,50 @@ impl IntoResponse for AppError {
     }
 }
 
+/// One streamed token, serialized into an SSE `data:` frame.
+#[derive(Serialize)]
+struct StreamToken {
+    token: String,
+}
+
+/// Bearer / ApiKey auth gate.
+///
+/// Reads `AGENT_CLOUD_API_KEY` from the environment. When it is set (non-empty)
+/// every request must carry a matching `Authorization: Bearer <key>` or
+/// `Authorization: ApiKey <key>` header, otherwise `401` is returned. When the
+/// env var is absent the service runs open (dev convenience).
+async fn require_auth(State(_state): State<AppState>, req: Request, next: Next) -> Result<Response, StatusCode> {
+    let expected = match std::env::var("AGENT_CLOUD_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => return Ok(next.run(req).await),
+    };
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let ok = presented.strip_prefix("Bearer ").or_else(|| presented.strip_prefix("ApiKey "))
+        .map(|tok| tok.trim() == expected)
+        .unwrap_or(false);
+    if !ok {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
+}
+
+/// Build an [`Agent`] for the given run body (resolves the agent name from the
+/// Postgres metadata store and wires the OpenAI model + memo context).
+async fn build_agent(state: &AppState, body: &RunBody) -> Result<Agent, AppError> {
+    let name = agent_name(state, &body.agent_id).await?;
+    let cfg = agent_config(&name, &body.session);
+    Agent::with_model(
+        cfg,
+        Box::new(OpenAiModel::new(DEFAULT_MODEL)),
+        state.memo.clone(),
+    )
+    .map_err(AppError::Core)
+}
+
 async fn create_agent(
     State(state): State<AppState>,
     Json(body): Json<CreateAgentBody>,
@@ -119,14 +167,7 @@ async fn run_agent(
     State(state): State<AppState>,
     Json(body): Json<RunBody>,
 ) -> Result<Json<RunRecord>, AppError> {
-    let name = agent_name(&state, &body.agent_id).await?;
-    let cfg = agent_config(&name, &body.session);
-    let agent = Agent::with_model(
-        cfg,
-        Box::new(OpenAiModel::new(DEFAULT_MODEL)),
-        state.memo.clone(),
-    )
-    .map_err(AppError::Core)?;
+    let agent = build_agent(&state, &body).await?;
     let output = agent.run(&body.input).await.map_err(AppError::Core)?;
     let run_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
@@ -151,34 +192,36 @@ async fn run_agent(
 async fn run_agent_stream(
     State(state): State<AppState>,
     Json(body): Json<RunBody>,
-) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let result = (async {
-        let name = agent_name(&state, &body.agent_id)
-            .await
-            .map_err(|e| match e {
-                AppError::Db(d) => d.to_string(),
-                AppError::Core(c) => c.to_string(),
-                AppError::NotFound => "agent not found".into(),
-            })?;
-        let cfg = agent_config(&name, &body.session);
-        let agent = Agent::with_model(
-            cfg,
-            Box::new(OpenAiModel::new(DEFAULT_MODEL)),
-            state.memo.clone(),
-        )
-        .map_err(|e| e.to_string())?;
-        agent.run(&body.input).await.map_err(|e| e.to_string())
-    })
-    .await;
+) -> Sse<BoxStream<'static, Result<Event, Infallible>>> {
+    // Build the agent (resolves name + memo) before streaming.
+    let built = build_agent(&state, &body).await;
+    let token_stream = match built {
+        Ok(agent) => agent.run_stream(&body.input).await,
+        Err(e) => Err(CoreError::Model(match e {
+            AppError::Db(d) => format!("db: {d}"),
+            AppError::Core(c) => format!("core: {c}"),
+            AppError::NotFound => "agent not found".to_string(),
+        })),
+    };
 
-    match result {
-        Ok(output) => Sse::new(stream::iter(vec![
-            Ok(Event::default().data(output)),
-            Ok(Event::default().data("[DONE]")),
-        ])),
-        Err(e) => Sse::new(stream::iter(vec![Ok(
+    match token_stream {
+        Ok(tokens) => {
+            // Map each model token to an SSE frame; terminate with `[DONE]`.
+            let sse = tokens
+                .map(|res| {
+                    Ok::<Event, Infallible>(match res {
+                        Ok(token) => Event::default()
+                            .json_data(StreamToken { token })
+                            .unwrap_or_else(|_| Event::default().data("[encode-error]")),
+                        Err(e) => Event::default().data(format!("error: {e}")),
+                    })
+                })
+                .chain(stream::once(async { Ok(Event::default().data("[DONE]")) }));
+            Sse::new(Box::pin(sse))
+        }
+        Err(e) => Sse::new(Box::pin(stream::iter(vec![Ok(
             Event::default().data(format!("error: {e}"))
-        )])),
+        )]))),
     }
 }
 
@@ -245,7 +288,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/agents/:id", get(get_agent))
         .route("/v1/runs", post(run_agent))
         .route("/v1/runs/stream", post(run_agent_stream))
-        .with_state(state);
+        .with_state(state.clone())
+        // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
+        // `from_fn_with_state` threads `AppState` into the middleware closure.
+        .layer(from_fn_with_state(state, require_auth));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("agent-cloud listening on http://{addr}");

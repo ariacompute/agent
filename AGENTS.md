@@ -22,11 +22,19 @@ cloud API plus native (Swift/Kotlin) SDKs.
    and registering them in `from_provider`. Docker is the default. See
    `docs/adr/0003-sandbox-providers.md`.
 4. **Submodule discipline.** Keep `codex` out of the workspace member list;
-   reference codex crate shapes by design. See `docs/adr/0001-submodule-strategy.md`.
+   reference codex crate shapes by design. Deep compile-integration of codex's
+   `sandboxing`/`memories` crates is prescribed in
+   `docs/adr/0005-codex-integration.md` (currently blocked by a broken upstream
+   dependency; our `agent-sandbox`/`agent-memo` are the self-contained
+   integration seam). See `docs/adr/0001-submodule-strategy.md`.
 5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key or raw user
    content.
 6. **Tests.** `cargo test --workspace` must pass. Cross-crate behavior belongs
    in `tests/`.
+7. **Cloud auth + streaming.** `agent-cloud` is gated by `AGENT_CLOUD_API_KEY`
+   (send `Authorization: Bearer <key>` or `ApiKey <key>`; open when unset) and
+   serves token streaming at `POST /v1/runs/stream` (SSE, terminated by
+   `[DONE]`).
 
 ## Common commands
 
