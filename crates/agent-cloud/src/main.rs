@@ -92,6 +92,23 @@ struct StreamToken {
     token: String,
 }
 
+/// Pure auth check used by [`require_auth`].
+///
+/// Returns `true` when the request is allowed: always allowed when `expected`
+/// is `None` (open mode, i.e. `AGENT_CLOUD_API_KEY` is unset); otherwise the
+/// `presented` `Authorization` header must equal `expected` as either
+/// `Bearer <key>` or `ApiKey <key>`.
+fn auth_ok(expected: Option<&str>, presented: &str) -> bool {
+    match expected {
+        None => true,
+        Some(k) => presented
+            .strip_prefix("Bearer ")
+            .or_else(|| presented.strip_prefix("ApiKey "))
+            .map(|tok| tok.trim() == k)
+            .unwrap_or(false),
+    }
+}
+
 /// Bearer / ApiKey auth gate.
 ///
 /// Reads `AGENT_CLOUD_API_KEY` from the environment. When it is set (non-empty)
@@ -100,7 +117,7 @@ struct StreamToken {
 /// env var is absent the service runs open (dev convenience).
 async fn require_auth(State(_state): State<AppState>, req: Request, next: Next) -> Result<Response, StatusCode> {
     let expected = match std::env::var("AGENT_CLOUD_API_KEY") {
-        Ok(k) if !k.is_empty() => k,
+        Ok(k) if !k.is_empty() => Some(k),
         _ => return Ok(next.run(req).await),
     };
     let presented = req
@@ -108,10 +125,7 @@ async fn require_auth(State(_state): State<AppState>, req: Request, next: Next) 
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let ok = presented.strip_prefix("Bearer ").or_else(|| presented.strip_prefix("ApiKey "))
-        .map(|tok| tok.trim() == expected)
-        .unwrap_or(false);
-    if !ok {
+    if !auth_ok(expected.as_deref(), presented) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(req).await)
@@ -298,4 +312,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_open_without_key() {
+        // Simulated open mode (no expected key): every request is allowed.
+        assert!(auth_ok(None, ""));
+        assert!(auth_ok(None, "Bearer anything"));
+        assert!(auth_ok(None, "ApiKey anything"));
+    }
+
+    #[test]
+    fn auth_rejects_missing_or_wrong_header() {
+        let key = Some("secret");
+        assert!(!auth_ok(key, ""));
+        assert!(!auth_ok(key, "Basic secret"));
+        assert!(!auth_ok(key, "Bearer wrong"));
+        assert!(!auth_ok(key, "ApiKey wrong"));
+        assert!(!auth_ok(key, "secret")); // no scheme prefix
+    }
+
+    #[test]
+    fn auth_accepts_bearer_and_apikey() {
+        let key = Some("secret");
+        assert!(auth_ok(key, "Bearer secret"));
+        assert!(auth_ok(key, "ApiKey secret"));
+        assert!(auth_ok(key, "Bearer  secret")); // internal whitespace is trimmed
+        assert!(!auth_ok(key, "Bearer secretx"));
+        assert!(!auth_ok(key, "Bearer secrets"));
+    }
+
+    #[test]
+    fn agent_config_defaults() {
+        let cfg = agent_config("my-agent", "sess-1");
+        assert_eq!(cfg.agent_name, "my-agent");
+        assert_eq!(cfg.session, "sess-1");
+        assert_eq!(cfg.sandbox_provider, "docker");
+        assert_eq!(cfg.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn error_body_serializes() {
+        let body = ErrorBody {
+            error: "boom".into(),
+        };
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("boom"));
+    }
 }

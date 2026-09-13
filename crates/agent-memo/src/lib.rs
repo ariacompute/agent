@@ -472,4 +472,124 @@ mod tests {
         // Fragments are persisted with their dense vectors.
         assert!(frags[0].embedding.is_some());
     }
+
+    #[test]
+    fn fragment_kind_roundtrip() {
+        for k in [
+            FragmentKind::Message,
+            FragmentKind::ToolResult,
+            FragmentKind::LongTerm,
+            FragmentKind::Note,
+        ] {
+            let s = k.as_str();
+            let back: FragmentKind = s.parse().unwrap();
+            assert_eq!(k, back, "roundtrip failed for {k:?}");
+        }
+        assert!("bogus".parse::<FragmentKind>().is_err());
+    }
+
+    #[test]
+    fn recall_query_defaults() {
+        let q = RecallQuery::new("s", "x");
+        assert_eq!(q.session, "s");
+        assert_eq!(q.text, "x");
+        assert_eq!(q.top_k, 8);
+        assert!(q.kind.is_none());
+        let q = q.with_kind(FragmentKind::Note);
+        assert_eq!(q.kind, Some(FragmentKind::Note));
+    }
+
+    #[tokio::test]
+    async fn recall_filters_by_kind() {
+        let store = SledMemoStore::memory().unwrap();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "alpha"))
+            .await
+            .unwrap();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::Note, "beta"))
+            .await
+            .unwrap();
+        let msgs = store
+            .recall(&RecallQuery::new("s", "alpha").with_kind(FragmentKind::Message))
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, FragmentKind::Message);
+        assert!(msgs[0].content.contains("alpha"));
+    }
+
+    #[tokio::test]
+    async fn recall_respects_session() {
+        let store = SledMemoStore::memory().unwrap();
+        store
+            .memorize(ContextFragment::new("a", FragmentKind::Message, "from a"))
+            .await
+            .unwrap();
+        store
+            .memorize(ContextFragment::new("b", FragmentKind::Message, "from b"))
+            .await
+            .unwrap();
+        let out = store.recall(&RecallQuery::new("a", "from")).await.unwrap();
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|f| f.session == "a"));
+        assert!(out.iter().any(|f| f.content == "from a"));
+        assert!(!out.iter().any(|f| f.content == "from b"));
+    }
+
+    #[tokio::test]
+    async fn recall_empty_query_returns_empty() {
+        let store = SledMemoStore::memory().unwrap();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "hello"))
+            .await
+            .unwrap();
+        let out = store.recall(&RecallQuery::new("s", "")).await.unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_by_key_roundtrip_and_missing() {
+        let store = SledMemoStore::memory().unwrap();
+        let f = ContextFragment::new("s", FragmentKind::LongTerm, "fact").with_key("k1");
+        store.memorize(f).await.unwrap();
+        let got = store.get_by_key("s", "k1").await.unwrap();
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().content, "fact");
+        assert!(store.get_by_key("s", "nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_missing_session_is_not_found() {
+        let store = SledMemoStore::memory().unwrap();
+        assert!(matches!(
+            store.compact("ghost").await,
+            Err(MemoError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn memorize_populates_embedding() {
+        let store = SledMemoStore::memory().unwrap();
+        let f = ContextFragment::new("s", FragmentKind::Message, "rust programming").with_key("ke");
+        store.memorize(f).await.unwrap();
+        let got = store.get_by_key("s", "ke").await.unwrap().unwrap();
+        assert!(got.embedding.is_some());
+        assert_eq!(got.embedding.unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn recall_exact_key_match_ranks_first() {
+        let store = SledMemoStore::memory().unwrap();
+        store
+            .memorize(
+                ContextFragment::new("s", FragmentKind::Message, "unrelated content")
+                    .with_key("fact1"),
+            )
+            .await
+            .unwrap();
+        let out = store.recall(&RecallQuery::new("s", "fact1")).await.unwrap();
+        assert!(!out.is_empty());
+        assert_eq!(out[0].key.as_deref(), Some("fact1"));
+    }
 }

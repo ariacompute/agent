@@ -392,4 +392,56 @@ mod tests {
             "echo 'hello world'"
         );
     }
+
+    #[test]
+    fn exec_spec_command_defaults() {
+        let s = ExecSpec::command(vec!["echo".into(), "hi".into()]);
+        assert_eq!(s.command, vec!["echo", "hi"]);
+        assert_eq!(s.timeout_ms, 60_000);
+        assert!(s.image.is_none());
+        assert!(s.workdir.is_none());
+        assert!(s.env.is_empty());
+    }
+
+    #[test]
+    fn shell_join_empty_and_escapes() {
+        assert_eq!(shell_join(&[]), "");
+        // A token containing a double-quote is single-quoted (no inner escaping needed).
+        assert_eq!(shell_join(&["a\"b".into()]), "'a\"b'");
+        // A token containing a single-quote is escaped as '\''.
+        assert_eq!(shell_join(&["it's".into()]), "'it'\\''s'");
+    }
+
+    #[test]
+    fn provider_as_str_roundtrip() {
+        for p in [
+            SandboxProvider::Docker,
+            SandboxProvider::Kata,
+            SandboxProvider::Cube,
+        ] {
+            let s = p.as_str();
+            assert_eq!(SandboxProvider::parse(s), Some(p));
+        }
+    }
+
+    #[test]
+    fn provider_parse_is_case_insensitive_and_rejects_unknown() {
+        assert_eq!(SandboxProvider::parse("DOCKER"), Some(SandboxProvider::Docker));
+        assert_eq!(SandboxProvider::parse("Kata"), Some(SandboxProvider::Kata));
+        assert_eq!(SandboxProvider::parse("podman"), None);
+        assert_eq!(SandboxProvider::parse(""), None);
+    }
+
+    #[test]
+    fn from_provider_builds_all_variants() {
+        for p in [
+            SandboxProvider::Docker,
+            SandboxProvider::Kata,
+            SandboxProvider::Cube,
+        ] {
+            let _ = from_provider(p); // must construct without panicking
+        }
+        let _ = CubeSandbox::new();
+        let _ = KataSandbox::new();
+    }
 }

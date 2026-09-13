@@ -450,4 +450,52 @@ mod tests {
             Err(_) => { /* docker / sandbox / memo not available in this environment */ }
         }
     }
+
+    #[tokio::test]
+    async fn run_stream_emits_tokens_and_persists() {
+        let memo = in_memory_memo();
+        let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
+        let agent = Agent::with_model(AgentConfig::default(), model, memo.clone()).unwrap();
+        let stream = agent.run_stream("hello").await.unwrap();
+        let mut collected = String::new();
+        let mut s = stream;
+        while let Some(tok) = s.next().await {
+            collected.push_str(&tok.unwrap());
+        }
+        assert!(collected.contains("hello"));
+        // Both the user turn and the assistant reply are persisted to memo.
+        let frags = memo
+            .recall(&RecallQuery::new("default", "hello"))
+            .await
+            .unwrap();
+        assert!(frags.iter().any(|f| f.content == "hello"));
+    }
+
+    #[tokio::test]
+    async fn run_second_turn_injects_prior_context() {
+        let memo = in_memory_memo();
+        let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
+        let agent = Agent::with_model(AgentConfig::default(), model, memo.clone()).unwrap();
+        let _ = agent.run("remember the secret code 1234").await.unwrap();
+        let second = agent.run("what was the code?").await.unwrap();
+        // The stub emits `<injected>` only when recalled context is non-empty.
+        assert!(second.contains("<injected>"));
+    }
+
+    #[tokio::test]
+    async fn unknown_sandbox_provider_is_config_error() {
+        let cfg = AgentConfig {
+            sandbox_provider: "bogus".into(),
+            ..AgentConfig::default()
+        };
+        let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
+        let res = Agent::with_model(cfg, model, in_memory_memo());
+        assert!(matches!(res, Err(CoreError::Config(_))));
+    }
+
+    #[test]
+    fn core_error_converts_from_memo() {
+        let e: CoreError = agent_memo::MemoError::NotFound("x".into()).into();
+        assert!(matches!(e, CoreError::Memo(_)));
+    }
 }
