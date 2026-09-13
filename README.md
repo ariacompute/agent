@@ -63,6 +63,14 @@ migrations/  Postgres metadata schema
 tests/       cross-crate integration tests
 ```
 
+## Engineering Conventions
+
+This repository follows the Harness Engineering philosophy:
+
+- [`AGENTS.md`](AGENTS.md): Agent engineering context entry and directory index
+- [`requirements.md`](requirements.md): Requirements spec (feature boundaries/exceptions/acceptance criteria, human-review-gated)
+- [`task.md`](task.md): Implementation task checklist
+
 ## License
 
 MIT.

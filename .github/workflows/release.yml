@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  release:
+    types:
+      - created
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: agent-cloud
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            asset_os: linux_x86_64
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            asset_os: windows_x86_64
+            archive: zip
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            asset_os: linux_arm64
+            archive: tar.gz
+          - name: macos
+            os: macos-latest
+            asset_os: macos
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build release binary
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          # Embed release tag (sans leading v) into agent-cloud -v/--version.
+          export ARIA_AGENT_VERSION="${TAG_NAME#v}"
+          echo "ARIA_AGENT_VERSION=$ARIA_AGENT_VERSION"
+          cargo build --release -p agent-cloud
+          cargo build --release -p agent-sdk
+
+      - name: Package release archive (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          ASSET_OS: ${{ matrix.asset_os }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG_NAME#v}"
+          ARCHIVE_NAME="agent-cloud_${VERSION}_${ASSET_OS}.tar.gz"
+          tar -czf "$ARCHIVE_NAME" -C target/release "$BIN_NAME"
+          echo "ASSET_PATH=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+
+      - name: Package release archive (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          ASSET_OS: ${{ matrix.asset_os }}
+        run: |
+          $version = $env:TAG_NAME.TrimStart('v')
+          $archiveName = "agent-cloud_${version}_$($env:ASSET_OS).zip"
+          Compress-Archive -Path "target/release/$($env:BIN_NAME).exe" -DestinationPath $archiveName -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=$archiveName"
+
+      - name: Package libagent-sdk (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          ASSET_OS: ${{ matrix.asset_os }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG_NAME#v}"
+          ARCHIVE_NAME="libagent-sdk_${VERSION}_${ASSET_OS}.tar.gz"
+          cd target/release
+          if [[ -f libagent_sdk.dylib ]]; then
+            tar -czf "../../$ARCHIVE_NAME" libagent_sdk.dylib
+          elif [[ -f libagent_sdk.so ]]; then
+            tar -czf "../../$ARCHIVE_NAME" libagent_sdk.so
+          elif [[ -f libagent_sdk.a ]]; then
+            tar -czf "../../$ARCHIVE_NAME" libagent_sdk.a
+          else
+            echo "No libagent_sdk shared/static library found in target/release" >&2
+            ls -la
+            exit 1
+          fi
+          cd ../..
+          echo "FFI_ASSET_PATH=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+
+      - name: Package libagent-sdk (Windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          ASSET_OS: ${{ matrix.asset_os }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG_NAME#v}"
+          ARCHIVE_NAME="libagent-sdk_${VERSION}_${ASSET_OS}.tar.gz"
+          cd target/release
+          if [[ -f agent_sdk.dll ]]; then
+            FILES=(agent_sdk.dll)
+            if [[ -f agent_sdk.dll.lib ]]; then
+              cp agent_sdk.dll.lib agent_sdk.dll.lib
+              FILES+=(agent_sdk.dll.lib)
+            fi
+            if [[ -f agent_sdk.lib ]]; then
+              cp agent_sdk.lib agent_sdk.lib
+              FILES+=(agent_sdk.lib)
+            fi
+            tar -czf "../../$ARCHIVE_NAME" "${FILES[@]}"
+          else
+            echo "No agent_sdk.dll found in target/release" >&2
+            ls -la
+            exit 1
+          fi
+          cd ../..
+          echo "FFI_ASSET_PATH=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            ${{ env.ASSET_PATH }}
+            ${{ env.FFI_ASSET_PATH }}
+          token: ${{ secrets.ARIACOMPUTE_TOKEN }}
+
+  # Language package publishes are fail-pass: must not block CLI/assets.
+  publish-packages:
+    name: Publish language packages (fail-pass)
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set package version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION"
+      - name: crates.io agent-sdk (+ deps)
+        run: |
+          echo "crates.io publish handled by publish-cargo.yml (agent-sdk + deps)"
+          echo "crates.io publish stub"
+      - name: CocoaPods Swift AgentSDK
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+        run: |
+          echo "Configure COCOAPODS_TRUNK_TOKEN then: pod trunk push bindings/swift/AgentSDK.podspec"
+          echo "CocoaPods publish stub (fail-pass)"
+      - name: Maven Central com.ariacompute:agent-sdk (Android AAR)
+        run: |
+          echo "Maven publish handled by publish-maven.yml (vanniktech plugin -> Central Portal)"
+          echo "Maven publish stub"
