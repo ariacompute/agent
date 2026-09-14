@@ -74,6 +74,8 @@ aria-agent upgrade --url https://github.com/ariacompute
 # Start the cloud HTTP server (default subcommand). Reads agent-cli.yml and
 # exports ARIA_AGENT_FFI_LIB to ~/.ariacompute/lib.
 aria-agent serve
+#   --port <n>  listen port (default: CLOUD_PORT env or 3000)
+aria-agent serve --port 3000
 ```
 
 > The `serve` subcommand also reads `~/.ariacompute/agent-cli.yml` and points

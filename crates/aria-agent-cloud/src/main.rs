@@ -454,8 +454,12 @@ enum Command {
         #[arg(long)]
         url: Option<String>,
     },
-    /// Start the cloud HTTP server (default)
-    Serve,
+    /// Start the cloud HTTP server
+    Serve {
+        /// Listen port (default: CLOUD_PORT env or 3000)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Print version
     Version,
 }
@@ -487,7 +491,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
         }
-        Some(Command::Serve) | None => cmd_serve().await?,
+        Some(Command::Serve { port }) => cmd_serve(resolve_port(port)).await?,
+        None => cmd_serve(resolve_port(None)).await?,
         Some(Command::Version) => println!("aria-agent {AGENT_VERSION}"),
     }
     Ok(())
@@ -560,7 +565,18 @@ fn cmd_setup_clear() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn cmd_serve() -> Result<(), Box<dyn std::error::Error>> {
+/// Resolve the cloud listen port: explicit `--port`, else `CLOUD_PORT` env (from `.env`), else 3000.
+fn resolve_port(explicit: Option<u16>) -> u16 {
+    if let Some(p) = explicit {
+        return p;
+    }
+    std::env::var("CLOUD_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(3000)
+}
+
+async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -664,7 +680,7 @@ async fn cmd_serve() -> Result<(), Box<dyn std::error::Error>> {
         // `from_fn_with_state` threads `AppState` into the middleware closure.
         .layer(from_fn_with_state(state, require_auth));
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("agent-cloud listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

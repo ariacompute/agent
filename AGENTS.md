@@ -70,7 +70,8 @@ cloud API plus native (Swift/Kotlin) SDKs.
 * `just cov` — `cargo tarpaulin` coverage (if available)
 * `just ffi` — regenerate Swift/Kotlin bindings
 * `just cloud` — run the cloud service (`aria-agent serve` is the default subcommand;
-  it reads `~/.ariacompute/agent-cli.yml` and exports `ARIA_AGENT_FFI_LIB` to `~/.ariacompute/lib`)
+  it reads `~/.ariacompute/agent-cli.yml` and exports `ARIA_AGENT_FFI_LIB` to `~/.ariacompute/lib`).
+  Listen port: `aria-agent serve --port <n>` (default `CLOUD_PORT` env or 3000).
 * `aria-agent setup` — interactively choose the Releases source (github default
   or gitee) and write `upgrade_url` to `~/.ariacompute/agent-cli.yml`
   (override home via `ARIA_COMPUTE_HOME`). Non-interactive runs default to github.

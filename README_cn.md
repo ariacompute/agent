@@ -71,6 +71,8 @@ aria-agent upgrade --url https://github.com/ariacompute
 # 启动云端 HTTP 服务（默认子命令）。读取 agent-cli.yml，并把
 # ARIA_AGENT_FFI_LIB 指向 ~/.ariacompute/lib。
 aria-agent serve
+#   --port <n>  监听端口（默认：CLOUD_PORT 环境变量或 3000）
+aria-agent serve --port 3000
 ```
 
 > `serve` 子命令同样会读取 `~/.ariacompute/agent-cli.yml`，并将
