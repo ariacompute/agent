@@ -31,6 +31,15 @@ android {
     }
 
     sourceSets["main"].java.srcDirs("src/main/kotlin")
+
+    lint {
+        // The generated UniFFI Kotlin bindings reference `java.lang.ref.Cleaner`
+        // (Android API 33) only inside a runtime `Class.forName` guard that
+        // falls back to the JNA cleaner on older runtimes. Lint's `NewApi` check
+        // cannot see the guard, so it reports a false positive. Disable it for
+        // this generated-only source set (regeneration via `just ffi` keeps it).
+        disable += "NewApi"
+    }
 }
 
 dependencies {
