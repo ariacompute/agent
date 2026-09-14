@@ -151,11 +151,9 @@ jobs:
           if [[ -f aria-agent_ffi.dll ]]; then
             FILES=(aria-agent_ffi.dll)
             if [[ -f aria-agent_ffi.dll.lib ]]; then
-              cp aria-agent_ffi.dll.lib aria-agent_ffi.dll.lib
               FILES+=(aria-agent_ffi.dll.lib)
             fi
             if [[ -f aria-agent_ffi.lib ]]; then
-              cp aria-agent_ffi.lib aria-agent_ffi.lib
               FILES+=(aria-agent_ffi.lib)
             fi
             tar -czf "../../$ARCHIVE_NAME" "${FILES[@]}"
