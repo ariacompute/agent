@@ -5,6 +5,7 @@ plugins {
     id("com.android.library") version "8.5.0"
     kotlin("android") version "2.0.21"
     id("com.vanniktech.maven.publish") version "0.30.0"
+    id("signing")
 }
 
 group = "com.ariacompute"
@@ -89,6 +90,6 @@ if (!pgpKeyRaw.isNullOrBlank()) {
 tasks.withType<Sign>().configureEach {
     onlyIf {
         val key = System.getenv("GPG_PRIVATE_KEY") ?: findProperty("signingInMemoryKey")?.toString()
-        key != null && key.toString().trim().isNotEmpty()
+        key != null && key.trim().isNotEmpty()
     }
 }
