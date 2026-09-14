@@ -253,362 +253,362 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_CLONE_SDKAGENT
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_CLONE_SDKAGENT
-void*_Nonnull uniffi_agent_sdk_fn_clone_sdkagent(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_aria_agent_ffi_fn_clone_sdkagent(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_FREE_SDKAGENT
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_FREE_SDKAGENT
-void uniffi_agent_sdk_fn_free_sdkagent(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+void uniffi_aria_agent_ffi_fn_free_sdkagent(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKAGENT_RUN
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKAGENT_RUN
-RustBuffer uniffi_agent_sdk_fn_method_sdkagent_run(void*_Nonnull ptr, RustBuffer input, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_aria_agent_ffi_fn_method_sdkagent_run(void*_Nonnull ptr, RustBuffer input, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKAGENT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKAGENT_SESSION
-void*_Nonnull uniffi_agent_sdk_fn_method_sdkagent_session(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_aria_agent_ffi_fn_method_sdkagent_session(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_CLONE_SDKSESSION
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_CLONE_SDKSESSION
-void*_Nonnull uniffi_agent_sdk_fn_clone_sdksession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_aria_agent_ffi_fn_clone_sdksession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_FREE_SDKSESSION
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_FREE_SDKSESSION
-void uniffi_agent_sdk_fn_free_sdksession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+void uniffi_aria_agent_ffi_fn_free_sdksession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKSESSION_MEMORIZE
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKSESSION_MEMORIZE
-void uniffi_agent_sdk_fn_method_sdksession_memorize(void*_Nonnull ptr, RustBuffer key, RustBuffer value, RustCallStatus *_Nonnull out_status
+void uniffi_aria_agent_ffi_fn_method_sdksession_memorize(void*_Nonnull ptr, RustBuffer key, RustBuffer value, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKSESSION_RECALL
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_METHOD_SDKSESSION_RECALL
-RustBuffer uniffi_agent_sdk_fn_method_sdksession_recall(void*_Nonnull ptr, RustBuffer key, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_aria_agent_ffi_fn_method_sdksession_recall(void*_Nonnull ptr, RustBuffer key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_FUNC_CREATE_AGENT
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_FN_FUNC_CREATE_AGENT
-void*_Nonnull uniffi_agent_sdk_fn_func_create_agent(RustBuffer config, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent(RustBuffer config, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_ALLOC
-RustBuffer ffi_agent_sdk_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
+RustBuffer ffi_aria_agent_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_FROM_BYTES
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_FROM_BYTES
-RustBuffer ffi_agent_sdk_rustbuffer_from_bytes(ForeignBytes bytes, RustCallStatus *_Nonnull out_status
+RustBuffer ffi_aria_agent_ffi_rustbuffer_from_bytes(ForeignBytes bytes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_FREE
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_FREE
-void ffi_agent_sdk_rustbuffer_free(RustBuffer buf, RustCallStatus *_Nonnull out_status
+void ffi_aria_agent_ffi_rustbuffer_free(RustBuffer buf, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_RESERVE
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUSTBUFFER_RESERVE
-RustBuffer ffi_agent_sdk_rustbuffer_reserve(RustBuffer buf, uint64_t additional, RustCallStatus *_Nonnull out_status
+RustBuffer ffi_aria_agent_ffi_rustbuffer_reserve(RustBuffer buf, uint64_t additional, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U8
-void ffi_agent_sdk_rust_future_poll_u8(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_u8(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U8
-void ffi_agent_sdk_rust_future_cancel_u8(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_u8(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U8
-void ffi_agent_sdk_rust_future_free_u8(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_u8(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U8
-uint8_t ffi_agent_sdk_rust_future_complete_u8(uint64_t handle, RustCallStatus *_Nonnull out_status
+uint8_t ffi_aria_agent_ffi_rust_future_complete_u8(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I8
-void ffi_agent_sdk_rust_future_poll_i8(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_i8(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I8
-void ffi_agent_sdk_rust_future_cancel_i8(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_i8(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I8
-void ffi_agent_sdk_rust_future_free_i8(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_i8(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I8
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I8
-int8_t ffi_agent_sdk_rust_future_complete_i8(uint64_t handle, RustCallStatus *_Nonnull out_status
+int8_t ffi_aria_agent_ffi_rust_future_complete_i8(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U16
-void ffi_agent_sdk_rust_future_poll_u16(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_u16(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U16
-void ffi_agent_sdk_rust_future_cancel_u16(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_u16(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U16
-void ffi_agent_sdk_rust_future_free_u16(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_u16(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U16
-uint16_t ffi_agent_sdk_rust_future_complete_u16(uint64_t handle, RustCallStatus *_Nonnull out_status
+uint16_t ffi_aria_agent_ffi_rust_future_complete_u16(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I16
-void ffi_agent_sdk_rust_future_poll_i16(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_i16(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I16
-void ffi_agent_sdk_rust_future_cancel_i16(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_i16(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I16
-void ffi_agent_sdk_rust_future_free_i16(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_i16(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I16
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I16
-int16_t ffi_agent_sdk_rust_future_complete_i16(uint64_t handle, RustCallStatus *_Nonnull out_status
+int16_t ffi_aria_agent_ffi_rust_future_complete_i16(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U32
-void ffi_agent_sdk_rust_future_poll_u32(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_u32(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U32
-void ffi_agent_sdk_rust_future_cancel_u32(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_u32(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U32
-void ffi_agent_sdk_rust_future_free_u32(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_u32(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U32
-uint32_t ffi_agent_sdk_rust_future_complete_u32(uint64_t handle, RustCallStatus *_Nonnull out_status
+uint32_t ffi_aria_agent_ffi_rust_future_complete_u32(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I32
-void ffi_agent_sdk_rust_future_poll_i32(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_i32(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I32
-void ffi_agent_sdk_rust_future_cancel_i32(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_i32(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I32
-void ffi_agent_sdk_rust_future_free_i32(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_i32(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I32
-int32_t ffi_agent_sdk_rust_future_complete_i32(uint64_t handle, RustCallStatus *_Nonnull out_status
+int32_t ffi_aria_agent_ffi_rust_future_complete_i32(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_U64
-void ffi_agent_sdk_rust_future_poll_u64(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_u64(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_U64
-void ffi_agent_sdk_rust_future_cancel_u64(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_u64(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_U64
-void ffi_agent_sdk_rust_future_free_u64(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_u64(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_U64
-uint64_t ffi_agent_sdk_rust_future_complete_u64(uint64_t handle, RustCallStatus *_Nonnull out_status
+uint64_t ffi_aria_agent_ffi_rust_future_complete_u64(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_I64
-void ffi_agent_sdk_rust_future_poll_i64(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_i64(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_I64
-void ffi_agent_sdk_rust_future_cancel_i64(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_i64(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_I64
-void ffi_agent_sdk_rust_future_free_i64(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_i64(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_I64
-int64_t ffi_agent_sdk_rust_future_complete_i64(uint64_t handle, RustCallStatus *_Nonnull out_status
+int64_t ffi_aria_agent_ffi_rust_future_complete_i64(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_F32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_F32
-void ffi_agent_sdk_rust_future_poll_f32(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_f32(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_F32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_F32
-void ffi_agent_sdk_rust_future_cancel_f32(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_f32(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_F32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_F32
-void ffi_agent_sdk_rust_future_free_f32(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_f32(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_F32
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_F32
-float ffi_agent_sdk_rust_future_complete_f32(uint64_t handle, RustCallStatus *_Nonnull out_status
+float ffi_aria_agent_ffi_rust_future_complete_f32(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_F64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_F64
-void ffi_agent_sdk_rust_future_poll_f64(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_f64(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_F64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_F64
-void ffi_agent_sdk_rust_future_cancel_f64(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_f64(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_F64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_F64
-void ffi_agent_sdk_rust_future_free_f64(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_f64(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_F64
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_F64
-double ffi_agent_sdk_rust_future_complete_f64(uint64_t handle, RustCallStatus *_Nonnull out_status
+double ffi_aria_agent_ffi_rust_future_complete_f64(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_POINTER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_POINTER
-void ffi_agent_sdk_rust_future_poll_pointer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_pointer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_POINTER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_POINTER
-void ffi_agent_sdk_rust_future_cancel_pointer(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_pointer(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_POINTER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_POINTER
-void ffi_agent_sdk_rust_future_free_pointer(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_pointer(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_POINTER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_POINTER
-void*_Nonnull ffi_agent_sdk_rust_future_complete_pointer(uint64_t handle, RustCallStatus *_Nonnull out_status
+void*_Nonnull ffi_aria_agent_ffi_rust_future_complete_pointer(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_RUST_BUFFER
-void ffi_agent_sdk_rust_future_poll_rust_buffer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_rust_buffer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_RUST_BUFFER
-void ffi_agent_sdk_rust_future_cancel_rust_buffer(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_rust_buffer(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_RUST_BUFFER
-void ffi_agent_sdk_rust_future_free_rust_buffer(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_rust_buffer(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_RUST_BUFFER
-RustBuffer ffi_agent_sdk_rust_future_complete_rust_buffer(uint64_t handle, RustCallStatus *_Nonnull out_status
+RustBuffer ffi_aria_agent_ffi_rust_future_complete_rust_buffer(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_VOID
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_POLL_VOID
-void ffi_agent_sdk_rust_future_poll_void(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+void ffi_aria_agent_ffi_rust_future_poll_void(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_VOID
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_CANCEL_VOID
-void ffi_agent_sdk_rust_future_cancel_void(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_cancel_void(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_VOID
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_FREE_VOID
-void ffi_agent_sdk_rust_future_free_void(uint64_t handle
+void ffi_aria_agent_ffi_rust_future_free_void(uint64_t handle
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_RUST_FUTURE_COMPLETE_VOID
-void ffi_agent_sdk_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+void ffi_aria_agent_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_FUNC_CREATE_AGENT
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_FUNC_CREATE_AGENT
-uint16_t uniffi_agent_sdk_checksum_func_create_agent(void
+uint16_t uniffi_aria_agent_ffi_checksum_func_create_agent(void
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKAGENT_RUN
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKAGENT_RUN
-uint16_t uniffi_agent_sdk_checksum_method_sdkagent_run(void
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_run(void
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKAGENT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKAGENT_SESSION
-uint16_t uniffi_agent_sdk_checksum_method_sdkagent_session(void
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_session(void
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKSESSION_MEMORIZE
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKSESSION_MEMORIZE
-uint16_t uniffi_agent_sdk_checksum_method_sdksession_memorize(void
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(void
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKSESSION_RECALL
 #define UNIFFI_FFIDEF_UNIFFI_AGENT_SDK_CHECKSUM_METHOD_SDKSESSION_RECALL
-uint16_t uniffi_agent_sdk_checksum_method_sdksession_recall(void
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdksession_recall(void
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_AGENT_SDK_UNIFFI_CONTRACT_VERSION
 #define UNIFFI_FFIDEF_FFI_AGENT_SDK_UNIFFI_CONTRACT_VERSION
-uint32_t ffi_agent_sdk_uniffi_contract_version(void
+uint32_t ffi_aria_agent_ffi_uniffi_contract_version(void
     
 );
 #endif

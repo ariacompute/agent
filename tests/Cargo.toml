@@ -14,9 +14,9 @@ name = "integration"
 path = "integration.rs"
 
 [dev-dependencies]
-agent-memo.workspace = true
-agent-sandbox.workspace = true
-agent-core.workspace = true
-agent-reef.workspace = true
+aria-agent-memo.workspace = true
+aria-agent-sandbox.workspace = true
+aria-agent-core.workspace = true
+aria-agent-reef.workspace = true
 uuid.workspace = true
 tokio.workspace = true

@@ -1,9 +1,12 @@
 [package]
-name = "agent-core"
+name = "aria-agent-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Unified agent runtime: wraps the codex harness loop, injects memo context, isolates tools in a sandbox."
+
+[lib]
+name = "agent_core"
 
 [dependencies]
 tokio.workspace = true
@@ -13,8 +16,8 @@ thiserror.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 tracing.workspace = true
-agent-memo.workspace = true
-agent-sandbox.workspace = true
+aria-agent-memo.workspace = true
+aria-agent-sandbox.workspace = true
 futures = "0.3"
 async-stream = "0.3"
 async-openai = { version = "0.24", optional = true }

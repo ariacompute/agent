@@ -11,15 +11,15 @@ group = "com.ariacompute"
 version = System.getenv("ARIA_VERSION") ?: "0.1.0"
 
 android {
-    namespace = "com.agent"
+    namespace = "com.ariacompute.agent"
     compileSdk = 34
 
     defaultConfig {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
         ndk {
-            // ABIs you intend to ship. Build libagent_sdk for each and drop the
-            // .so into src/main/jniLibs/<abi>/libagent_sdk.so
+            // ABIs you intend to ship. Build libaria-agent_ffi for each and drop the
+            // .so into src/main/jniLibs/<abi>/libaria-agent_ffi.so
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
@@ -40,11 +40,11 @@ mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, true)
     signAllPublications()
 
-    coordinates("com.ariacompute", "agent-sdk", version.toString())
+    coordinates("com.ariacompute", "agent", version.toString())
 
     pom {
         name = "Aria Agent"
-        description = "Kotlin/Android binding for the Aria agent platform (libagent_sdk FFI)."
+        description = "Kotlin/Android binding for the Aria agent platform (libaria-agent_ffi FFI)."
         url = "https://github.com/ariacompute/agent"
         licenses {
             license {

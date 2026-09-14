@@ -1,6 +1,6 @@
-//! `agent-sdk` — the stable UniFFI boundary.
+//! `ariacompute-agent` — the stable UniFFI boundary.
 //!
-//! This crate compiles to a native `cdylib` (`libagent_sdk`) that Swift and
+//! This crate compiles to a native `cdylib` (`libaria-agent_ffi`) that Swift and
 //! Kotlin consume through generated bindings (see `just ffi`). It wraps
 //! `agent-core` (the codex-harness runtime) and `agent-memo`, exposing a small,
 //! stable surface: [`SdkAgent`] and [`SdkSession`].

@@ -10,9 +10,9 @@ this workspace until an upstream dependency is fixed.
 The platform is meant to integrate OpenAI's `codex` repo (a git submodule under
 `codex/`, main workspace `codex/codex-rs/`) at the *crate* level:
 
-* `agent-sandbox` should build on codex's concrete `sandboxing` /
+* `aria-agent-sandbox` should build on codex's concrete `sandboxing` /
   `linux-sandbox` crates (real `SandboxType` / `SandboxManager` primitives).
-* `agent-memo` should reuse codex's concrete `memories/read` +
+* `aria-agent-memo` should reuse codex's concrete `memories/read` +
   `context-fragments` crates (real fragment model + memory-injection helpers).
 
 ### Cargo cross-workspace constraint
@@ -60,7 +60,7 @@ therefore breaks `cargo build --workspace`.
 ## Decision
 
 * Keep `codex` as a submodule (per ADR 0001).
-* `agent-sandbox` and `agent-memo` remain **self-contained** integration seams
+* `aria-agent-sandbox` and `aria-agent-memo` remain **self-contained** integration seams
   whose shape mirrors codex's architecture (pluggable `Sandbox` with a Docker
   default; a `MemoStore` with local sled persistence — see ADR 0004).
 * The git-dep + patch recipe above is the prescribed way to enable the deep

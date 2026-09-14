@@ -16,7 +16,7 @@ which the platform requires.
   * `KataSandbox` — `docker --runtime=kata`.
   * `CubeSandbox` — `cube` CLI (extend flags per deployment).
 * Selection is config-driven via `SandboxProvider` / `AgentConfig.sandbox_provider`.
-* When deeper integration is wanted, `agent-sandbox` can depend on codex's
+* When deeper integration is wanted, `aria-agent-sandbox` can depend on codex's
   `sandboxing` / `linux-sandbox` crates as precise path dependencies.
 
 ## Consequences

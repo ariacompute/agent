@@ -3,7 +3,7 @@
 
 @file:Suppress("NAME_SHADOWING")
 
-package uniffi.agent_sdk
+package com.ariacompute.agent.uniffi.aria_agent_ffi
 
 // Common helper code.
 //
@@ -59,7 +59,7 @@ open class RustBuffer : Structure() {
     companion object {
         internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
-            UniffiLib.INSTANCE.ffi_agent_sdk_rustbuffer_alloc(size.toLong(), status)
+            UniffiLib.INSTANCE.ffi_aria_agent_ffi_rustbuffer_alloc(size.toLong(), status)
         }.also {
             if(it.data == null) {
                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
@@ -75,7 +75,7 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.ffi_agent_sdk_rustbuffer_free(buf, status)
+            UniffiLib.INSTANCE.ffi_aria_agent_ffi_rustbuffer_free(buf, status)
         }
     }
 
@@ -375,7 +375,7 @@ private fun findLibraryName(componentName: String): String {
     if (libOverride != null) {
         return libOverride
     }
-    return "agent_sdk"
+    return "aria_agent_ffi"
 }
 
 private inline fun <reified Lib : Library> loadIndirect(
@@ -732,7 +732,7 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 internal interface UniffiLib : Library {
     companion object {
         internal val INSTANCE: UniffiLib by lazy {
-            loadIndirect<UniffiLib>(componentName = "agent_sdk")
+            loadIndirect<UniffiLib>(componentName = "aria_agent_ffi")
             .also { lib: UniffiLib ->
                 uniffiCheckContractApiVersion(lib)
                 uniffiCheckApiChecksums(lib)
@@ -745,147 +745,147 @@ internal interface UniffiLib : Library {
         }
     }
 
-    fun uniffi_agent_sdk_fn_clone_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_clone_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_agent_sdk_fn_free_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_free_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_agent_sdk_fn_method_sdkagent_run(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_sdkagent_run(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_agent_sdk_fn_method_sdkagent_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_sdkagent_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_agent_sdk_fn_clone_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_clone_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_agent_sdk_fn_free_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_free_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_agent_sdk_fn_method_sdksession_memorize(`ptr`: Pointer,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_sdksession_memorize(`ptr`: Pointer,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_agent_sdk_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_agent_sdk_fn_func_create_agent(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_func_create_agent(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun ffi_agent_sdk_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_agent_sdk_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_agent_sdk_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun ffi_agent_sdk_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_agent_sdk_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_u8(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_u8(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_u8(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_u8(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun ffi_agent_sdk_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_i8(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_i8(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_i8(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_i8(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun ffi_agent_sdk_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_u16(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_u16(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_u16(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_u16(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
-    fun ffi_agent_sdk_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_i16(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_i16(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_i16(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_i16(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
-    fun ffi_agent_sdk_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_u32(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_u32(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_u32(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_u32(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
-    fun ffi_agent_sdk_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_i32(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_i32(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_i32(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_i32(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
-    fun ffi_agent_sdk_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_u64(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_u64(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_u64(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_u64(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    fun ffi_agent_sdk_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_i64(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_i64(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_i64(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_i64(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    fun ffi_agent_sdk_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_f32(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_f32(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_f32(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_f32(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Float
-    fun ffi_agent_sdk_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_f64(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_f64(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_f64(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_f64(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
-    fun ffi_agent_sdk_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_pointer(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_pointer(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_pointer(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_pointer(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun ffi_agent_sdk_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_rust_buffer(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_rust_buffer(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_rust_buffer(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_agent_sdk_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    fun ffi_aria_agent_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_cancel_void(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_cancel_void(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_free_void(`handle`: Long,
+    fun ffi_aria_agent_ffi_rust_future_free_void(`handle`: Long,
     ): Unit
-    fun ffi_agent_sdk_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun ffi_aria_agent_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_agent_sdk_checksum_func_create_agent(
+    fun uniffi_aria_agent_ffi_checksum_func_create_agent(
     ): Short
-    fun uniffi_agent_sdk_checksum_method_sdkagent_run(
+    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run(
     ): Short
-    fun uniffi_agent_sdk_checksum_method_sdkagent_session(
+    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session(
     ): Short
-    fun uniffi_agent_sdk_checksum_method_sdksession_memorize(
+    fun uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(
     ): Short
-    fun uniffi_agent_sdk_checksum_method_sdksession_recall(
+    fun uniffi_aria_agent_ffi_checksum_method_sdksession_recall(
     ): Short
-    fun ffi_agent_sdk_uniffi_contract_version(
+    fun ffi_aria_agent_ffi_uniffi_contract_version(
     ): Int
     
 }
@@ -894,7 +894,7 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
     // Get the bindings contract version from our ComponentInterface
     val bindings_contract_version = 26
     // Get the scaffolding contract version by calling the into the dylib
-    val scaffolding_contract_version = lib.ffi_agent_sdk_uniffi_contract_version()
+    val scaffolding_contract_version = lib.ffi_aria_agent_ffi_uniffi_contract_version()
     if (bindings_contract_version != scaffolding_contract_version) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
@@ -902,19 +902,19 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_agent_sdk_checksum_func_create_agent() != 6691.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 6691.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_agent_sdk_checksum_method_sdkagent_run() != 59383.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 59383.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_agent_sdk_checksum_method_sdkagent_session() != 34161.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 34161.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_agent_sdk_checksum_method_sdksession_memorize() != 15713.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 15713.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_agent_sdk_checksum_method_sdksession_recall() != 3292.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 3292.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1273,7 +1273,7 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_free_sdkagent(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_free_sdkagent(ptr, status)
                 }
             }
         }
@@ -1281,7 +1281,7 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_agent_sdk_fn_clone_sdkagent(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_sdkagent(pointer!!, status)
         }
     }
 
@@ -1293,7 +1293,7 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
             return FfiConverterString.lift(
     callWithPointer {
     uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_method_sdkagent_run(
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_run(
         it, FfiConverterString.lower(`input`),_status)
 }
     }
@@ -1308,7 +1308,7 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
             return FfiConverterTypeSdkSession.lift(
     callWithPointer {
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_method_sdkagent_session(
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_session(
         it, _status)
 }
     }
@@ -1541,7 +1541,7 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_free_sdksession(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_free_sdksession(ptr, status)
                 }
             }
         }
@@ -1549,7 +1549,7 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_agent_sdk_fn_clone_sdksession(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_sdksession(pointer!!, status)
         }
     }
 
@@ -1561,7 +1561,7 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
         = 
     callWithPointer {
     uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_method_sdksession_memorize(
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_memorize(
         it, FfiConverterString.lower(`key`),FfiConverterString.lower(`value`),_status)
 }
     }
@@ -1576,7 +1576,7 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
             return FfiConverterOptionalString.lift(
     callWithPointer {
     uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_method_sdksession_recall(
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_recall(
         it, FfiConverterString.lower(`key`),_status)
 }
     }
@@ -1759,7 +1759,7 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
     @Throws(SdkException::class) fun `createAgent`(`config`: SdkAgentConfig): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(
     uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_agent_sdk_fn_func_create_agent(
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent(
         FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
 }
     )

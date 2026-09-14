@@ -15,4 +15,3 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "agent-sdk"
-include(":agent-sdk")

@@ -1,0 +1,6 @@
+[kotlin]
+# Generated Kotlin bindings live under this package so they align with the
+# Android namespace `com.ariacompute.agent` and the Maven coordinate
+# `com.ariacompute:agent`. The FFI module name is derived from the cdylib
+# lib name `aria-agent_ffi` (see `[lib] name` in this crate's Cargo.toml).
+package_name = "com.ariacompute.agent"

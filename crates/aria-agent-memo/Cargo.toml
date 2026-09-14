@@ -1,9 +1,12 @@
 [package]
-name = "agent-memo"
+name = "aria-agent-memo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Unified context-memory (memo) store for the agent platform. Local/embedded storage, NOT Postgres."
+
+[lib]
+name = "agent_memo"
 
 [dependencies]
 tokio.workspace = true

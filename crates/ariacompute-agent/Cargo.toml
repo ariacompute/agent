@@ -1,22 +1,23 @@
 [package]
-name = "agent-sdk"
+name = "ariacompute-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "UniFFI FFI surface for the agent platform (Swift / Kotlin bindings)."
 
 [lib]
-crate-type = ["lib", "cdylib"]
+name = "aria_agent_ffi"
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 uniffi = "0.28"
 tokio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-agent-core = { workspace = true, features = ["openai"] }
-agent-memo.workspace = true
+aria-agent-core = { workspace = true, features = ["openai"] }
+aria-agent-memo.workspace = true
 
 [features]
 default = ["openai"]
 # Wire real OpenAI calls in the SDK agent runtime.
-openai = ["agent-core/openai"]
+openai = ["aria-agent-core/openai"]

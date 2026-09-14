@@ -9,15 +9,15 @@ harness, exposing agents as (a) a **Rust + Postgres cloud API** and (b)
 | Module | What it is |
 |--------|------------|
 | **codex submodule** | `openai/codex` at `codex/` (harness, sandboxing, memories). |
-| **agent-memo** | Unified **context memory** (memo). Local/embedded store, **not Postgres**. |
-| **agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube. |
-| **agent-core** | Unified agent runtime: `recall → model → memorize`, tools in a sandbox. |
-| **agent-sdk** | UniFFI `cdylib` (`libagent_sdk`): `SdkAgent` / `SdkSession` / `create_agent`. |
-| **agent-cloud** | axum service, Postgres metadata only, OpenAI Agents API. `/v1/agents`, `/v1/runs`, SSE `/v1/runs/stream`. |
+| **aria-agent-memo** | Unified **context memory** (memo). Local/embedded store, **not Postgres**. |
+| **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube. |
+| **aria-agent-core** | Unified agent runtime: `recall → model → memorize`, tools in a sandbox. |
+| **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent` / `SdkSession` / `create_agent`. |
+| **aria-agent-cloud** | axum service, Postgres metadata only, OpenAI Agents API. `/v1/agents`, `/v1/runs`, SSE `/v1/runs/stream`. |
 | **bindings** | `bindings/swift` (SwiftPM) and `bindings/kotlin` (Android). |
 
 > **Storage boundary:** memo is the *only* context store and never uses
-> Postgres. Postgres is used *only* by `agent-cloud` for `agents`/`runs`
+> Postgres. Postgres is used *only* by `aria-agent-cloud` for `agents`/`runs`
 > metadata.
 
 ## Quick start
@@ -33,12 +33,12 @@ cargo build --workspace
 cargo test --workspace
 
 # 4. generate Swift/Kotlin bindings (needs the cdylib built)
-just ffi        # = cargo run -p agent-ffigen
+just ffi        # = cargo run -p aria-agent-ffigen
 
 # 5. run the cloud API (needs Postgres + OpenAI key)
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/agent
 export OPENAI_API_KEY=sk-...
-cargo run -p agent-cloud
+cargo run -p aria-agent-cloud
 ```
 
 ## Using the cloud API
@@ -50,12 +50,12 @@ curl -X POST localhost:3000/v1/runs   -d '{"agent_id":"<id>","session":"s1","inp
 
 ## Using the native SDK (Swift / Kotlin)
 
-See `bindings/swift/README.md` and `bindings/kotlin/agent-sdk/README.md`.
+See `bindings/swift/README.md` and `bindings/kotlin/ariacompute-agent/README.md`.
 
 ## Layout
 
 ```
-crates/      agent-memo, agent-sandbox, agent-core, agent-sdk, agent-cloud, agent-ffigen
+crates/      aria-agent-memo, aria-agent-sandbox, aria-agent-core, ariacompute-agent, aria-agent-cloud, aria-agent-ffigen
 bindings/    swift, kotlin
 codex/       openai/codex submodule
 docs/        architecture.md + adr/

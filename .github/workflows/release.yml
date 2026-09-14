@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BIN_NAME: agent-cloud
+  BIN_NAME: aria-agent
 
 jobs:
   build:
@@ -64,11 +64,28 @@ jobs:
           TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Embed release tag (sans leading v) into agent-cloud -v/--version.
+          # Embed release tag (sans leading v) into aria-agent -v/--version.
           export ARIA_AGENT_VERSION="${TAG_NAME#v}"
           echo "ARIA_AGENT_VERSION=$ARIA_AGENT_VERSION"
-          cargo build --release -p agent-cloud
-          cargo build --release -p agent-sdk
+          cargo build --release -p aria-agent-cloud
+          cargo build --release -p ariacompute-agent
+
+      - name: Rename FFI cdylib to published name
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Rust lib target names cannot contain hyphens, so cargo emits the
+          # cdylib/static lib as libaria_agent_ffi.* / aria_agent_ffi.dll. Publish
+          # it under the aria-agent_ffi label by copying to hyphenated names.
+          cd target/release
+          ren() { [ -f "$1" ] && cp "$1" "$2"; }
+          ren libaria_agent_ffi.so      libaria-agent_ffi.so
+          ren libaria_agent_ffi.dylib   libaria-agent_ffi.dylib
+          ren libaria_agent_ffi.a       libaria-agent_ffi.a
+          ren aria_agent_ffi.dll         aria-agent_ffi.dll
+          ren aria_agent_ffi.dll.lib     aria-agent_ffi.dll.lib
+          ren aria_agent_ffi.lib         aria-agent_ffi.lib
+          cd ../..
 
       - name: Package release archive (Unix)
         if: matrix.archive == 'tar.gz'
@@ -79,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG_NAME#v}"
-          ARCHIVE_NAME="agent-cloud_${VERSION}_${ASSET_OS}.tar.gz"
+          ARCHIVE_NAME="aria-agent_${VERSION}_${ASSET_OS}.tar.gz"
           tar -czf "$ARCHIVE_NAME" -C target/release "$BIN_NAME"
           echo "ASSET_PATH=$ARCHIVE_NAME" >> "$GITHUB_ENV"
 
@@ -91,11 +108,11 @@ jobs:
           ASSET_OS: ${{ matrix.asset_os }}
         run: |
           $version = $env:TAG_NAME.TrimStart('v')
-          $archiveName = "agent-cloud_${version}_$($env:ASSET_OS).zip"
+          $archiveName = "aria-agent_${version}_$($env:ASSET_OS).zip"
           Compress-Archive -Path "target/release/$($env:BIN_NAME).exe" -DestinationPath $archiveName -Force
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=$archiveName"
 
-      - name: Package libagent-sdk (Unix)
+      - name: Package libaria-agent_ffi (Unix)
         if: matrix.archive == 'tar.gz'
         shell: bash
         env:
@@ -104,23 +121,23 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG_NAME#v}"
-          ARCHIVE_NAME="libagent-sdk_${VERSION}_${ASSET_OS}.tar.gz"
+          ARCHIVE_NAME="libaria-agent_ffi_${VERSION}_${ASSET_OS}.tar.gz"
           cd target/release
-          if [[ -f libagent_sdk.dylib ]]; then
-            tar -czf "../../$ARCHIVE_NAME" libagent_sdk.dylib
-          elif [[ -f libagent_sdk.so ]]; then
-            tar -czf "../../$ARCHIVE_NAME" libagent_sdk.so
-          elif [[ -f libagent_sdk.a ]]; then
-            tar -czf "../../$ARCHIVE_NAME" libagent_sdk.a
+          if [[ -f libaria-agent_ffi.dylib ]]; then
+            tar -czf "../../$ARCHIVE_NAME" libaria-agent_ffi.dylib
+          elif [[ -f libaria-agent_ffi.so ]]; then
+            tar -czf "../../$ARCHIVE_NAME" libaria-agent_ffi.so
+          elif [[ -f libaria-agent_ffi.a ]]; then
+            tar -czf "../../$ARCHIVE_NAME" libaria-agent_ffi.a
           else
-            echo "No libagent_sdk shared/static library found in target/release" >&2
+            echo "No libaria-agent_ffi shared/static library found in target/release" >&2
             ls -la
             exit 1
           fi
           cd ../..
           echo "FFI_ASSET_PATH=$ARCHIVE_NAME" >> "$GITHUB_ENV"
 
-      - name: Package libagent-sdk (Windows)
+      - name: Package libaria-agent_ffi (Windows)
         if: matrix.archive == 'zip'
         shell: bash
         env:
@@ -129,21 +146,21 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG_NAME#v}"
-          ARCHIVE_NAME="libagent-sdk_${VERSION}_${ASSET_OS}.tar.gz"
+          ARCHIVE_NAME="libaria-agent_ffi_${VERSION}_${ASSET_OS}.tar.gz"
           cd target/release
-          if [[ -f agent_sdk.dll ]]; then
-            FILES=(agent_sdk.dll)
-            if [[ -f agent_sdk.dll.lib ]]; then
-              cp agent_sdk.dll.lib agent_sdk.dll.lib
-              FILES+=(agent_sdk.dll.lib)
+          if [[ -f aria-agent_ffi.dll ]]; then
+            FILES=(aria-agent_ffi.dll)
+            if [[ -f aria-agent_ffi.dll.lib ]]; then
+              cp aria-agent_ffi.dll.lib aria-agent_ffi.dll.lib
+              FILES+=(aria-agent_ffi.dll.lib)
             fi
-            if [[ -f agent_sdk.lib ]]; then
-              cp agent_sdk.lib agent_sdk.lib
-              FILES+=(agent_sdk.lib)
+            if [[ -f aria-agent_ffi.lib ]]; then
+              cp aria-agent_ffi.lib aria-agent_ffi.lib
+              FILES+=(aria-agent_ffi.lib)
             fi
             tar -czf "../../$ARCHIVE_NAME" "${FILES[@]}"
           else
-            echo "No agent_sdk.dll found in target/release" >&2
+            echo "No aria-agent_ffi.dll found in target/release" >&2
             ls -la
             exit 1
           fi
@@ -177,17 +194,17 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION"
-      - name: crates.io agent-sdk (+ deps)
+      - name: crates.io ariacompute-agent (+ deps)
         run: |
-          echo "crates.io publish handled by publish-cargo.yml (agent-sdk + deps)"
+          echo "crates.io publish handled by publish-cargo.yml (ariacompute-agent + deps)"
           echo "crates.io publish stub"
-      - name: CocoaPods Swift AgentSDK
+      - name: CocoaPods Swift AriaAgent
         env:
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
         run: |
-          echo "Configure COCOAPODS_TRUNK_TOKEN then: pod trunk push bindings/swift/AgentSDK.podspec"
+          echo "Configure COCOAPODS_TRUNK_TOKEN then: pod trunk push bindings/swift/AriaAgent.podspec"
           echo "CocoaPods publish stub (fail-pass)"
-      - name: Maven Central com.ariacompute:agent-sdk (Android AAR)
+      - name: Maven Central com.ariacompute:agent (Android AAR)
         run: |
           echo "Maven publish handled by publish-maven.yml (vanniktech plugin -> Central Portal)"
           echo "Maven publish stub"

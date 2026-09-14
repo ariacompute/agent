@@ -1,9 +1,12 @@
 [package]
-name = "agent-sandbox"
+name = "aria-agent-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Pluggable sandbox abstraction for the agent platform. Docker (default), Kata, Cube providers."
+
+[lib]
+name = "agent_sandbox"
 
 [dependencies]
 tokio.workspace = true

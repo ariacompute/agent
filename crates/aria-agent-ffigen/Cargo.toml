@@ -1,13 +1,13 @@
 [package]
-name = "agent-ffigen"
+name = "aria-agent-ffigen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Helper that generates Swift/Kotlin UniFFI bindings from the agent-sdk cdylib (matches uniffi 0.28.3)."
+description = "Helper that generates Swift/Kotlin UniFFI bindings from the ariacompute-agent cdylib (matches uniffi 0.28.3)."
 
 [[bin]]
-name = "agent-ffigen"
+name = "aria-agent-ffigen"
 path = "src/main.rs"
 
 [dependencies]

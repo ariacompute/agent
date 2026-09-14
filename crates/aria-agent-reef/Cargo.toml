@@ -1,9 +1,12 @@
 [package]
-name = "agent-reef"
+name = "aria-agent-reef"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Reef-style continual self-improvement for agents: records, feedback, harness evolution, git versioning, hot-serve."
+
+[lib]
+name = "agent_reef"
 
 [dependencies]
 tokio.workspace = true
@@ -14,8 +17,8 @@ async-trait.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 sled = "0.34"
-agent-core.workspace = true
-agent-memo.workspace = true
+aria-agent-core.workspace = true
+aria-agent-memo.workspace = true
 
 [dev-dependencies]
 futures = "0.3"

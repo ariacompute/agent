@@ -18,26 +18,26 @@ The harness is the unit of self-improvement. It must be:
 * hot-swappable so live traffic uses the winner immediately.
 
 ## Decision
-* Add a new crate **`agent-reef`** that owns the self-improvement loop
+* Add a new crate **`aria-agent-reef`** that owns the self-improvement loop
   (records, feedback, harness files, Git versioning, evolution engine). It
-  depends **only** on `agent-core` (for `ModelClient` / `Harness` /
-  `ActiveHarness`); `agent-core` does **not** depend back on `agent-reef`.
-* **`Harness` / `Skill` / `Rule` / `ActiveHarness` live in `agent-core`** (the
-  `Agent` consumes the active harness directly; `agent-cloud` shares one
+  depends **only** on `aria-agent-core` (for `ModelClient` / `Harness` /
+  `ActiveHarness`); `aria-agent-core` does **not** depend back on `aria-agent-reef`.
+* **`Harness` / `Skill` / `Rule` / `ActiveHarness` live in `aria-agent-core`** (the
+  `Agent` consumes the active harness directly; `aria-agent-cloud` shares one
   `ActiveHarness` across all agents). `ActiveHarness` is an `RwLock<Arc<Harness>>`:
   reads clone an `Arc` (O(1), no async), writes atomically swap the served
   harness — the hot-serve mechanism.
-* **Records and feedback are stored in a local sled store** (`agent-reef`,
+* **Records and feedback are stored in a local sled store** (`aria-agent-reef`,
   `SledRecordStore` / `SledFeedbackStore`), deliberately **not** in Postgres and
   **not** in memo:
-  * Postgres (`agent-cloud`) keeps only `agents` / `runs` metadata (ADR 0004).
+  * Postgres (`aria-agent-cloud`) keeps only `agents` / `runs` metadata (ADR 0004).
   * memo keeps only conversational / long-term context (ADR 0004). Records are
     *learning* logs, not context, so they stay out of both.
 * **Git versioning** lives under a `.reef/` directory of Markdown harness files
   (`system_prompt.md`, `skills/*.md`, `rules/*.md`). We shell out to the system
   `git` (`std::process::Command`) — no heavy `git2` dependency — committing and
   tagging each winning harness as `reef@<n>`.
-* **`agent-cloud`** records every turn and returns the receipt as the
+* **`aria-agent-cloud`** records every turn and returns the receipt as the
   `x-reef-agent-record-id` response header; adds `POST /reef/report` (bind
   feedback, references must name existing records), `POST /reef/evolve` (run the
   engine), and `GET /reef/versions` (list committed versions + `baseline`). On
@@ -55,6 +55,6 @@ The harness is the unit of self-improvement. It must be:
   a readable, rollbackable Git history, without restarts.
 * Sensitive conversation text stays out of Postgres/memo; records are a separate
   local store.
-* The `agent-sdk` / `agent-ffigen` FFI surface is **unchanged** this milestone
+* The `ariacompute-agent` / `aria-agent-ffigen` FFI surface is **unchanged** this milestone
   (no drift-check breakage); `/reef/*` is exposed only over HTTP for now.
 * Requires `git` on the host for versioning (degrades gracefully without it).

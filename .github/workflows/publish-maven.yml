@@ -1,8 +1,8 @@
-name: Publish Maven Central (com.ariacompute:agent-sdk)
+name: Publish Maven Central (com.ariacompute:agent)
 
 # Publish the Kotlin (Android) binding to Maven Central via the Sonatype
 # Central Portal (central.sonatype.com), so consumers can use:
-#   implementation("com.ariacompute:agent-sdk:<version>")
+#   implementation("com.ariacompute:agent:<version>")
 #
 # bindings/kotlin/agent-sdk/build.gradle.kts applies the vanniktech
 # maven-publish plugin (com.vanniktech.maven.publish) with
@@ -38,7 +38,7 @@ on:
 
 jobs:
   publish:
-    name: Maven Central com.ariacompute:agent-sdk
+    name: Maven Central com.ariacompute:agent
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

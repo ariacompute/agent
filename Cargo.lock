@@ -3,115 +3,13 @@
 version = 4
 
 [[package]]
-name = "agent-cloud"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "agent-memo",
- "agent-reef",
- "async-stream",
- "axum",
- "futures",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "agent-core"
-version = "0.1.0"
-dependencies = [
- "agent-memo",
- "agent-sandbox",
- "async-openai",
- "async-stream",
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-ffigen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "camino",
- "uniffi_bindgen",
-]
-
-[[package]]
-name = "agent-memo"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "sled",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "agent-reef"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "agent-memo",
- "async-stream",
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "sled",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-sandbox"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-sdk"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "agent-memo",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "uniffi",
-]
-
-[[package]]
 name = "agent-tests"
 version = "0.1.0"
 dependencies = [
- "agent-core",
- "agent-memo",
- "agent-reef",
- "agent-sandbox",
+ "aria-agent-core",
+ "aria-agent-memo",
+ "aria-agent-reef",
+ "aria-agent-sandbox",
  "tokio",
  "uuid",
 ]
@@ -136,6 +34,108 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "aria-agent-cloud"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-memo",
+ "aria-agent-reef",
+ "async-stream",
+ "axum",
+ "futures",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "aria-agent-core"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-memo",
+ "aria-agent-sandbox",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "aria-agent-ffigen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "uniffi_bindgen",
+]
+
+[[package]]
+name = "aria-agent-memo"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sled",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "aria-agent-reef"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-memo",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "sled",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "aria-agent-sandbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ariacompute-agent"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-memo",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "uniffi",
+]
 
 [[package]]
 name = "askama"

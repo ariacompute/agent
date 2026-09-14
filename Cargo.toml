@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/agent-memo",
-    "crates/agent-sandbox",
-    "crates/agent-core",
-    "crates/agent-sdk",
-    "crates/agent-cloud",
-    "crates/agent-reef",
-    "crates/agent-ffigen",
+    "crates/aria-agent-memo",
+    "crates/aria-agent-sandbox",
+    "crates/aria-agent-core",
+    "crates/ariacompute-agent",
+    "crates/aria-agent-cloud",
+    "crates/aria-agent-reef",
+    "crates/aria-agent-ffigen",
     "tests",
 ]
 
@@ -33,10 +33,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cross-cutting crates (path deps within this workspace)
-agent-memo = { path = "crates/agent-memo" }
-agent-sandbox = { path = "crates/agent-sandbox" }
-agent-core = { path = "crates/agent-core" }
-agent-reef = { path = "crates/agent-reef" }
+aria-agent-memo = { path = "crates/aria-agent-memo" }
+aria-agent-sandbox = { path = "crates/aria-agent-sandbox" }
+aria-agent-core = { path = "crates/aria-agent-core" }
+aria-agent-reef = { path = "crates/aria-agent-reef" }
 
 [profile.release]
 opt-level = 2

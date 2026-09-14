@@ -10,7 +10,7 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 ## 2. Agents Cloud API (Rust + Postgres)
 * axum HTTP service exposing `/v1/agents` (create/get) and `/v1/runs`
   (JSON) plus SSE-streaming `/v1/runs/stream`.
-* Calls the OpenAI Agents / Responses API through `agent-core`'s
+* Calls the OpenAI Agents / Responses API through `aria-agent-core`'s
   `OpenAiModel` (feature `openai`).
 * **Postgres stores only metadata** (`agents`, `runs`); context is injected
   from memo.
@@ -18,7 +18,7 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 ## 3. Agent SDK (UniFFI, Swift / Kotlin)
 * Stable FFI surface: `SdkAgent` (`run`, `session`), `SdkSession`
   (`memorize`, `recall`), `create_agent`, `SdkAgentConfig`, `SdkError`.
-* Compiled to a cross-platform `cdylib` (`libagent_sdk`).
+* Compiled to a cross-platform `cdylib` (`libaria-agent_ffi`).
 * Swift (SwiftPM) and Kotlin (Android) bindings generated from the cdylib.
 
 ## 4. Pluggable Sandbox (docker / kata / cubesandbox)
@@ -28,7 +28,7 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
   config-driven selection.
 
 ## 5. Memo (Context Memory)
-* Unified context memory store (`agent-memo`), local/embedded (**sled**,
+* Unified context memory store (`aria-agent-memo`), local/embedded (**sled**,
   `:memory:` for tests), **not Postgres**.
 * `MemoStore` trait contract: `memorize` / `recall` / `compact` /
   `get_by_key`. `SledMemoStore` is the shipped implementation.
@@ -40,15 +40,15 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
   local hashing-trick `LocalEmbedder` (TF/L2-normalized, zero ML deps)
   auto-populates `embedding` on memorize and `cosine` similarity ranks
   results; exact `key` matches rank first.
-* The **only** source of conversational/long-term context for `agent-core`
-  (run loop) and `agent-cloud` (request construction).
+* The **only** source of conversational/long-term context for `aria-agent-core`
+  (run loop) and `aria-agent-cloud` (request construction).
 * Covered by unit tests for normal (memorize/recall roundtrip, kind + session
   filtering, `get_by_key` roundtrip, embedding population, semantic ranking)
   and abnormal paths (empty query, `compact` on a missing session →
   `NotFound`, embedder on empty text).
 
 ## 6. Reef self-improvement (record → feedback → evolve → version → hot-serve)
-* `agent-reef` crate implements a Reef-style continuous self-improvement loop
+* `aria-agent-reef` crate implements a Reef-style continuous self-improvement loop
   (inspired by Human-Agent-Society/reef). It evolves the agent's **skills /
   prompts / rules** (the `Harness`), not its long-term context.
 * **Record**: every turn is logged to a local sled `RecordStore`, returning a
@@ -64,8 +64,8 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
   committed / tagged (`reef@<n>`) via `std::process::Command` (no `git2` dep);
   **fail-closed** when git is unavailable or the commit fails.
 * **Hot-serve**: the served harness is a shared `ActiveHarness`
-  (`Arc<RwLock<Arc<Harness>>>`) — `agent-core`'s `Agent` reads it each turn
-  (O(1) `Arc` clone, no serialization, no restart). `agent-cloud` loads the
+  (`Arc<RwLock<Arc<Harness>>>`) — `aria-agent-core`'s `Agent` reads it each turn
+  (O(1) `Arc` clone, no serialization, no restart). `aria-agent-cloud` loads the
   last winner on boot (fallback to baseline) and shares it across all agents.
 * Cloud endpoints: `POST /reef/report` (bind feedback), `POST /reef/evolve`
   (run the loop), `GET /reef/versions` (list Git tags).
@@ -75,23 +75,23 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 
 ## 7. Release & publishing
 * On `release: created`, `.github/workflows/release.yml` builds, tests, and packages
-  the `agent-cloud` binary and the `agent-sdk` FFI cdylib (`libagent_sdk`) across
+  the `aria-agent-cloud` binary and the `ariacompute-agent` FFI cdylib (`libaria-agent_ffi`) across
   linux-x86_64 / windows-x86_64 / linux-arm64 / macos, injects the release tag (sans
   leading `v`) via `ARIA_AGENT_VERSION`, and uploads the archives to the GitHub Release
-  (`secrets.ARIACOMPUTE_TOKEN`). `agent-cloud` is the CLI/cloud binary (GitHub Release
-  asset, not on crates.io); `agent-ffigen` is `publish = false`.
+  (`secrets.ARIACOMPUTE_TOKEN`). `aria-agent-cloud` is the CLI/cloud binary (GitHub Release
+  asset, not on crates.io); `aria-agent-ffigen` is `publish = false`.
 * Language-package publishing is a **fail-pass** `publish-packages` job
   (`continue-on-error: true`) that only stubs crates.io / CocoaPods Swift /
   Maven Central so it can never block the CLI/FFI assets.
 * `publish-cargo.yml` publishes to crates.io in topological order:
-  `agent-memo` → `agent-sandbox` → `agent-core` → `agent-sdk`, with version injection
+  `aria-agent-memo` → `aria-agent-sandbox` → `aria-agent-core` → `ariacompute-agent`, with version injection
   into the workspace `Cargo.toml` and retries for registry lag / HTTP 429
   (`secrets.CARGO_REGISTRY_TOKEN`).
 * `publish-maven.yml` publishes the Kotlin/Android binding to Maven Central
-  (`com.ariacompute:agent-sdk`) via the vanniktech plugin
-  (`bindings/kotlin/agent-sdk/build.gradle.kts`): `publishToMavenCentral` +
+  (`com.ariacompute:agent`) via the vanniktech plugin
+  (`bindings/kotlin/ariacompute-agent/build.gradle.kts`): `publishToMavenCentral` +
   `signAllPublications()`, using `secrets.SONATYPE_USERNAME` / `SONATYPE_PASSWORD` and
   `secrets.GPG_PRIVATE_KEY` / `GPG_PASSPHRASE`.
-* Swift is published via CocoaPods from `bindings/swift/AgentSDK.podspec`
+* Swift is published via CocoaPods from `bindings/swift/AriaAgent.podspec`
   (`pod trunk push`; `secrets.COCOAPODS_TRUNK_TOKEN`), wrapping the native
-  `libagent_sdk.a` built by `cargo build -p agent-sdk`.
+  `libaria-agent_ffi.a` built by `cargo build -p ariacompute-agent`.

@@ -9,36 +9,36 @@ as (a) a Rust + Postgres cloud service and (b) native SDKs for Swift / Kotlin.
 codex submodule (codex-rs: core/harness, sandboxing, memories)
         │  (referenced by design; our crates mirror its shape)
         ▼
-agent-core        unified agent runtime (run loop + tool scheduling)
+aria-agent-core        unified agent runtime (run loop + tool scheduling)
         │
    ┌────┴─────────────┬───────────────────────┐
    ▼                  ▼                       ▼
-agent-sandbox    agent-memo (Context Memory)   (shared cross-cutting)
+aria-agent-sandbox    aria-agent-memo (Context Memory)   (shared cross-cutting)
    │                  │
    ▼                  ▼
-agent-cloud  ◀──── memo + sandbox (context + isolation)
+aria-agent-cloud  ◀──── memo + sandbox (context + isolation)
    │  HTTP API
    ▼
-agent-sdk (UniFFI cdylib) ──► bindings/swift, bindings/kotlin
+ariacompute-agent (UniFFI cdylib) ──► bindings/swift, bindings/kotlin
 ```
 
 | Crate | Role |
 |-------|------|
-| `agent-memo` | Unified **context memory** (memo). Local/embedded store (sled). `memorize` / `recall` / `compact`. **Not Postgres.** |
-| `agent-sandbox` | Pluggable `Sandbox` trait. Providers: `DockerSandbox` (default), `KataSandbox`, `CubeSandbox`. |
-| `agent-core` | `Agent` runtime. Every `run` does `recall` → model → `memorize`. Tools run in a `Sandbox`. |
-| `agent-sdk` | UniFFI `cdylib` (`libagent_sdk`). Stable FFI: `SdkAgent`, `SdkSession`. |
-| `agent-cloud` | axum service. Postgres holds **only metadata** (`agents`, `runs`); context comes from memo. Calls OpenAI via `agent-core`. |
-| `agent-ffigen` | Helper that regenerates Swift/Kotlin bindings from the cdylib. |
+| `aria-agent-memo` | Unified **context memory** (memo). Local/embedded store (sled). `memorize` / `recall` / `compact`. **Not Postgres.** |
+| `aria-agent-sandbox` | Pluggable `Sandbox` trait. Providers: `DockerSandbox` (default), `KataSandbox`, `CubeSandbox`. |
+| `aria-agent-core` | `Agent` runtime. Every `run` does `recall` → model → `memorize`. Tools run in a `Sandbox`. |
+| `ariacompute-agent` | UniFFI `cdylib` (`libaria-agent_ffi`). Stable FFI: `SdkAgent`, `SdkSession`. |
+| `aria-agent-cloud` | axum service. Postgres holds **only metadata** (`agents`, `runs`); context comes from memo. Calls OpenAI via `aria-agent-core`. |
+| `aria-agent-ffigen` | Helper that regenerates Swift/Kotlin bindings from the cdylib. |
 
 ## Storage boundary (important)
 
 * **memo** is the *only* source of conversational / long-term context. It uses a
   local/embedded store and **never** Postgres.
-* **Postgres** is used *exclusively* by `agent-cloud` for structured metadata.
+* **Postgres** is used *exclusively* by `aria-agent-cloud` for structured metadata.
   Context text is never written to Postgres (see `migrations/0001_init.sql`).
 
-## Agent run loop (in `agent-core::Agent::run`)
+## Agent run loop (in `aria-agent-core::Agent::run`)
 
 1. `recall` context fragments from memo for the session.
 2. Persist the user turn to memo.
@@ -49,15 +49,15 @@ agent-sdk (UniFFI cdylib) ──► bindings/swift, bindings/kotlin
 
 ## Sandbox
 
-`agent-sandbox` mirrors codex's `sandboxing` / `linux-sandbox` `ExecSpec` /
+`aria-agent-sandbox` mirrors codex's `sandboxing` / `linux-sandbox` `ExecSpec` /
 `ExecOutput` shape and adds a `SandboxProvider` abstraction. Each provider shells
 out to a platform binary (`docker`, `docker --runtime=kata`, `cube`). Docker is
 the default; selectable via `AgentConfig.sandbox_provider`.
 
 ## FFI
 
-`agent-sdk` exposes a small stable surface (`SdkAgent`, `SdkSession`,
-`create_agent`). Generate bindings with `just ffi` (runs `agent-ffigen`), which
+`ariacompute-agent` exposes a small stable surface (`SdkAgent`, `SdkSession`,
+`create_agent`). Generate bindings with `just ffi` (runs `aria-agent-ffigen`), which
 emits `bindings/swift` and `bindings/kotlin`.
 
 ## References to codex

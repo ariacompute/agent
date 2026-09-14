@@ -7,8 +7,8 @@ import Foundation
 // Depending on the consumer's build setup, the low-level FFI code
 // might be in a separate module, or it might be compiled inline into
 // this module. This is a bit of light hackery to work with both.
-#if canImport(agent_sdkFFI)
-import agent_sdkFFI
+#if canImport(aria_agent_ffi)
+import aria_agent_ffi
 #endif
 
 fileprivate extension RustBuffer {
@@ -25,13 +25,13 @@ fileprivate extension RustBuffer {
     }
 
     static func from(_ ptr: UnsafeBufferPointer<UInt8>) -> RustBuffer {
-        try! rustCall { ffi_agent_sdk_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
+        try! rustCall { ffi_aria_agent_ffi_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
     }
 
     // Frees the buffer in place.
     // The buffer must not be used after this is called.
     func deallocate() {
-        try! rustCall { ffi_agent_sdk_rustbuffer_free(self, $0) }
+        try! rustCall { ffi_aria_agent_ffi_rustbuffer_free(self, $0) }
     }
 }
 
@@ -495,7 +495,7 @@ open class SdkAgent:
     @_documentation(visibility: private)
 #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_agent_sdk_fn_clone_sdkagent(self.pointer, $0) }
+        return try! rustCall { uniffi_aria_agent_ffi_fn_clone_sdkagent(self.pointer, $0) }
     }
     // No primary constructor declared for this class.
 
@@ -504,7 +504,7 @@ open class SdkAgent:
             return
         }
 
-        try! rustCall { uniffi_agent_sdk_fn_free_sdkagent(pointer, $0) }
+        try! rustCall { uniffi_aria_agent_ffi_fn_free_sdkagent(pointer, $0) }
     }
 
     
@@ -515,7 +515,7 @@ open class SdkAgent:
      */
 open func run(input: String)throws  -> String {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_agent_sdk_fn_method_sdkagent_run(self.uniffiClonePointer(),
+    uniffi_aria_agent_ffi_fn_method_sdkagent_run(self.uniffiClonePointer(),
         FfiConverterString.lower(input),$0
     )
 })
@@ -526,7 +526,7 @@ open func run(input: String)throws  -> String {
      */
 open func session() -> SdkSession {
     return try!  FfiConverterTypeSdkSession.lift(try! rustCall() {
-    uniffi_agent_sdk_fn_method_sdkagent_session(self.uniffiClonePointer(),$0
+    uniffi_aria_agent_ffi_fn_method_sdkagent_session(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -643,7 +643,7 @@ open class SdkSession:
     @_documentation(visibility: private)
 #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_agent_sdk_fn_clone_sdksession(self.pointer, $0) }
+        return try! rustCall { uniffi_aria_agent_ffi_fn_clone_sdksession(self.pointer, $0) }
     }
     // No primary constructor declared for this class.
 
@@ -652,7 +652,7 @@ open class SdkSession:
             return
         }
 
-        try! rustCall { uniffi_agent_sdk_fn_free_sdksession(pointer, $0) }
+        try! rustCall { uniffi_aria_agent_ffi_fn_free_sdksession(pointer, $0) }
     }
 
     
@@ -662,7 +662,7 @@ open class SdkSession:
      * Write a long-term memory under `key`.
      */
 open func memorize(key: String, value: String)throws  {try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_agent_sdk_fn_method_sdksession_memorize(self.uniffiClonePointer(),
+    uniffi_aria_agent_ffi_fn_method_sdksession_memorize(self.uniffiClonePointer(),
         FfiConverterString.lower(key),
         FfiConverterString.lower(value),$0
     )
@@ -674,7 +674,7 @@ open func memorize(key: String, value: String)throws  {try rustCallWithError(Ffi
      */
 open func recall(key: String)throws  -> String? {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_agent_sdk_fn_method_sdksession_recall(self.uniffiClonePointer(),
+    uniffi_aria_agent_ffi_fn_method_sdksession_recall(self.uniffiClonePointer(),
         FfiConverterString.lower(key),$0
     )
 })
@@ -902,7 +902,7 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
  */
 public func createAgent(config: SdkAgentConfig)throws  -> SdkAgent {
     return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_agent_sdk_fn_func_create_agent(
+    uniffi_aria_agent_ffi_fn_func_create_agent(
         FfiConverterTypeSdkAgentConfig.lower(config),$0
     )
 })
@@ -919,23 +919,23 @@ private var initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
     let bindings_contract_version = 26
     // Get the scaffolding contract version by calling the into the dylib
-    let scaffolding_contract_version = ffi_agent_sdk_uniffi_contract_version()
+    let scaffolding_contract_version = ffi_aria_agent_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_agent_sdk_checksum_func_create_agent() != 6691) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 6691) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_agent_sdk_checksum_method_sdkagent_run() != 59383) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 59383) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_agent_sdk_checksum_method_sdkagent_session() != 34161) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 34161) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_agent_sdk_checksum_method_sdksession_memorize() != 15713) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 15713) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_agent_sdk_checksum_method_sdksession_recall() != 3292) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 3292) {
         return InitializationResult.apiChecksumMismatch
     }
 
