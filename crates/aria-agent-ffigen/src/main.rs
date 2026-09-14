@@ -14,7 +14,8 @@ fn main() -> anyhow::Result<()> {
     let supplier = CrateConfigSupplier::default();
 
     let swift_out = Utf8Path::new("bindings/swift/Sources/AriaAgent");
-    let kotlin_out = Utf8Path::new("bindings/kotlin/ariacompute-agent/src/main/kotlin/com/ariacompute/agent");
+    let kotlin_out =
+        Utf8Path::new("bindings/kotlin/agent-sdk/src/main/kotlin/com/ariacompute/agent");
 
     library_mode::generate_bindings(
         lib,
