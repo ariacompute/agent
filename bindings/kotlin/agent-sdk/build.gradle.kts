@@ -35,6 +35,10 @@ android {
 
 dependencies {
     implementation(kotlin("stdlib"))
+    // UniFFI Kotlin bindings are JNA-based: the generated aria_agent_ffi.kt
+    // references com.sun.jna.* (Structure/Pointer/Library/Native/Cleaner...).
+    // Use the AAR so libjnidispatch.so for the configured ABIs is bundled.
+    implementation("net.java.dev.jna:jna:5.14.0@aar")
 }
 
 mavenPublishing {
