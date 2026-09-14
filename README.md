@@ -162,6 +162,11 @@ All cloud examples assume a running service (see Quick start) and, when
 `AGENT_CLOUD_API_KEY` is set, an `Authorization: Bearer <key>` (or
 `ApiKey <key>`) header.
 
+In the `/v1/runs` and `/v1/runs/stream` bodies, you may use the agent's
+human-friendly name `agent` instead of `agent_id` (the run is resolved per
+principal). The `session` field is also optional and defaults to `"default"`,
+and `stream` is accepted for client compatibility.
+
 ### Python (cloud API)
 
 ```python

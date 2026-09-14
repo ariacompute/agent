@@ -156,6 +156,10 @@ AGENT_MEMO_BACKEND=memo docker compose up --build
 `AGENT_CLOUD_API_KEY`，需携带 `Authorization: Bearer <key>`（或 `ApiKey <key>`）
 请求头。
 
+在 `/v1/runs` 与 `/v1/runs/stream` 的请求体中，可用更易读的智能体名字 `agent`
+代替 `agent_id`（会按当前 principal 解析该智能体）。`session` 字段也是可选的，
+默认值为 `"default"`，且 `stream` 也可一并传入以兼容客户端写法。
+
 ### Python（云端 API）
 
 ```python

@@ -46,7 +46,7 @@ use futures::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::Executor;
 use sqlx::Row;
 use uuid::Uuid;
@@ -444,9 +444,21 @@ struct CreateAgentBody {
 
 #[derive(Deserialize)]
 struct RunBody {
-    agent_id: String,
-    session: String,
+    /// Resolve the agent by id (original behavior)…
+    #[serde(default)]
+    agent_id: Option<String>,
+    /// …or by its human-friendly name (marketing / quick-start friendly).
+    #[serde(default)]
+    agent: Option<String>,
+    /// Optional session; defaults to `"default"` when omitted.
+    #[serde(default)]
+    session: Option<String>,
     input: String,
+    /// Accepted for client compatibility; `/v1/runs/stream` always streams, so
+    /// this is currently ignored.
+    #[serde(default)]
+    #[allow(dead_code)]
+    stream: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -626,11 +638,11 @@ fn generate_key() -> (String, String, String) {
 /// process-wide `ActiveHarness` so a self-improvement win is picked up live).
 async fn build_agent(
     state: &AppState,
-    body: &RunBody,
+    name: &str,
+    session: &str,
     principal: &Principal,
 ) -> Result<Agent, AppError> {
-    let name = agent_name(state, &body.agent_id, principal).await?;
-    let cfg = agent_config(&name, &body.session);
+    let cfg = agent_config(name, session);
     let memo = state.memo_for(principal);
     Agent::with_harness(
         cfg,
@@ -691,7 +703,15 @@ async fn run_agent(
     principal: Principal,
     Json(body): Json<RunBody>,
 ) -> Response {
-    let agent = match build_agent(&state, &body, &principal).await {
+    let (agent_id, name) = match resolve_agent(&state, &body, &principal).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let session = body
+        .session
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let agent = match build_agent(&state, &name, &session, &principal).await {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -704,8 +724,8 @@ async fn run_agent(
     // Both are scoped to the calling principal's stores.
     let records = state.records_for(&principal);
     let rec = Record::new(
-        &body.agent_id,
-        &body.session,
+        &agent_id,
+        &session,
         None,
         &state.harness_for(&principal).get().system_text(),
         &body.input,
@@ -723,8 +743,8 @@ async fn run_agent(
          VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&run_id)
-    .bind(&body.agent_id)
-    .bind(&body.session)
+    .bind(&agent_id)
+    .bind(&session)
     .bind(&body.input)
     .bind(&output)
     .bind(&principal.id)
@@ -736,8 +756,8 @@ async fn run_agent(
 
     let mut resp = Json(RunRecord {
         id: run_id,
-        agent_id: body.agent_id,
-        session: body.session,
+        agent_id,
+        session,
         output,
     })
     .into_response();
@@ -753,8 +773,16 @@ async fn run_agent_stream(
     principal: Principal,
     Json(body): Json<RunBody>,
 ) -> Response {
-    // Build the agent (resolves name + memo) before streaming.
-    let agent = match build_agent(&state, &body, &principal).await {
+    // Resolve the agent (by id or name) + session before streaming.
+    let (agent_id, name) = match resolve_agent(&state, &body, &principal).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let session = body
+        .session
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let agent = match build_agent(&state, &name, &session, &principal).await {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -765,8 +793,8 @@ async fn run_agent_stream(
     // Placeholder record so the receipt id is known before streaming begins.
     if let Err(e) = records
         .record_turn(Record::new(
-            &body.agent_id,
-            &body.session,
+            &agent_id,
+            &session,
             None,
             &sys,
             &body.input,
@@ -785,8 +813,8 @@ async fn run_agent_stream(
 
     // Finalize the record at the end of the stream (overwrite placeholder with
     // the real output, keeping the same receipt id).
-    let agent_id = body.agent_id.clone();
-    let session = body.session.clone();
+    let agent_id = agent_id.clone();
+    let session = session.clone();
     let input = body.input.clone();
     let rec_id_inner = rec_id.clone();
     let wrapped = async_stream::stream! {
@@ -828,27 +856,55 @@ async fn run_agent_stream(
     resp
 }
 
-async fn agent_name(
+/// Resolve the agent id + display name from a run body. Supports lookup by
+/// `agent_id` (original behavior) or by `agent` (human-friendly name), scoped to
+/// the calling principal (admins see all agents; tenants only their own).
+async fn resolve_agent(
     state: &AppState,
-    agent_id: &str,
+    body: &RunBody,
     principal: &Principal,
-) -> Result<String, AppError> {
-    // Admins resolve any agent; tenants only their own.
-    let row = if principal.kind == PrincipalKind::Admin {
-        sqlx::query("SELECT name FROM agents WHERE id = $1")
-            .bind(agent_id)
-            .fetch_optional(&state.pool)
-            .await
+) -> Result<(String, String), AppError> {
+    let (id, name) = match (&body.agent_id, &body.agent) {
+        // By id: look up the name (original behavior).
+        (Some(id), _) => {
+            let row = lookup_agent_row(state, "id", id, principal).await?;
+            (id.clone(), row.get("name"))
+        }
+        // By name: look up the id; the display name is the requested string.
+        (None, Some(name)) => {
+            let row = lookup_agent_row(state, "name", name, principal).await?;
+            (row.get::<String, _>("id"), name.clone())
+        }
+        // Neither provided.
+        (None, None) => {
+            return Err(AppError::BadReport(
+                "either `agent_id` or `agent` is required".into(),
+            ))
+        }
+    };
+    Ok((id, name))
+}
+
+/// `SELECT id, name FROM agents WHERE <col> = $1 [AND principal_id = $2]`.
+async fn lookup_agent_row(
+    state: &AppState,
+    col: &str,
+    val: &str,
+    principal: &Principal,
+) -> Result<PgRow, AppError> {
+    let q = if principal.kind == PrincipalKind::Admin {
+        format!("SELECT id, name FROM agents WHERE {col} = $1")
     } else {
-        sqlx::query("SELECT name FROM agents WHERE id = $1 AND principal_id = $2")
-            .bind(agent_id)
-            .bind(&principal.id)
-            .fetch_optional(&state.pool)
-            .await
+        format!("SELECT id, name FROM agents WHERE {col} = $1 AND principal_id = $2")
+    };
+    let mut q = sqlx::query(&q).bind(val);
+    if principal.kind != PrincipalKind::Admin {
+        q = q.bind(&principal.id);
     }
-    .map_err(AppError::Db)?
-    .ok_or(AppError::NotFound)?;
-    Ok(row.get("name"))
+    q.fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::Db)?
+        .ok_or(AppError::NotFound)
 }
 
 fn agent_config(name: &str, session: &str) -> AgentConfig {
