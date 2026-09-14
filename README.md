@@ -163,7 +163,7 @@ with requests.post(
 
 ### Rust (cloud API)
 
-Add `reqwest` (with `json` feature), `tokio`, `serde`, `serde_json`:
+Add `reqwest` (with `json` feature), `tokio`, `serde`, `serde_json`, and `anyhow`:
 
 ```rust
 use reqwest::Client;

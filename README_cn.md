@@ -158,7 +158,7 @@ with requests.post(
 
 ### Rust（云端 API）
 
-添加 `reqwest`（开启 `json` 特性）、`tokio`、`serde`、`serde_json`：
+添加 `reqwest`（开启 `json` 特性）、`tokio`、`serde`、`serde_json` 与 `anyhow`：
 
 ```rust
 use reqwest::Client;
