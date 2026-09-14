@@ -45,6 +45,41 @@ export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 
+## CLI
+
+The `aria-agent` binary (crate `aria-agent-cloud`) is both the cloud server
+(default subcommand `serve`) and a self-updating CLI. CLI settings live in a
+small sidecar config at `~/.ariacompute/agent-cli.yml` (override the home dir
+with `ARIA_COMPUTE_HOME`).
+
+```bash
+# Configure the Releases source interactively (github default, or gitee).
+# The choice is written to ~/.ariacompute/agent-cli.yml as `upgrade_url`.
+aria-agent setup
+#   1) github  -> https://github.com/ariacompute
+#   2) gitee   -> https://gitee.com/ariacompute
+
+# Inspect the current CLI config.
+aria-agent setup --status
+
+# Remove the CLI config file.
+aria-agent setup --clear
+
+# Self-update this binary + libaria-agent_ffi from Releases.
+# Reads `upgrade_url` from agent-cli.yml; pass --url to override.
+aria-agent upgrade            # latest stable
+aria-agent upgrade 0.7.2      # specific version
+aria-agent upgrade --url https://github.com/ariacompute
+
+# Start the cloud HTTP server (default subcommand). Reads agent-cli.yml and
+# exports ARIA_AGENT_FFI_LIB to ~/.ariacompute/lib.
+aria-agent serve
+```
+
+> The `serve` subcommand also reads `~/.ariacompute/agent-cli.yml` and points
+> `ARIA_AGENT_FFI_LIB` at `~/.ariacompute/lib` (where `upgrade` installs
+> `libaria-agent_ffi`) so native SDKs can find the cdylib.
+
 ## Docker Compose deployment
 
 The cloud service ships with a `Dockerfile` and `docker-compose.yml` for a

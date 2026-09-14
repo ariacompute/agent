@@ -43,6 +43,40 @@ export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 
+## CLI
+
+`aria-agent` 可执行文件（crate `aria-agent-cloud`）既是云端服务（默认子命令
+`serve`），也是可自更新的命令行工具。CLI 配置存放在配套的
+`~/.ariacompute/agent-cli.yml`（可用 `ARIA_COMPUTE_HOME` 覆盖主目录）。
+
+```bash
+# 交互式选择 Releases 源（默认 github，或 gitee）。
+# 选择会作为 `upgrade_url` 写入 ~/.ariacompute/agent-cli.yml。
+aria-agent setup
+#   1) github  -> https://github.com/ariacompute
+#   2) gitee   -> https://gitee.com/ariacompute
+
+# 查看当前 CLI 配置状态。
+aria-agent setup --status
+
+# 删除 CLI 配置文件。
+aria-agent setup --clear
+
+# 从 Releases 自更新本程序与 libaria-agent_ffi。
+# 读取 agent-cli.yml 中的 `upgrade_url`；用 --url 可临时覆盖。
+aria-agent upgrade            # 最新稳定版
+aria-agent upgrade 0.7.2      # 指定版本
+aria-agent upgrade --url https://github.com/ariacompute
+
+# 启动云端 HTTP 服务（默认子命令）。读取 agent-cli.yml，并把
+# ARIA_AGENT_FFI_LIB 指向 ~/.ariacompute/lib。
+aria-agent serve
+```
+
+> `serve` 子命令同样会读取 `~/.ariacompute/agent-cli.yml`，并将
+> `ARIA_AGENT_FFI_LIB` 指向 `~/.ariacompute/lib`（`upgrade` 把
+> `libaria-agent_ffi` 安装在此处），方便原生 SDK 找到该 cdylib。
+
 ## Docker Compose 部署
 
 云端服务自带 `Dockerfile` 与 `docker-compose.yml`，可一键部署（Postgres +
