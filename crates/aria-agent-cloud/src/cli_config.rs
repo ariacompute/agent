@@ -146,7 +146,8 @@ mod tests {
 
     #[test]
     fn missing_config_returns_default() {
-        let dir = std::env::temp_dir().join(format!("aria_agent_cli_missing_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aria_agent_cli_missing_{}", std::process::id()));
         with_aria_home(&dir, || {
             let loaded = load_cli_config().unwrap();
             assert!(loaded.upgrade_url.is_empty());
@@ -165,7 +166,9 @@ mod tests {
             })
             .unwrap();
             let cleared = clear_cli_config().unwrap();
-            assert!(cleared.map(|p| p.ends_with("agent-cli.yml")).unwrap_or(false));
+            assert!(cleared
+                .map(|p| p.ends_with("agent-cli.yml"))
+                .unwrap_or(false));
             // And it's gone.
             assert!(clear_cli_config().unwrap().is_none());
         });

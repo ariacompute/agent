@@ -36,11 +36,11 @@ use axum::response::sse::Event;
 use axum::response::{sse::Sse, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use futures::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use clap::{Args, Parser, Subcommand, ArgAction};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Executor;
 use sqlx::Row;
@@ -550,7 +550,10 @@ fn cmd_setup_status() -> Result<(), Box<dyn std::error::Error>> {
             println!("upgrade_url: {}", cli.upgrade_url);
         }
     } else {
-        println!("config: {} (missing; run `aria-agent setup`)", path.display());
+        println!(
+            "config: {} (missing; run `aria-agent setup`)",
+            path.display()
+        );
     }
     println!("lib: {}", cli_config::lib_dir()?.display());
     Ok(())

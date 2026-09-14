@@ -53,7 +53,11 @@ enum ReleaseHost {
 const AGENT_REPO: &str = "agent";
 
 /// Run `aria-agent upgrade [version] [--url <url>]`.
-pub async fn run(version: Option<&str>, url_override: Option<&str>, current_version: &str) -> io::Result<()> {
+pub async fn run(
+    version: Option<&str>,
+    url_override: Option<&str>,
+    current_version: &str,
+) -> io::Result<()> {
     let cfg = load_cli_config()?;
     let upgrade_url = match url_override {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
