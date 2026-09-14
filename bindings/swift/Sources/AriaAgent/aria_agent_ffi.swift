@@ -7,8 +7,8 @@ import Foundation
 // Depending on the consumer's build setup, the low-level FFI code
 // might be in a separate module, or it might be compiled inline into
 // this module. This is a bit of light hackery to work with both.
-#if canImport(aria_agent_ffi)
-import aria_agent_ffi
+#if canImport(aria_agent_ffiFFI)
+import aria_agent_ffiFFI
 #endif
 
 fileprivate extension RustBuffer {
@@ -907,6 +907,19 @@ public func createAgent(config: SdkAgentConfig)throws  -> SdkAgent {
     )
 })
 }
+/**
+ * Build an agent whose memo store is namespaced to `tenant_id`, giving the
+ * native SDK the same per-tenant isolation the cloud enforces server-side.
+ * When `tenant_id` is empty behavior matches [`create_agent`] (in-memory memo).
+ */
+public func createAgentForTenant(tenantId: String, config: SdkAgentConfig)throws  -> SdkAgent {
+    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
+    uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
+        FfiConverterString.lower(tenantId),
+        FfiConverterTypeSdkAgentConfig.lower(config),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -923,19 +936,22 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 6691) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 2855) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 59383) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 56839) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 34161) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 15713) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 3292) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 50855) {
         return InitializationResult.apiChecksumMismatch
     }
 

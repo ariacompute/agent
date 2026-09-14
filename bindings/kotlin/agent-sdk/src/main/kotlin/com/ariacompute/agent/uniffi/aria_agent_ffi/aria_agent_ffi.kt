@@ -2,12 +2,8 @@
 // Trust me, you don't want to mess with it!
 
 @file:Suppress("NAME_SHADOWING")
-// Generated FFI code is runtime-guarded across Android API levels (e.g. the JVM
-// java.lang.ref.Cleaner path is only used when that class is present), so the
-// static NewApi lint check produces false positives against minSdk.
-@file:SuppressLint("NewApi")
 
-package com.ariacompute.agent.uniffi.aria_agent_ffi
+package uniffi.aria_agent_ffi
 
 // Common helper code.
 //
@@ -21,7 +17,6 @@ package com.ariacompute.agent.uniffi.aria_agent_ffi
 // compile the Rust component. The easiest way to ensure this is to bundle the Kotlin
 // helpers directly inline like we're doing here.
 
-import android.annotation.SuppressLint
 import com.sun.jna.Library
 import com.sun.jna.IntegerType
 import com.sun.jna.Native
@@ -731,6 +726,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -767,6 +764,8 @@ internal interface UniffiLib : Library {
     fun uniffi_aria_agent_ffi_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_aria_agent_ffi_fn_func_create_agent(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(`tenantId`: RustBuffer.ByValue,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
     fun ffi_aria_agent_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -882,6 +881,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_aria_agent_ffi_checksum_func_create_agent(
     ): Short
+    fun uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant(
+    ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session(
@@ -907,19 +908,22 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 6691.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 2855.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 59383.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 56839.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 34161.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 15713.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 3292.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 50855.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1766,6 +1770,21 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
     uniffiRustCallWithError(SdkException) { _status ->
     UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent(
         FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Build an agent whose memo store is namespaced to `tenant_id`, giving the
+         * native SDK the same per-tenant isolation the cloud enforces server-side.
+         * When `tenant_id` is empty behavior matches [`create_agent`] (in-memory memo).
+         */
+    @Throws(SdkException::class) fun `createAgentForTenant`(`tenantId`: kotlin.String, `config`: SdkAgentConfig): SdkAgent {
+            return FfiConverterTypeSdkAgent.lift(
+    uniffiRustCallWithError(SdkException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
+        FfiConverterString.lower(`tenantId`),FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
 }
     )
     }

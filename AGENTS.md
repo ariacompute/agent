@@ -42,10 +42,14 @@ cloud API plus native (Swift/Kotlin) SDKs.
    caller to a `Principal` (tenant) from a presented `Authorization: Bearer <key>`
    / `ApiKey <key>`. Keys are looked up (by sha256 hash) in the Postgres
    `api_keys` table (`AGENT_CLOUD_API_KEY` is the bootstrap **admin** key; open
-   mode when unset). Admins self-serve keys via `POST/GET /v1/api-keys` and
+   mode when unset). Resolved keys are cached in-memory with a revocation TTL
+   (`API_KEY_CACHE_TTL_SEC`, default 60); `DELETE /v1/api-keys/:id` purges the
+   cache immediately. Admins self-serve keys via `POST/GET /v1/api-keys` and
    revoke via `DELETE /v1/api-keys/:id`. `memo` / `reef records` / `reef
-   feedback` are sharded per `principal_id` (sled subdirs); the admin principal
-   keeps the legacy root paths. Token streaming is served at
+   feedback` AND each tenant's `ActiveHarness` are sharded per `principal_id` (sled
+   subdirs / `REEF_DIR/tenants/<pid>`, isolated git repos); the admin principal
+   keeps the legacy root paths. `agents` / `runs` carry `principal_id` and are
+   scoped per tenant (admins see all). Token streaming is served at
    `POST /v1/runs/stream` (SSE, terminated by `[DONE]`). See `docs/adr/0007-*.md`.
 8. **Reef stores are separate from context/metadata.** `aria-agent-reef` logs every
    turn (`RecordStore`) and binds feedback (`FeedbackStore`) in a **local sled

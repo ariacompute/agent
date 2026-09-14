@@ -12,6 +12,7 @@ uniffi::setup_scaffolding!();
 
 use agent_core::{Agent, AgentConfig};
 use agent_memo::{ContextFragment, FragmentKind, MemoStore, SledMemoStore};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
@@ -98,6 +99,36 @@ impl SdkSession {
 #[uniffi::export]
 pub fn create_agent(config: SdkAgentConfig) -> Result<Arc<SdkAgent>, SdkError> {
     let memo = SledMemoStore::memory().map_err(|e| SdkError::Core(e.to_string()))?;
+    let cfg = AgentConfig {
+        session: config.session,
+        agent_name: config.agent_name,
+        sandbox_provider: config.sandbox_provider,
+        model: config.model,
+    };
+    let agent = Agent::new(cfg, memo).map_err(|e| SdkError::Core(e.to_string()))?;
+    Ok(Arc::new(SdkAgent {
+        inner: Arc::new(agent),
+    }))
+}
+
+/// Build an agent whose memo store is namespaced to `tenant_id`, giving the
+/// native SDK the same per-tenant isolation the cloud enforces server-side.
+/// When `tenant_id` is empty behavior matches [`create_agent`] (in-memory memo).
+#[uniffi::export]
+pub fn create_agent_for_tenant(
+    tenant_id: String,
+    config: SdkAgentConfig,
+) -> Result<Arc<SdkAgent>, SdkError> {
+    let memo: Arc<dyn MemoStore> = if tenant_id.is_empty() {
+        SledMemoStore::memory().map_err(|e| SdkError::Core(e.to_string()))?
+    } else {
+        // Persistent per-tenant sled DB under ARIA_MEMO_DIR (or a temp subdir).
+        let base = std::env::var("ARIA_MEMO_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        let dir = Path::new(&base).join("tenants").join(&tenant_id);
+        std::fs::create_dir_all(&dir).map_err(|e| SdkError::Core(e.to_string()))?;
+        SledMemoStore::open(&dir).map_err(|e| SdkError::Core(e.to_string()))?
+    };
     let cfg = AgentConfig {
         session: config.session,
         agent_name: config.agent_name,

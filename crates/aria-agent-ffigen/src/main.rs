@@ -10,7 +10,7 @@ use uniffi_bindgen::cargo_metadata::CrateConfigSupplier;
 use uniffi_bindgen::library_mode;
 
 fn main() -> anyhow::Result<()> {
-    let lib = Utf8Path::new("target/debug/libaria-agent_ffi.so");
+    let lib = Utf8Path::new("target/debug/libaria_agent_ffi.so");
     let supplier = CrateConfigSupplier::default();
 
     let swift_out = Utf8Path::new("bindings/swift/Sources/AriaAgent");

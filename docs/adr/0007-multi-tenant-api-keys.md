@@ -49,9 +49,27 @@ Introduce a multi-tenant API-key system:
    `REEF_DIR/records/<pid>`, `REEF_DIR/feedback/<pid>`. The admin/bootstrap
    principal's stores keep the **legacy root paths** so existing data is not
    orphaned. See `TenantStoreRegistry` (lazy open + cache).
-6. **Shared harness.** `ActiveHarness` stays fleet-wide; `/reef/evolve` is bound
-   to the caller's tenant records/feedback but still hot-swaps the shared
-   `active`.
+6. **Per-tenant `ActiveHarness`.** Each tenant owns its own hot-swappable
+   `ActiveHarness`, lazily created from baseline (or its last winning harness
+   under `REEF_DIR/tenants/<pid>`, versioned in its own isolated git repo). A
+   tenant's `/reef/evolve` win hot-swaps **only that tenant's** served harness —
+   one tenant's self-improvement can no longer regress another's. See
+   `TenantHarnessRegistry` + `AppState::harness_for`.
+7. **Key-lookup cache with revocation TTL.** A process-wide `KeyCache`
+   (identity map `key_hash → resolved principal`, TTL default 60s via
+   `API_KEY_CACHE_TTL_SEC`) short-circuits the per-request Postgres point query.
+   Only **valid** lookups are cached; revocation (`DELETE /v1/api-keys/:id`)
+   actively purges the entry, so a revoked key stops working immediately. The TTL
+   is a safety net for missed purges (e.g. multi-instance deploys).
+8. **Per-tenant `agents`/`runs` isolation.** `agents` now carry a `principal_id`;
+   `create_agent` / `get_agent` / `agent_name` scope by it (admins see all,
+   tenants only their own). `runs` already carried `principal_id` for audit. SQL in
+   `ensure_schema` adds the column idempotently.
+9. **SDK/FFI principal wiring.** The native SDK surface (`ariacompute-agent`)
+   gains `create_agent_for_tenant(tenant_id, config)`, which namespaces the
+   agent's local memo store under `ARIA_MEMO_DIR/tenants/<tenant_id>` (matching
+   the cloud's per-tenant memo sharding). Generated Swift/Kotlin bindings
+   regenerated via `just ffi`.
 
 ### Open vs closed mode
 
@@ -76,12 +94,10 @@ Introduce a multi-tenant API-key system:
 
 ## Unresolved / future work
 
-- Per-tenant `ActiveHarness` (each tenant evolves its own served harness) instead
-  of one fleet-wide harness. Currently the winning harness is global.
-- Optional in-memory cache of `key_hash → principal` with revocation TTL to cut
-  the per-request DB lookup further.
-- Per-tenant `agents`/`runs` isolation (today `agents` are global definitions;
-  `runs` carry a `principal_id` for audit only).
+- (None outstanding from the original multi-tenant plan — items 6–9 above are
+  now implemented.) Future hardening could add per-instance cache refresh
+  coordination (Redis) so revocation propagates instantly across a fleet, and a
+  tenant quota/rate-limit layer keyed by `principal_id`.
 
 ## References
 

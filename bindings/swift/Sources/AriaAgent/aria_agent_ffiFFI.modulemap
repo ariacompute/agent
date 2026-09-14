@@ -1,0 +1,4 @@
+module aria_agent_ffiFFI {
+    header "aria_agent_ffiFFI.h"
+    export *
+}
