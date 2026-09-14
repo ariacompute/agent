@@ -78,7 +78,7 @@ jobs:
           # cdylib/static lib as libaria_agent_ffi.* / aria_agent_ffi.dll. Publish
           # it under the aria-agent_ffi label by copying to hyphenated names.
           cd target/release
-          ren() { [ -f "$1" ] && cp "$1" "$2"; }
+          ren() { if [ -f "$1" ]; then cp "$1" "$2"; fi; }
           ren libaria_agent_ffi.so      libaria-agent_ffi.so
           ren libaria_agent_ffi.dylib   libaria-agent_ffi.dylib
           ren libaria_agent_ffi.a       libaria-agent_ffi.a
