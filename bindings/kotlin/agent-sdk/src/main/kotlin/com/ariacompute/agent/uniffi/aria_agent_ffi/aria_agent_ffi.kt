@@ -2,6 +2,10 @@
 // Trust me, you don't want to mess with it!
 
 @file:Suppress("NAME_SHADOWING")
+// Generated FFI code is runtime-guarded across Android API levels (e.g. the JVM
+// java.lang.ref.Cleaner path is only used when that class is present), so the
+// static NewApi lint check produces false positives against minSdk.
+@file:SuppressLint("NewApi")
 
 package com.ariacompute.agent.uniffi.aria_agent_ffi
 
@@ -17,6 +21,7 @@ package com.ariacompute.agent.uniffi.aria_agent_ffi
 // compile the Rust component. The easiest way to ensure this is to bundle the Kotlin
 // helpers directly inline like we're doing here.
 
+import android.annotation.SuppressLint
 import com.sun.jna.Library
 import com.sun.jna.IntegerType
 import com.sun.jna.Native

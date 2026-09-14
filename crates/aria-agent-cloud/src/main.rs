@@ -438,8 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Backend is selected via `AGENT_MEMO_BACKEND`:
     //   * `memory` (default) — ephemeral, in-memory sled (lost on restart).
     //   * `memo`           — persistent sled DB under `MEMO_DIR`, survives restarts.
-    let memo_backend = std::env::var("AGENT_MEMO_BACKEND")
-        .unwrap_or_else(|_| "memory".into());
+    let memo_backend = std::env::var("AGENT_MEMO_BACKEND").unwrap_or_else(|_| "memory".into());
     let memo: Arc<dyn MemoStore> = match memo_backend.as_str() {
         "memo" => {
             let memo_dir =
