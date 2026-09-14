@@ -3,3 +3,5 @@
 .DS_Store
 *.log
 .codebuddy/
+# Local environment (secrets) — keep the template committed, not the real file.
+.env

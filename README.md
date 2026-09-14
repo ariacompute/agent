@@ -45,6 +45,72 @@ export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 
+## Docker Compose deployment
+
+The cloud service ships with a `Dockerfile` and `docker-compose.yml` for a
+self-contained deployment (Postgres + the `aria-agent` axum service). All
+configuration is provided through a local `.env` file.
+
+### 1. Configure
+
+Copy the template and edit the values:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres credentials + database (metadata store). |
+| `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | Connection string. The host `postgres` is the compose service name. |
+| `OPENAI_API_KEY` | _(empty)_ | OpenAI key for model calls. Leave empty only for stub/offline runs. |
+| `AGENT_CLOUD_API_KEY` | _(empty)_ | API auth gate. When set, every request must carry `Authorization: Bearer <key>` (or `ApiKey <key>`). Empty = open. |
+| `AGENT_MEMO_BACKEND` | `memory` | Memo backend: `memory` (ephemeral) or `memo` (persistent sled DB). |
+| `MEMO_DIR` | `/app/.memo` | Directory for the persistent memo store (used when `AGENT_MEMO_BACKEND=memo`). |
+| `REEF_DIR` | `/app/.reef` | Reef stores (records / feedback / git-versioned harness). |
+| `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
+| `CLOUD_PORT` | `3000` | Host port published for the cloud service (container always listens on 3000). |
+
+> `.env` is git-ignored; `.env.example` is the committed template. Compose
+> auto-loads `.env` for variable substitution and the `cloud` service also reads
+> it via `env_file`, so the container process receives every variable directly.
+
+### 2. Run
+
+```bash
+docker compose up --build
+```
+
+The cloud service waits for a healthy Postgres before starting; the schema
+(`agents` / `runs`) is created automatically on boot (`ensure_schema`), so no
+init scripts are needed. The API is then available at `http://localhost:3000`
+(or `http://localhost:${CLOUD_PORT}`).
+
+### 3. Memo backend
+
+The conversational context store (`agent-memo`) is selected with
+`AGENT_MEMO_BACKEND`:
+
+- `memory` (default) — in-memory sled; context is lost on restart.
+- `memo` — persistent sled DB under `MEMO_DIR`. The compose `memodata` volume
+  keeps it across restarts.
+
+```bash
+# Persistent conversational memory
+AGENT_MEMO_BACKEND=memo docker compose up --build
+```
+
+> Reef data (records / feedback / harness) is always persisted to the `reefdata`
+> volume regardless of the memo backend.
+
+### Volumes
+
+| Volume | Backed by | Purpose |
+|--------|-----------|---------|
+| `pgdata` | Postgres | `agents` / `runs` metadata. |
+| `reefdata` | `/app/.reef` | Reef stores (always persisted). |
+| `memodata` | `/app/.memo` | Persistent memo (only used when `AGENT_MEMO_BACKEND=memo`). |
+
 ## SDK examples
 
 There are two ways to use an Aria Agent:

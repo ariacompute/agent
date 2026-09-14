@@ -1,0 +1,14 @@
+# Keep the Docker build context lean — only the Rust workspace is needed to
+# build the cloud binary. Generated SDK bindings, git submodule, and tooling
+# are excluded.
+
+**/target
+**/node_modules
+.git
+.gitmodules
+codex
+bindings
+docs
+benches
+*.md
+.env

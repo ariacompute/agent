@@ -43,6 +43,69 @@ export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 
+## Docker Compose 部署
+
+云端服务自带 `Dockerfile` 与 `docker-compose.yml`，可一键部署（Postgres +
+`aria-agent` axum 服务）。所有配置都通过本地 `.env` 文件提供。
+
+### 1. 配置
+
+复制模板并修改取值：
+
+```bash
+cp .env.example .env
+```
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres 账号与库（元数据存儲）。 |
+| `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
+| `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，用于模型调用；仅 stub/离线可留空。 |
+| `AGENT_CLOUD_API_KEY` | _(空)_ | API 鉴权开关。设置后每个请求须携带 `Authorization: Bearer <key>`（或 `ApiKey <key>`）；留空则为开放模式。 |
+| `AGENT_MEMO_BACKEND` | `memory` | memo 后端：`memory`（内存）或 `memo`（持久化 sled DB）。 |
+| `MEMO_DIR` | `/app/.memo` | 持久化 memo 目录（仅 `AGENT_MEMO_BACKEND=memo` 时使用）。 |
+| `REEF_DIR` | `/app/.reef` | Reef 存储（records / feedback / git 版本化 harness）。 |
+| `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
+| `CLOUD_PORT` | `3000` | 对外暴露的主机端口（容器内始终监听 3000）。 |
+
+> `.env` 已被 git 忽略；`.env.example` 是提交到仓库的模板。Compose 会自动加载
+> `.env` 做变量替换，且 `cloud` 服务通过 `env_file` 直接读取它，因此容器进程能
+> 拿到每一个变量。
+
+### 2. 运行
+
+```bash
+docker compose up --build
+```
+
+云端服务会等待 Postgres 健康后再启动；表结构（`agents` / `runs`）在启动时由
+`ensure_schema` 自动创建，无需初始化脚本。随后 API 在
+`http://localhost:3000`（或 `http://localhost:${CLOUD_PORT}`）可用。
+
+### 3. Memo 后端
+
+对话上下文存储（`agent-memo`）由 `AGENT_MEMO_BACKEND` 切换：
+
+- `memory`（默认）—— 内存 sled，重启即丢。
+- `memo` —— 持久化 sled DB，目录为 `MEMO_DIR`；compose 的 `memodata` 卷使其在
+  重启后保留。
+
+```bash
+# 持久化对话记忆
+AGENT_MEMO_BACKEND=memo docker compose up --build
+```
+
+> Reef 数据（records / feedback / harness）无论 memo 后端如何，始终持久化到
+> `reefdata` 卷。
+
+### 数据卷
+
+| 卷 | 对应路径 | 用途 |
+|----|----------|------|
+| `pgdata` | Postgres | `agents` / `runs` 元数据。 |
+| `reefdata` | `/app/.reef` | Reef 存储（始终持久化）。 |
+| `memodata` | `/app/.memo` | 持久化 memo（仅 `AGENT_MEMO_BACKEND=memo` 时使用）。 |
+
 ## SDK 示例
 
 使用 Aria Agent 有两种方式：

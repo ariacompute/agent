@@ -433,8 +433,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     ensure_schema(&pool).await?;
 
-    // Local/embedded memo store. This is the ONLY holder of conversational context.
-    let memo: Arc<dyn MemoStore> = SledMemoStore::memory().map_err(|e| e.to_string())?;
+    // Local/embedded memo store — the ONLY holder of conversational context.
+    //
+    // Backend is selected via `AGENT_MEMO_BACKEND`:
+    //   * `memory` (default) — ephemeral, in-memory sled (lost on restart).
+    //   * `memo`           — persistent sled DB under `MEMO_DIR`, survives restarts.
+    let memo_backend = std::env::var("AGENT_MEMO_BACKEND")
+        .unwrap_or_else(|_| "memory".into());
+    let memo: Arc<dyn MemoStore> = match memo_backend.as_str() {
+        "memo" => {
+            let memo_dir =
+                PathBuf::from(std::env::var("MEMO_DIR").unwrap_or_else(|_| "/app/.memo".into()));
+            std::fs::create_dir_all(&memo_dir).map_err(|e| e.to_string())?;
+            tracing::info!("memo: persistent backend at {}", memo_dir.display());
+            SledMemoStore::open(&memo_dir).map_err(|e| e.to_string())?
+        }
+        _ => {
+            tracing::info!("memo: in-memory backend (ephemeral)");
+            SledMemoStore::memory().map_err(|e| e.to_string())?
+        }
+    };
 
     // --- Reef wiring ---
     let reef_dir = PathBuf::from(std::env::var("REEF_DIR").unwrap_or_else(|_| ".reef".into()));

@@ -1,0 +1,58 @@
+# Agent Cloud — docker-compose deployment.
+#
+# Services:
+#   postgres  Postgres (metadata: agents / runs). Schema is created on boot by
+#             the cloud service (ensure_schema), so no init scripts are needed.
+#   cloud     The `aria-agent` axum service. Waits for a healthy Postgres.
+#
+# All configuration lives in a local `.env` file (see `.env.example`). Copy it
+# first, then adjust values:   cp .env.example .env
+# Compose auto-loads `.env` for variable substitution (e.g. ${CLOUD_PORT}) and
+# the `cloud` service also reads it via `env_file` so the container process gets
+# every variable directly.
+#
+# Run:  docker compose up --build
+# Then: POST http://localhost:3000/v1/agents  (open when AGENT_CLOUD_API_KEY unset)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-agent}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  cloud:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Load every variable from the local `.env` into the container process.
+    env_file:
+      - .env
+    ports:
+      - "${CLOUD_PORT:-3000}:3000"
+    volumes:
+      - reefdata:/app/.reef
+      - memodata:/app/.memo
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/3000 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  reefdata:
+  memodata:
