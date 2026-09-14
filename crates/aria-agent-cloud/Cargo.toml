@@ -23,3 +23,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 aria-agent-core = { workspace = true, features = ["openai"] }
 aria-agent-memo.workspace = true
 aria-agent-reef.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde_yaml = "0.9"

@@ -69,7 +69,18 @@ cloud API plus native (Swift/Kotlin) SDKs.
 * `just reef-test` — run `aria-agent-reef` + integration tests (no API key / Postgres)
 * `just cov` — `cargo tarpaulin` coverage (if available)
 * `just ffi` — regenerate Swift/Kotlin bindings
-* `just cloud` — run the cloud service
+* `just cloud` — run the cloud service (`aria-agent serve` is the default subcommand;
+  it reads `~/.ariacompute/agent-cli.yml` and exports `ARIA_AGENT_FFI_LIB` to `~/.ariacompute/lib`)
+* `aria-agent setup` — interactively choose the Releases source (github default
+  or gitee) and write `upgrade_url` to `~/.ariacompute/agent-cli.yml`
+  (override home via `ARIA_COMPUTE_HOME`). Non-interactive runs default to github.
+* `aria-agent setup --status` — show CLI config status (path, `upgrade_url`, lib dir).
+* `aria-agent setup --clear` — remove the CLI config file.
+* `aria-agent upgrade [version] [--url <url>]` — self-update from GitHub/Gitee
+  Releases: downloads `aria-agent` binary + `libaria-agent_ffi` cdylib
+  (`~/.ariacompute/lib`, set `ARIA_AGENT_FFI_LIB` if needed). Mirrors
+  `aria-router upgrade`; errors if `upgrade_url` is unset.
+* `aria-agent --version` / `aria-agent version` — print version
 * `just fmt` / `just lint` — formatting and clippy
 * Release & publish: see `.github/workflows/release.yml` (assets),
   `publish-cargo.yml` (crates.io), `publish-maven.yml` (Maven Central); Swift also

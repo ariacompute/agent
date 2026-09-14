@@ -12,7 +12,11 @@
 //!   keeps the winner, versions it in Git (`.reef/`), and hot-swaps the shared
 //!   `ActiveHarness` so live traffic picks it up without a restart.
 
+mod cli_config;
+mod upgrade;
+
 use std::convert::Infallible;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,6 +40,7 @@ use futures::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use clap::{Args, Parser, Subcommand, ArgAction};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Executor;
 use sqlx::Row;
@@ -419,11 +424,161 @@ async fn ensure_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Parser)]
+#[command(
+    name = "aria-agent",
+    about = "Agents Cloud API + CLI",
+    version = AGENT_VERSION,
+    arg_required_else_help = false,
+    disable_version_flag = true
+)]
+struct Cli {
+    /// Print version
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    _version: (),
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Write CLI config (~/.ariacompute/agent-cli.yml)
+    Setup(SetupArgs),
+    /// Replace this CLI + libaria-agent_ffi from Releases
+    Upgrade {
+        /// Target version (default: latest stable)
+        version: Option<String>,
+        /// Override the upgrade_url from config
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Start the cloud HTTP server (default)
+    Serve,
+    /// Print version
+    Version,
+}
+
+#[derive(Args)]
+struct SetupArgs {
+    /// Show CLI config status
+    #[arg(long)]
+    status: bool,
+    /// Remove the CLI config file
+    #[arg(long)]
+    clear: bool,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Setup(args)) => cmd_setup(args)?,
+        Some(Command::Upgrade { version, url }) => {
+            upgrade::run(version.as_deref(), url.as_deref(), AGENT_VERSION)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+        }
+        Some(Command::Serve) | None => cmd_serve().await?,
+        Some(Command::Version) => println!("aria-agent {AGENT_VERSION}"),
+    }
+    Ok(())
+}
+
+fn cmd_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.status {
+        return cmd_setup_status();
+    }
+    if args.clear {
+        return cmd_setup_clear();
+    }
+
+    // The Releases source is configured only via interactive mode.
+    let upgrade_url = if std::io::stdin().is_terminal() {
+        let ans = prompt("Releases source (1=github, 2=gitee) [1]: ")?;
+        match ans.trim() {
+            "" | "1" | "github" | "gh" => cli_config::upgrade_url_for_site("github"),
+            "2" | "gitee" => cli_config::upgrade_url_for_site("gitee"),
+            other => {
+                return Err(format!("unknown source: {other} (expected github or gitee)").into())
+            }
+        }
+    } else {
+        // Non-interactive: fall back to the GitHub default.
+        cli_config::upgrade_url_for_site("github")
+    };
+
+    let path = cli_config::save_cli_config(&cli_config::AgentCliConfig {
+        upgrade_url: upgrade_url.clone(),
+    })?;
+    println!("wrote {} (upgrade_url={upgrade_url})", path.display());
+    Ok(())
+}
+
+/// Read one line from stdin (used by interactive `setup`).
+fn prompt(q: &str) -> io::Result<String> {
+    use std::io::Write;
+    print!("{q}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line)
+}
+
+/// `aria-agent setup --status`: print where the CLI config lives + its values.
+fn cmd_setup_status() -> Result<(), Box<dyn std::error::Error>> {
+    let path = cli_config::cli_config_path()?;
+    if path.exists() {
+        println!("config: {}", path.display());
+        let cli = cli_config::load_cli_config()?;
+        if cli.upgrade_url.is_empty() {
+            println!("upgrade_url: (not set)");
+        } else {
+            println!("upgrade_url: {}", cli.upgrade_url);
+        }
+    } else {
+        println!("config: {} (missing; run `aria-agent setup`)", path.display());
+    }
+    println!("lib: {}", cli_config::lib_dir()?.display());
+    Ok(())
+}
+
+/// `aria-agent setup --clear`: delete the CLI config file.
+fn cmd_setup_clear() -> Result<(), Box<dyn std::error::Error>> {
+    match cli_config::clear_cli_config()? {
+        Some(path) => println!("cleared {}", path.display()),
+        None => println!("(nothing to clear)"),
+    }
+    Ok(())
+}
+
+async fn cmd_serve() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    // Prefer CLI config from ~/.ariacompute/agent-cli.yml.
+    let _ = cli_config::ensure_aria_home();
+    let cli = cli_config::load_cli_config()?;
+    if cli.upgrade_url.is_empty() {
+        tracing::info!("agent-cli: no upgrade_url configured (run `aria-agent setup`)");
+    } else {
+        tracing::info!("agent-cli: upgrade_url={}", cli.upgrade_url);
+    }
+    // Expose the installed libaria-agent_ffi to native SDKs unless overridden.
+    if std::env::var("ARIA_AGENT_FFI_LIB").is_err() {
+        if let Ok(lib) = cli_config::lib_dir() {
+            std::env::set_var("ARIA_AGENT_FFI_LIB", lib);
+        }
+    }
 
     let db_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/agent".into());
