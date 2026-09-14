@@ -97,7 +97,7 @@ cp .env.example .env
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres 账号与库（元数据存儲）。 |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
 | `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，用于模型调用；仅 stub/离线可留空。 |
-| `AGENT_CLOUD_API_KEY` | _(空)_ | API 鉴权开关。设置后每个请求须携带 `Authorization: Bearer <key>`（或 `ApiKey <key>`）；留空则为开放模式。 |
+| `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
 | `AGENT_MEMO_BACKEND` | `memory` | memo 后端：`memory`（内存）或 `memo`（持久化 sled DB）。 |
 | `MEMO_DIR` | `/app/.memo` | 持久化 memo 目录（仅 `AGENT_MEMO_BACKEND=memo` 时使用）。 |
 | `REEF_DIR` | `/app/.reef` | Reef 存储（records / feedback / git 版本化 harness）。 |

@@ -15,12 +15,13 @@
 mod cli_config;
 mod upgrade;
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use agent_core::{ActiveHarness, Agent, AgentConfig, CoreError, OpenAiModel};
+use agent_core::{ActiveHarness, Agent, AgentConfig, CoreError, ModelClient, OpenAiModel};
 use agent_memo::{MemoStore, SledMemoStore};
 use agent_reef::engine::EvolutionEngine;
 use agent_reef::feedback::{Feedback, FeedbackStore, SledFeedbackStore};
@@ -28,13 +29,16 @@ use agent_reef::git;
 use agent_reef::harness;
 use agent_reef::record::{Record, RecordStore, SledRecordStore};
 use agent_reef::ReefError;
+use async_trait::async_trait;
+use axum::extract::FromRequestParts;
 use axum::extract::Request;
 use axum::extract::{Path, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::sse::Event;
 use axum::response::{sse::Sse, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use futures::stream;
@@ -49,21 +53,261 @@ use uuid::Uuid;
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
 const REEF_RECORD_HEADER: &str = "x-reef-agent-record-id";
 
+/// Identity of an API caller (tenant / user). Also doubles as an axum extractor:
+/// [`require_auth`] resolves the presented key to a `Principal` and inserts it
+/// into the request extensions; handlers pull it back out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Principal {
+    /// Tenant/user id. Also the sled path shard key (validated safe).
+    id: String,
+    kind: PrincipalKind,
+    scopes: ApiKeyScopes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrincipalKind {
+    Admin,
+    User,
+}
+
+impl Principal {
+    /// Bootstrap admin (resolves from `AGENT_CLOUD_API_KEY`). Its stores map to
+    /// the legacy root paths so single-key deployments keep their data.
+    fn admin() -> Self {
+        Principal {
+            id: "admin".into(),
+            kind: PrincipalKind::Admin,
+            scopes: ApiKeyScopes::all(),
+        }
+    }
+    /// Open-mode fallback tenant when no auth is configured.
+    fn default_user() -> Self {
+        Principal {
+            id: "default".into(),
+            kind: PrincipalKind::User,
+            scopes: ApiKeyScopes::read_write(),
+        }
+    }
+    fn is_admin(&self) -> bool {
+        self.kind == PrincipalKind::Admin || self.scopes.admin
+    }
+}
+
+/// Permission scopes, mirroring the OpenAI Agents API project-key model
+/// (`api.agents.read` / `api.agents.write` / admin). Stored as a comma-joined
+/// token string in Postgres.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ApiKeyScopes {
+    admin: bool,
+    read: bool,
+    write: bool,
+}
+
+impl ApiKeyScopes {
+    fn all() -> Self {
+        ApiKeyScopes {
+            admin: true,
+            read: true,
+            write: true,
+        }
+    }
+    fn read_write() -> Self {
+        ApiKeyScopes {
+            admin: false,
+            read: true,
+            write: true,
+        }
+    }
+    fn from_tokens(tokens: &[String]) -> Self {
+        let mut s = ApiKeyScopes::default();
+        for t in tokens {
+            match t.as_str() {
+                "admin" => s.admin = true,
+                "read" => s.read = true,
+                "write" => s.write = true,
+                _ => {}
+            }
+        }
+        // Admin implies full read/write.
+        if s.admin {
+            s.read = true;
+            s.write = true;
+        }
+        s
+    }
+    fn to_tokens(self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.admin {
+            v.push("admin".into());
+        }
+        if self.read {
+            v.push("read".into());
+        }
+        if self.write {
+            v.push("write".into());
+        }
+        v
+    }
+}
+
+/// A store that can be opened persistently under a path or in-memory.
+trait TenantStore: Send + Sync + 'static {
+    fn open(path: &std::path::Path) -> Result<Arc<Self>, String>;
+    fn memory() -> Result<Arc<Self>, String>;
+}
+
+impl TenantStore for SledMemoStore {
+    fn open(path: &std::path::Path) -> Result<Arc<Self>, String> {
+        SledMemoStore::open(path).map_err(|e| e.to_string())
+    }
+    fn memory() -> Result<Arc<Self>, String> {
+        SledMemoStore::memory().map_err(|e| e.to_string())
+    }
+}
+
+impl TenantStore for SledRecordStore {
+    fn open(path: &std::path::Path) -> Result<Arc<Self>, String> {
+        SledRecordStore::open(path).map_err(|e| e.to_string())
+    }
+    fn memory() -> Result<Arc<Self>, String> {
+        SledRecordStore::memory().map_err(|e| e.to_string())
+    }
+}
+
+impl TenantStore for SledFeedbackStore {
+    fn open(path: &std::path::Path) -> Result<Arc<Self>, String> {
+        SledFeedbackStore::open(path).map_err(|e| e.to_string())
+    }
+    fn memory() -> Result<Arc<Self>, String> {
+        SledFeedbackStore::memory().map_err(|e| e.to_string())
+    }
+}
+
+/// Lazily opens + caches one store per principal under `root/<pid>` (persistent)
+/// or a fresh in-memory db (memory mode).
+struct TenantStoreRegistry<S: TenantStore> {
+    mode: StoreMode,
+    cache: Mutex<HashMap<String, Arc<S>>>,
+}
+
+#[derive(Clone)]
+enum StoreMode {
+    Persistent(PathBuf),
+    Memory,
+}
+
+impl<S: TenantStore> Clone for TenantStoreRegistry<S> {
+    fn clone(&self) -> Self {
+        Self {
+            mode: self.mode.clone(),
+            cache: Mutex::new(self.cache.lock().unwrap().clone()),
+        }
+    }
+}
+
+impl<S: TenantStore> TenantStoreRegistry<S> {
+    fn for_principal(&self, pid: &str) -> Arc<S> {
+        validate_pid(pid);
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(s) = cache.get(pid) {
+            return s.clone();
+        }
+        let store = match &self.mode {
+            StoreMode::Persistent(root) => {
+                let dir = root.join(pid);
+                let _ = std::fs::create_dir_all(&dir);
+                S::open(&dir).expect("open tenant store")
+            }
+            StoreMode::Memory => S::memory().expect("memory tenant store"),
+        };
+        cache.insert(pid.to_string(), store.clone());
+        store
+    }
+}
+
+/// Reject principal ids that could break out of the sled root directory.
+fn validate_pid(pid: &str) {
+    if pid.is_empty()
+        || pid.len() > 64
+        || !pid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        panic!("invalid principal id: {pid:?}");
+    }
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for Principal
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, StatusCode> {
+        parts
+            .extensions
+            .get::<Principal>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     pool: sqlx::PgPool,
-    /// Shared memo store — the single source of conversational context.
-    memo: Arc<dyn MemoStore>,
-    /// Local turn-records store (learning logs; NOT Postgres, NOT memo).
-    records: Arc<dyn RecordStore>,
-    /// Local feedback store (bound to records; NOT Postgres, NOT memo).
-    feedback: Arc<dyn FeedbackStore>,
+    /// Admin/bootstrap principal's stores (legacy root paths).
+    admin_memo: Arc<dyn MemoStore>,
+    admin_records: Arc<dyn RecordStore>,
+    admin_feedback: Arc<dyn FeedbackStore>,
+    /// Per-tenant store registries (lazily opened under subdirs).
+    tenant_memo: TenantStoreRegistry<SledMemoStore>,
+    tenant_records: TenantStoreRegistry<SledRecordStore>,
+    tenant_feedback: TenantStoreRegistry<SledFeedbackStore>,
     /// Shared, hot-swappable harness served to every agent.
     active: Arc<ActiveHarness>,
-    /// Evolution engine (local model engine = "local engine FFI").
-    engine: Arc<EvolutionEngine>,
+    /// Model factory (real OpenAI in prod, stub in tests).
+    make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync>,
     /// `.reef/` artifact directory (Git-versioned harness files).
     reef_dir: PathBuf,
+}
+
+impl AppState {
+    /// Memo store scoped to a principal (admin → legacy root store).
+    fn memo_for(&self, p: &Principal) -> Arc<dyn MemoStore> {
+        if p.kind == PrincipalKind::Admin {
+            self.admin_memo.clone()
+        } else {
+            self.tenant_memo.for_principal(&p.id)
+        }
+    }
+    /// Record store scoped to a principal.
+    fn records_for(&self, p: &Principal) -> Arc<dyn RecordStore> {
+        if p.kind == PrincipalKind::Admin {
+            self.admin_records.clone()
+        } else {
+            self.tenant_records.for_principal(&p.id)
+        }
+    }
+    /// Feedback store scoped to a principal.
+    fn feedback_for(&self, p: &Principal) -> Arc<dyn FeedbackStore> {
+        if p.kind == PrincipalKind::Admin {
+            self.admin_feedback.clone()
+        } else {
+            self.tenant_feedback.for_principal(&p.id)
+        }
+    }
+    /// Evolution engine bound to a principal's records/feedback, but writing the
+    /// winning harness into the shared `active` (fleet-wide hot-swap).
+    fn engine_for(&self, p: &Principal) -> Arc<EvolutionEngine> {
+        Arc::new(EvolutionEngine::new(
+            (self.make_model)(),
+            self.records_for(p),
+            self.feedback_for(p),
+            self.reef_dir.clone(),
+            self.active.clone(),
+            3,
+        ))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,48 +379,130 @@ struct StreamToken {
 
 /// Bearer / ApiKey auth gate.
 ///
-/// Reads `AGENT_CLOUD_API_KEY` from the environment. When it is set (non-empty)
-/// every request must carry a matching `Authorization: Bearer <key>` or
-/// `Authorization: ApiKey <key>` header, otherwise `401` is returned. When the
-/// env var is absent the service runs open (dev convenience).
+/// Resolves the presented key to a [`Principal`] and inserts it into the request
+/// extensions so downstream handlers can scope data per tenant. Precedence:
+/// * `Authorization: Bearer <key>` (or `ApiKey <key>`).
+/// * If the key equals `AGENT_CLOUD_API_KEY` → bootstrap **Admin** principal
+///   (backward compatible with the old single-key gate).
+/// * Else the key is looked up (by sha256 hash) in the `api_keys` table → the
+///   row's `principal_id` / `scopes` define the principal.
+/// * No key presented: if `AGENT_CLOUD_API_KEY` is set the request is rejected
+///   (auth is on); otherwise the service runs **open** as the `default` tenant.
 async fn require_auth(
-    State(_state): State<AppState>,
-    req: Request,
+    State(state): State<AppState>,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let expected = match std::env::var("AGENT_CLOUD_API_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        _ => return Ok(next.run(req).await),
-    };
-    let presented = req
-        .headers()
+    let token = presented_token(&req);
+    let principal = resolve_principal(&state, token).await?;
+    req.extensions_mut().insert(principal);
+    Ok(next.run(req).await)
+}
+
+/// Extract the bearer/apikey token from the `Authorization` header.
+fn presented_token(req: &Request) -> Option<String> {
+    req.headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let ok = presented
-        .strip_prefix("Bearer ")
-        .or_else(|| presented.strip_prefix("ApiKey "))
-        .map(|tok| tok.trim() == expected)
-        .unwrap_or(false);
-    if !ok {
-        return Err(StatusCode::UNAUTHORIZED);
+        .and_then(|h| {
+            h.strip_prefix("Bearer ")
+                .or_else(|| h.strip_prefix("ApiKey "))
+                .map(|t| t.trim().to_string())
+        })
+        .filter(|t| !t.is_empty())
+}
+
+/// Resolve a presented token into a [`Principal`].
+async fn resolve_principal(
+    state: &AppState,
+    token: Option<String>,
+) -> Result<Principal, StatusCode> {
+    let env_key = std::env::var("AGENT_CLOUD_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
+    match token {
+        // Bootstrap admin: matches the legacy single key.
+        Some(t) if env_key.as_deref() == Some(t.as_str()) => Ok(Principal::admin()),
+        // Look the key up in the metadata store.
+        Some(t) => {
+            let hash = hash_key(&t);
+            let row = sqlx::query(
+                "SELECT principal_id, scopes FROM api_keys \
+                 WHERE key_hash = $1 AND revoked_at IS NULL",
+            )
+            .bind(&hash)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            match row {
+                Some(r) => {
+                    let pid: String = r.get("principal_id");
+                    let scopes: String = r.get("scopes");
+                    let tokens: Vec<String> = scopes
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect();
+                    let scopes = ApiKeyScopes::from_tokens(&tokens);
+                    let kind = if scopes.admin {
+                        PrincipalKind::Admin
+                    } else {
+                        PrincipalKind::User
+                    };
+                    Ok(Principal {
+                        id: pid,
+                        kind,
+                        scopes,
+                    })
+                }
+                None => Err(StatusCode::UNAUTHORIZED),
+            }
+        }
+        // No token: open mode → default tenant, else reject.
+        None => {
+            if env_key.is_some() {
+                Err(StatusCode::UNAUTHORIZED)
+            } else {
+                Ok(Principal::default_user())
+            }
+        }
     }
-    Ok(next.run(req).await)
+}
+
+/// sha256 hex digest of a key (never store or log the plaintext).
+fn hash_key(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(key.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Generate a high-entropy API key: `aria-<hex>`, returning the plaintext (shown
+/// once), a short display prefix, and the sha256 hash stored in Postgres.
+fn generate_key() -> (String, String, String) {
+    use rand::RngCore;
+    let mut bytes = [0u8; 18];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let raw: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let key = format!("aria-{raw}");
+    let prefix = format!("aria-{}", &raw[..12]);
+    let hash = hash_key(&key);
+    (key, prefix, hash)
 }
 
 /// Build an [`Agent`] for the given run body (resolves the agent name from the
 /// Postgres metadata store, wires the OpenAI model + memo, and **shares** the
 /// process-wide `ActiveHarness` so a self-improvement win is picked up live).
-async fn build_agent(state: &AppState, body: &RunBody) -> Result<Agent, AppError> {
+async fn build_agent(
+    state: &AppState,
+    body: &RunBody,
+    principal: &Principal,
+) -> Result<Agent, AppError> {
     let name = agent_name(state, &body.agent_id).await?;
     let cfg = agent_config(&name, &body.session);
-    Agent::with_harness(
-        cfg,
-        Box::new(OpenAiModel::new(DEFAULT_MODEL)),
-        state.memo.clone(),
-        state.active.clone(),
-    )
-    .map_err(AppError::Core)
+    let memo = state.memo_for(principal);
+    Agent::with_harness(cfg, (state.make_model)(), memo, state.active.clone())
+        .map_err(AppError::Core)
 }
 
 async fn create_agent(
@@ -212,8 +538,12 @@ async fn get_agent(
     }))
 }
 
-async fn run_agent(State(state): State<AppState>, Json(body): Json<RunBody>) -> Response {
-    let agent = match build_agent(&state, &body).await {
+async fn run_agent(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<RunBody>,
+) -> Response {
+    let agent = match build_agent(&state, &body, &principal).await {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -223,6 +553,8 @@ async fn run_agent(State(state): State<AppState>, Json(body): Json<RunBody>) -> 
     };
 
     // Record the turn (learning log) and surface the receipt id as a header.
+    // Both are scoped to the calling principal's stores.
+    let records = state.records_for(&principal);
     let rec = Record::new(
         &body.agent_id,
         &body.session,
@@ -232,20 +564,22 @@ async fn run_agent(State(state): State<AppState>, Json(body): Json<RunBody>) -> 
         &output,
         DEFAULT_MODEL,
     );
-    if let Err(e) = state.records.record_turn(rec.clone()).await {
+    if let Err(e) = records.record_turn(rec.clone()).await {
         tracing::warn!("reef: failed to record turn: {e}");
     }
 
-    // Metadata only — never the conversational context.
+    // Metadata only — never the conversational context. Attribute to principal.
     let run_id = Uuid::new_v4().to_string();
     if let Err(e) = sqlx::query(
-        "INSERT INTO runs (id, agent_id, session, input, output) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO runs (id, agent_id, session, input, output, principal_id) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&run_id)
     .bind(&body.agent_id)
     .bind(&body.session)
     .bind(&body.input)
     .bind(&output)
+    .bind(&principal.id)
     .execute(&state.pool)
     .await
     {
@@ -266,18 +600,22 @@ async fn run_agent(State(state): State<AppState>, Json(body): Json<RunBody>) -> 
     resp
 }
 
-async fn run_agent_stream(State(state): State<AppState>, Json(body): Json<RunBody>) -> Response {
+async fn run_agent_stream(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<RunBody>,
+) -> Response {
     // Build the agent (resolves name + memo) before streaming.
-    let agent = match build_agent(&state, &body).await {
+    let agent = match build_agent(&state, &body, &principal).await {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
 
     let sys = state.active.get().system_text();
     let rec_id = Uuid::new_v4().to_string();
+    let records = state.records_for(&principal);
     // Placeholder record so the receipt id is known before streaming begins.
-    if let Err(e) = state
-        .records
+    if let Err(e) = records
         .record_turn(Record::new(
             &body.agent_id,
             &body.session,
@@ -299,7 +637,6 @@ async fn run_agent_stream(State(state): State<AppState>, Json(body): Json<RunBod
 
     // Finalize the record at the end of the stream (overwrite placeholder with
     // the real output, keeping the same receipt id).
-    let records = state.records.clone();
     let agent_id = body.agent_id.clone();
     let session = body.session.clone();
     let input = body.input.clone();
@@ -367,21 +704,28 @@ fn agent_config(name: &str, session: &str) -> AgentConfig {
 /// Bind feedback to recorded turns. References must point at existing records.
 async fn reef_report(
     State(state): State<AppState>,
+    principal: Principal,
     Json(body): Json<ReefReportBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let records = state.records_for(&principal);
+    let feedback = state.feedback_for(&principal);
     for r in &body.references {
-        if state.records.get(r).await.is_err() {
+        if records.get(r).await.is_err() {
             return Err(AppError::BadReport(format!("unknown record: {r}")));
         }
     }
     let fb = Feedback::new(body.references, body.score, body.feedback);
-    state.feedback.report(fb).await.map_err(AppError::Reef)?;
+    feedback.report(fb).await.map_err(AppError::Reef)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Run one evolution pass: propose → select → keep winner → version → hot-swap.
-async fn reef_evolve(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
-    match state.engine.evolve().await {
+async fn reef_evolve(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let engine = state.engine_for(&principal);
+    match engine.evolve().await {
         Ok(out) => Ok(Json(json!({
             "version": out.version,
             "adopted": out.adopted,
@@ -403,6 +747,135 @@ async fn reef_versions(State(state): State<AppState>) -> Json<Vec<String>> {
     Json(v)
 }
 
+// --- Self-serve API key management (admin only) ---
+
+#[derive(Deserialize)]
+struct CreateApiKeyBody {
+    /// Human label for the key (optional).
+    label: Option<String>,
+    /// Tenant/user this key authenticates as. Generated when omitted.
+    principal_id: Option<String>,
+    /// Permission tokens: `read`, `write`, `admin`. Defaults to `read,write`.
+    scopes: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ApiKeyView {
+    id: String,
+    key_prefix: String,
+    principal_id: String,
+    label: Option<String>,
+    scopes: Vec<String>,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct CreatedApiKey {
+    id: String,
+    /// Plaintext key — shown ONLY in this response. Store it now.
+    key: String,
+    key_prefix: String,
+    principal_id: String,
+    scopes: Vec<String>,
+}
+
+/// Create a new API key for a principal. Admin scope required.
+async fn create_api_key(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<CreateApiKeyBody>,
+) -> Result<Json<CreatedApiKey>, StatusCode> {
+    if !principal.is_admin() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let pid = body
+        .principal_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    validate_pid(&pid);
+    let scopes = ApiKeyScopes::from_tokens(
+        &body
+            .scopes
+            .unwrap_or_else(|| vec!["read".into(), "write".into()]),
+    );
+    let (key, prefix, hash) = generate_key();
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO api_keys (id, key_prefix, key_hash, principal_id, label, scopes, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, now())",
+    )
+    .bind(&id)
+    .bind(&prefix)
+    .bind(&hash)
+    .bind(&pid)
+    .bind(&body.label)
+    .bind(scopes.to_tokens().join(","))
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(CreatedApiKey {
+        id,
+        key,
+        key_prefix: prefix,
+        principal_id: pid,
+        scopes: scopes.to_tokens(),
+    }))
+}
+
+/// List active (non-revoked) API keys. Admin scope required.
+async fn list_api_keys(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<ApiKeyView>>, StatusCode> {
+    if !principal.is_admin() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let rows = sqlx::query(
+        "SELECT id, key_prefix, principal_id, label, scopes, created_at::text \
+         FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let scopes: String = r.get("scopes");
+        out.push(ApiKeyView {
+            id: r.get("id"),
+            key_prefix: r.get("key_prefix"),
+            principal_id: r.get("principal_id"),
+            label: r.get("label"),
+            scopes: scopes
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            created_at: r.get("created_at"),
+        });
+    }
+    Ok(Json(out))
+}
+
+/// Revoke an API key. Admin scope required.
+async fn revoke_api_key(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !principal.is_admin() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let res =
+        sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if res.rows_affected() == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 async fn ensure_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     pool.execute(
         "CREATE TABLE IF NOT EXISTS agents (\
@@ -421,6 +894,24 @@ async fn ensure_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
             created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
     )
     .await?;
+    // Multi-tenant API keys (metadata only; key plaintext is never stored).
+    pool.execute(
+        "CREATE TABLE IF NOT EXISTS api_keys (\
+            id TEXT PRIMARY KEY, \
+            key_prefix TEXT NOT NULL, \
+            key_hash TEXT NOT NULL UNIQUE, \
+            principal_id TEXT NOT NULL, \
+            label TEXT, \
+            scopes TEXT NOT NULL, \
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+            revoked_at TIMESTAMPTZ)",
+    )
+    .await?;
+    pool.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash)")
+        .await?;
+    // Attribute runs to the calling principal (audit only).
+    pool.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS principal_id TEXT")
+        .await?;
     Ok(())
 }
 
@@ -612,20 +1103,27 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Backend is selected via `AGENT_MEMO_BACKEND`:
     //   * `memory` (default) — ephemeral, in-memory sled (lost on restart).
     //   * `memo`           — persistent sled DB under `MEMO_DIR`, survives restarts.
+    // The admin/bootstrap principal's memo uses the legacy root path so existing
+    // single-key deployments keep their data; per-tenant memos live under
+    // `MEMO_DIR/<principal_id>`.
     let memo_backend = std::env::var("AGENT_MEMO_BACKEND").unwrap_or_else(|_| "memory".into());
-    let memo: Arc<dyn MemoStore> = match memo_backend.as_str() {
+    let admin_memo: Arc<dyn MemoStore>;
+    let memo_mode: StoreMode;
+    match memo_backend.as_str() {
         "memo" => {
             let memo_dir =
                 PathBuf::from(std::env::var("MEMO_DIR").unwrap_or_else(|_| "/app/.memo".into()));
             std::fs::create_dir_all(&memo_dir).map_err(|e| e.to_string())?;
             tracing::info!("memo: persistent backend at {}", memo_dir.display());
-            SledMemoStore::open(&memo_dir).map_err(|e| e.to_string())?
+            admin_memo = SledMemoStore::open(&memo_dir).map_err(|e| e.to_string())?;
+            memo_mode = StoreMode::Persistent(memo_dir);
         }
         _ => {
             tracing::info!("memo: in-memory backend (ephemeral)");
-            SledMemoStore::memory().map_err(|e| e.to_string())?
+            admin_memo = SledMemoStore::memory().map_err(|e| e.to_string())?;
+            memo_mode = StoreMode::Memory;
         }
-    };
+    }
 
     // --- Reef wiring ---
     let reef_dir = PathBuf::from(std::env::var("REEF_DIR").unwrap_or_else(|_| ".reef".into()));
@@ -646,27 +1144,34 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(_) => ActiveHarness::baseline("agent"),
     });
-    let records: Arc<dyn RecordStore> =
+    // Admin/bootstrap principal's reef stores use the legacy root paths.
+    let admin_records: Arc<dyn RecordStore> =
         SledRecordStore::open(&reef_dir.join("records")).map_err(|e| e.to_string())?;
-    let feedback: Arc<dyn FeedbackStore> =
+    let admin_feedback: Arc<dyn FeedbackStore> =
         SledFeedbackStore::open(&reef_dir.join("feedback")).map_err(|e| e.to_string())?;
-    // The local model engine ("local engine FFI") that proposes harness changes.
-    let engine = Arc::new(EvolutionEngine::new(
-        Box::new(OpenAiModel::new(DEFAULT_MODEL)),
-        records.clone(),
-        feedback.clone(),
-        reef_dir.clone(),
-        active.clone(),
-        3,
-    ));
+    // Real model for production; tests inject a stub via `make_model`.
+    let make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync> =
+        Arc::new(|| Box::new(OpenAiModel::new(DEFAULT_MODEL)));
 
     let state = AppState {
         pool,
-        memo,
-        records,
-        feedback,
+        admin_memo,
+        admin_records,
+        admin_feedback,
+        tenant_memo: TenantStoreRegistry {
+            mode: memo_mode,
+            cache: Mutex::new(HashMap::new()),
+        },
+        tenant_records: TenantStoreRegistry {
+            mode: StoreMode::Persistent(reef_dir.join("records")),
+            cache: Mutex::new(HashMap::new()),
+        },
+        tenant_feedback: TenantStoreRegistry {
+            mode: StoreMode::Persistent(reef_dir.join("feedback")),
+            cache: Mutex::new(HashMap::new()),
+        },
         active,
-        engine,
+        make_model,
         reef_dir,
     };
 
@@ -678,6 +1183,8 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .route("/reef/report", post(reef_report))
         .route("/reef/evolve", post(reef_evolve))
         .route("/reef/versions", get(reef_versions))
+        .route("/v1/api-keys", post(create_api_key).get(list_api_keys))
+        .route("/v1/api-keys/:id", delete(revoke_api_key))
         .with_state(state.clone())
         // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
         // `from_fn_with_state` threads `AppState` into the middleware closure.
@@ -694,36 +1201,43 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use agent_core::StubModel;
+    use agent_memo::{ContextFragment, FragmentKind, RecallQuery};
 
-    /// Build an `AppState` with in-memory stores + StubModel engine. The pg
-    /// pool is lazy (never queried by the reef handlers), so no real Postgres
+    /// Build an `AppState` with in-memory tenant stores + StubModel engine. The
+    /// pg pool is lazy (never queried by the reef handlers), so no real Postgres
     /// is required for these tests.
     fn test_state() -> AppState {
         let reef_dir = std::env::temp_dir().join(format!("reef_cloud_{}", Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&reef_dir);
         std::fs::create_dir_all(&reef_dir).unwrap();
         let active = Arc::new(ActiveHarness::baseline("agent"));
-        let records: Arc<dyn RecordStore> = SledRecordStore::memory().unwrap();
-        let feedback: Arc<dyn FeedbackStore> = SledFeedbackStore::memory().unwrap();
-        let engine = Arc::new(EvolutionEngine::new(
-            Box::new(StubModel::new("agent")),
-            records.clone(),
-            feedback.clone(),
-            reef_dir.clone(),
-            active.clone(),
-            3,
-        ));
+        let admin_records: Arc<dyn RecordStore> = SledRecordStore::memory().unwrap();
+        let admin_feedback: Arc<dyn FeedbackStore> = SledFeedbackStore::memory().unwrap();
+        let admin_memo: Arc<dyn MemoStore> = SledMemoStore::memory().unwrap();
+        let make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync> =
+            Arc::new(|| Box::new(StubModel::new("agent")));
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://x:x@localhost:5432/x")
             .unwrap();
-        let memo = SledMemoStore::memory().unwrap();
         AppState {
             pool,
-            memo,
-            records,
-            feedback,
+            admin_memo,
+            admin_records,
+            admin_feedback,
+            tenant_memo: TenantStoreRegistry {
+                mode: StoreMode::Memory,
+                cache: Mutex::new(HashMap::new()),
+            },
+            tenant_records: TenantStoreRegistry {
+                mode: StoreMode::Memory,
+                cache: Mutex::new(HashMap::new()),
+            },
+            tenant_feedback: TenantStoreRegistry {
+                mode: StoreMode::Memory,
+                cache: Mutex::new(HashMap::new()),
+            },
             active,
-            engine,
+            make_model,
             reef_dir,
         }
     }
@@ -733,6 +1247,7 @@ mod tests {
         let state = test_state();
         let res = reef_report(
             State(state),
+            Principal::admin(),
             Json(ReefReportBody {
                 references: vec!["ghost".into()],
                 score: -1.0,
@@ -747,9 +1262,10 @@ mod tests {
     async fn reef_report_binds_feedback_to_record() {
         let state = test_state();
         let rec = Record::new("a", "s", None, "You are agent.", "in", "out", "stub");
-        state.records.record_turn(rec.clone()).await.unwrap();
+        state.admin_records.record_turn(rec.clone()).await.unwrap();
         let res = reef_report(
             State(state.clone()),
+            Principal::admin(),
             Json(ReefReportBody {
                 references: vec![rec.id.clone()],
                 score: -1.0,
@@ -759,7 +1275,7 @@ mod tests {
         .await;
         assert!(res.is_ok());
         // Feedback now visible in the store.
-        let listed = state.feedback.list().await.unwrap();
+        let listed = state.admin_feedback.list().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].references, vec![rec.id]);
     }
@@ -768,9 +1284,9 @@ mod tests {
     async fn reef_evolve_wins_and_hot_swaps_without_pg() {
         let state = test_state();
         let rec = Record::new("a", "s", None, "You are agent.", "in", "out", "stub");
-        state.records.record_turn(rec.clone()).await.unwrap();
+        state.admin_records.record_turn(rec.clone()).await.unwrap();
         state
-            .feedback
+            .admin_feedback
             .report(Feedback::new(
                 vec![rec.id.clone()],
                 -1.0,
@@ -780,7 +1296,9 @@ mod tests {
             .unwrap();
 
         let before = state.active.get().system_text();
-        let out = reef_evolve(State(state.clone())).await.unwrap();
+        let out = reef_evolve(State(state.clone()), Principal::admin())
+            .await
+            .unwrap();
         assert_eq!(out.0["adopted"], json!(true));
         let after = state.active.get().system_text();
         assert_ne!(before, after);
@@ -790,7 +1308,9 @@ mod tests {
     #[tokio::test]
     async fn reef_evolve_no_eligible_keeps_active() {
         let state = test_state();
-        let out = reef_evolve(State(state.clone())).await.unwrap();
+        let out = reef_evolve(State(state.clone()), Principal::admin())
+            .await
+            .unwrap();
         assert_eq!(out.0["adopted"], json!(false));
         assert_eq!(out.0["reason"], json!("no_eligible"));
         // Active harness untouched.
@@ -812,8 +1332,68 @@ mod tests {
         let state = test_state();
         let rec = Record::new("a", "s", None, "You are agent.", "hi", "hello", "stub");
         let id = rec.id.clone();
-        state.records.record_turn(rec).await.unwrap();
-        let got = state.records.get(&id).await.unwrap();
+        state.admin_records.record_turn(rec).await.unwrap();
+        let got = state.admin_records.get(&id).await.unwrap();
         assert_eq!(got.output, "hello");
+    }
+
+    #[tokio::test]
+    async fn tenant_memo_isolation() {
+        let state = test_state();
+        let a = Principal {
+            id: "tenantA".into(),
+            kind: PrincipalKind::User,
+            scopes: ApiKeyScopes::read_write(),
+        };
+        let b = Principal {
+            id: "tenantB".into(),
+            kind: PrincipalKind::User,
+            scopes: ApiKeyScopes::read_write(),
+        };
+        state
+            .memo_for(&a)
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::Message,
+                "secret from A",
+            ))
+            .await
+            .unwrap();
+        // Tenant B must not see A's context.
+        let from_b = state
+            .memo_for(&b)
+            .recall(&RecallQuery::new("s", "secret"))
+            .await
+            .unwrap();
+        assert!(from_b.is_empty(), "tenant B must not see A's context");
+        let from_a = state
+            .memo_for(&a)
+            .recall(&RecallQuery::new("s", "secret"))
+            .await
+            .unwrap();
+        assert_eq!(from_a.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_mode_resolves_default_principal() {
+        // No AGENT_CLOUD_API_KEY and no token → default tenant, no pg needed.
+        std::env::remove_var("AGENT_CLOUD_API_KEY");
+        let state = test_state();
+        let p = resolve_principal(&state, None).await.unwrap();
+        assert_eq!(p, Principal::default_user());
+    }
+
+    #[test]
+    fn scopes_from_tokens_maps_admin_and_defaults() {
+        let rw = ApiKeyScopes::from_tokens(&["read".into(), "write".into()]);
+        assert!(rw.read && rw.write && !rw.admin);
+        let admin = ApiKeyScopes::from_tokens(&["admin".into()]);
+        assert!(admin.admin && admin.read && admin.write);
+    }
+
+    #[test]
+    fn hash_key_is_deterministic() {
+        assert_eq!(hash_key("aria-test"), hash_key("aria-test"));
+        assert_ne!(hash_key("aria-a"), hash_key("aria-b"));
     }
 }

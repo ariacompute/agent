@@ -101,7 +101,7 @@ cp .env.example .env
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres credentials + database (metadata store). |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | Connection string. The host `postgres` is the compose service name. |
 | `OPENAI_API_KEY` | _(empty)_ | OpenAI key for model calls. Leave empty only for stub/offline runs. |
-| `AGENT_CLOUD_API_KEY` | _(empty)_ | API auth gate. When set, every request must carry `Authorization: Bearer <key>` (or `ApiKey <key>`). Empty = open. |
+| `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `AGENT_MEMO_BACKEND` | `memory` | Memo backend: `memory` (ephemeral) or `memo` (persistent sled DB). |
 | `MEMO_DIR` | `/app/.memo` | Directory for the persistent memo store (used when `AGENT_MEMO_BACKEND=memo`). |
 | `REEF_DIR` | `/app/.reef` | Reef stores (records / feedback / git-versioned harness). |

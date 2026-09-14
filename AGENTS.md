@@ -38,10 +38,15 @@ cloud API plus native (Swift/Kotlin) SDKs.
    content.
 6. **Tests.** `cargo test --workspace` must pass. Cross-crate behavior belongs
    in `tests/`.
-7. **Cloud auth + streaming.** `aria-agent-cloud` is gated by `AGENT_CLOUD_API_KEY`
-   (send `Authorization: Bearer <key>` or `ApiKey <key>`; open when unset) and
-   serves token streaming at `POST /v1/runs/stream` (SSE, terminated by
-   `[DONE]`).
+7. **Cloud auth + streaming (multi-tenant).** `aria-agent-cloud` resolves each
+   caller to a `Principal` (tenant) from a presented `Authorization: Bearer <key>`
+   / `ApiKey <key>`. Keys are looked up (by sha256 hash) in the Postgres
+   `api_keys` table (`AGENT_CLOUD_API_KEY` is the bootstrap **admin** key; open
+   mode when unset). Admins self-serve keys via `POST/GET /v1/api-keys` and
+   revoke via `DELETE /v1/api-keys/:id`. `memo` / `reef records` / `reef
+   feedback` are sharded per `principal_id` (sled subdirs); the admin principal
+   keeps the legacy root paths. Token streaming is served at
+   `POST /v1/runs/stream` (SSE, terminated by `[DONE]`). See `docs/adr/0007-*.md`.
 8. **Reef stores are separate from context/metadata.** `aria-agent-reef` logs every
    turn (`RecordStore`) and binds feedback (`FeedbackStore`) in a **local sled
    DB**, and versions winning harnesses in a **`.reef/` Git repo** — never in
