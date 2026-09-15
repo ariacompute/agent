@@ -5,11 +5,14 @@
 **Active — deep integration validated via the `ariacompute/codex` fork.** The
 named upstream blocker (`rama-http` failing to compile) no longer reproduces
 under current stable Rust (re-tested 2026-09-15, `rustc 1.98.0`). End-to-end
-validation is complete for the agent-side pull-in: `aria-agent-sandbox` depends
-on `codex-sandboxing` through a git dependency on the `ariacompute/codex` fork
-(tag `root-workspace-v1`, which adds the repo-root workspace manifest), and
-`cargo check -p aria-agent-sandbox` pulls codex's full graph (`rama-*`, `mxc`,
-`tungstenite` forks) transitively.
+validation is complete for the agent-side pull-in: `aria-agent-cloud`
+(publish = false) depends on `codex-sandboxing` through a git dependency on the
+`ariacompute/codex` fork (tag `root-workspace-v1`, which adds the repo-root
+workspace manifest), and `cargo check -p aria-agent-cloud` pulls codex's full
+graph (`rama-*`, `mxc`, `tungstenite` forks) transitively. The codex-backed
+`CodexSandbox` is injected into `aria-agent-core`'s `Agent` via `with_sandbox`;
+the published `aria-agent-sandbox` keeps the self-contained Docker/Kata/Cube
+seam for SDK users and offline tests.
 
 ## Context
 
@@ -96,9 +99,12 @@ compiler side.
   `ariacompute/codex` fork** (tag `root-workspace-v1`), not a path into the
   submodule. The fork's repo-root workspace is what lets `package = "codex-*"`
   resolve (see above).
-* `aria-agent-sandbox` builds on codex's concrete `sandboxing` (`SandboxType` /
-  `SandboxManager`) primitives for tool execution — this is the prescribed
-  backend (the self-contained `Sandbox` seam is retired per the agent plan).
+* The codex-backed tool-execution backend (`CodexSandbox`, using codex's
+  concrete `sandboxing` `SandboxType` / `SandboxManager` primitives) lives in
+  `aria-agent-cloud` (publish = false) and is injected into `aria-agent-core`'s
+  `Agent` via `with_sandbox`; the published `aria-agent-sandbox` keeps the
+  self-contained Docker/Kata/Cube `Sandbox` seam as a fallback for SDK users and
+  offline tests (never used on the codex deployment path).
 * `aria-agent-memo` remains the context store (sled); codex's `memories` /
   `context-fragments` crates are read-only helpers and are not pulled in as a
   storage backend.
@@ -108,8 +114,10 @@ compiler side.
 
 ## Consequences
 
-* The build is runnable and testable today; `aria-agent-sandbox` compiles against
-  the real codex `sandboxing` crate transitively.
+* The build is runnable and testable today; `aria-agent-cloud` compiles against
+  the real codex `sandboxing` crate transitively, and its deep-integration test
+  (`codex_sandbox_exec_runs_command_through_codex_manager`) exercises codex's
+  `SandboxManager` end-to-end.
 * The `rama-http` compile blocker is resolved on the compiler side (re-tested
   2026-09-15), and the full `rama-*` family is pinned to `=0.3.0-alpha.4` so the
   released `0.3.0` siblings are not pulled in.
