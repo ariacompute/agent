@@ -17,38 +17,3 @@ async-trait.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 
-# Deep codex integration (ADR-0005 §Decision): tool execution is delegated to
-# codex's real `SandboxManager` / `SandboxType` primitives instead of the
-# self-contained CLI sandbox seam. Pulled as a git dependency from our codex
-# fork (ariacompute/codex, branch `aria-root-workspace`), pinned to the commit
-# that adds the repo-root workspace manifest so `workspace = true` inheritance
-# (e.g. `anyhow`) resolves inside codex's own workspace. See
-# docs/adr/0005-codex-integration.md.
-codex-sandboxing = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-sandboxing" }
-# Supporting codex crates used by `CodexSandbox` to drive tool execution through
-# codex's real `SandboxManager`. Same git source/tag as `codex-sandboxing` so the
-# resolved types are identical (mixing tags/revs would fork the source graph).
-codex-protocol = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-protocol" }
-codex-utils-absolute-path = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-absolute-path" }
-codex-utils-path-uri = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-path-uri" }
-codex-utils-pty = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-pty" }
-
-# Pin the entire `rama-*` family to the exact alpha.4 codex locks, otherwise
-# cargo upgrades sibling crates to the released 0.3.0 and produces ~139 API
-# errors (ADR-0005 §Blocker caveat).
-rama-core = "=0.3.0-alpha.4"
-rama-dns = "=0.3.0-alpha.4"
-rama-error = "=0.3.0-alpha.4"
-rama-http = "=0.3.0-alpha.4"
-rama-http-backend = "=0.3.0-alpha.4"
-rama-http-core = "=0.3.0-alpha.4"
-rama-http-headers = "=0.3.0-alpha.4"
-rama-http-types = "=0.3.0-alpha.4"
-rama-macros = "=0.3.0-alpha.4"
-rama-net = "=0.3.0-alpha.4"
-rama-socks5 = "=0.3.0-alpha.4"
-rama-tcp = "=0.3.0-alpha.4"
-rama-tls-rustls = "=0.3.0-alpha.4"
-rama-udp = "=0.3.0-alpha.4"
-rama-unix = "=0.3.0-alpha.4"
-rama-utils = "=0.3.0-alpha.4"

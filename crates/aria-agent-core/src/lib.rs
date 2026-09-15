@@ -498,9 +498,11 @@ impl Default for AgentConfig {
         Self {
             session: "default".to_string(),
             agent_name: "agent".to_string(),
-            // Production tool execution runs through codex's `SandboxManager`
-            // (ADR-0005); tests inject a local `Sandbox` via `Agent::with_sandbox`.
-            sandbox_provider: "codex".to_string(),
+            // Default to the self-contained Docker sandbox. The codex backend
+            // (ADR-0005 §Decision) is provided by the `aria-agent-cloud` runtime
+            // and injected via `Agent::with_sandbox`; tests use `with_sandbox`
+            // with a local `Sandbox` too.
+            sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
         }
     }
@@ -624,7 +626,13 @@ impl Agent {
         let provider = SandboxProvider::parse(&config.sandbox_provider).ok_or_else(|| {
             CoreError::Config(format!("unknown sandbox: {}", config.sandbox_provider))
         })?;
-        let sandbox = Arc::from(agent_sandbox::from_provider(provider));
+        // The `codex` backend is constructed by the `aria-agent-cloud` runtime
+        // (publish = false) and injected via `with_sandbox`; the published SDK
+        // returns `NotConfigured` for it here.
+        let sandbox = Arc::from(
+            agent_sandbox::from_provider(provider)
+                .map_err(|e| CoreError::Config(format!("sandbox {}: {}", provider.as_str(), e)))?,
+        );
         Ok(Self {
             config,
             model: Arc::from(model),

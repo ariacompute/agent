@@ -3,6 +3,10 @@ name = "aria-agent-cloud"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# This runtime crate is NOT published to crates.io: it depends on codex's
+# git-only crates (which crates.io cannot resolve) and is shipped as a GitHub
+# Release binary instead. See `publish-cargo.yml`.
+publish = false
 description = "Agents Cloud API: axum + Postgres (metadata only) + OpenAI Agents API. Context comes from memo."
 
 [[bin]]
@@ -32,3 +36,41 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 rand = "0.8"
 async-trait = "0.1"
+
+# `agent-sandbox` is a direct dependency so we can select the Docker/Kata/Cube
+# backend via `from_provider`; the codex backend below is constructed in this
+# (publish = false) runtime crate to keep the published SDK free of codex's
+# unpublished git dependencies (crates.io requires every published dep to
+# resolve from the registry). See `codex_sandbox::CodexSandbox` in `src/main.rs`.
+aria-agent-sandbox.workspace = true
+
+# Deep codex integration (ADR-0005 §Decision): tool execution is delegated to
+# codex's real `SandboxManager` / `SandboxType` primitives. Pulled as a git
+# dependency from our codex fork (ariacompute/codex, tag `root-workspace-v1`).
+# These crates are intentionally NOT in the published `aria-agent-sandbox`
+# manifest — they are git-only and crates.io cannot resolve them.
+codex-sandboxing = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-sandboxing" }
+codex-protocol = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-protocol" }
+codex-utils-absolute-path = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-absolute-path" }
+codex-utils-path-uri = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-path-uri" }
+codex-utils-pty = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-pty" }
+
+# Pin the entire `rama-*` family to the exact alpha.4 codex locks, otherwise
+# cargo upgrades sibling crates to the released 0.3.0 and produces ~139 API
+# errors (ADR-0005 §Blocker caveat).
+rama-core = "=0.3.0-alpha.4"
+rama-dns = "=0.3.0-alpha.4"
+rama-error = "=0.3.0-alpha.4"
+rama-http = "=0.3.0-alpha.4"
+rama-http-backend = "=0.3.0-alpha.4"
+rama-http-core = "=0.3.0-alpha.4"
+rama-http-headers = "=0.3.0-alpha.4"
+rama-http-types = "=0.3.0-alpha.4"
+rama-macros = "=0.3.0-alpha.4"
+rama-net = "=0.3.0-alpha.4"
+rama-socks5 = "=0.3.0-alpha.4"
+rama-tcp = "=0.3.0-alpha.4"
+rama-tls-rustls = "=0.3.0-alpha.4"
+rama-udp = "=0.3.0-alpha.4"
+rama-unix = "=0.3.0-alpha.4"
+rama-utils = "=0.3.0-alpha.4"
