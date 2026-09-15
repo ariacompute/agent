@@ -277,7 +277,11 @@ name = "aria-agent-sandbox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "codex-protocol",
  "codex-sandboxing",
+ "codex-utils-absolute-path",
+ "codex-utils-path-uri",
+ "codex-utils-pty",
  "rama-core",
  "rama-dns",
  "rama-error",

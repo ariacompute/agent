@@ -86,7 +86,10 @@ pub struct ModelTurn {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// A phase boundary: `recall`, `model`, `tool_exec`, `loop_guard`.
-    Step { phase: String, label: Option<String> },
+    Step {
+        phase: String,
+        label: Option<String>,
+    },
     /// A tool invocation and its (already executed) result.
     ToolCall {
         id: String,
@@ -175,6 +178,8 @@ mod openai_impl {
     use async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+        ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
+        CreateChatCompletionRequestArgs, FunctionObject,
     };
     use async_openai::{config::OpenAIConfig, Client};
 
@@ -193,6 +198,57 @@ mod openai_impl {
                 model: model.to_string(),
             }
         }
+    }
+
+    /// Build the OpenAI `tools` argument from our tool contract using the modern
+    /// `tools`/`tool_choice` API (async-openai 0.24.1). The response is parsed as
+    /// real `tool_calls` below.
+    fn build_codex_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
+        tools
+            .iter()
+            .map(|t| ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: t.name.clone(),
+                    description: Some(t.description.clone()),
+                    parameters: Some(t.parameters.clone()),
+                    strict: None,
+                },
+            })
+            .collect()
+    }
+
+    /// Parse a model response into our [`ToolCall`] contract. Prefers the modern
+    /// `tool_calls` shape; falls back to the legacy `function_call` (which has no
+    /// id, so we synthesize one). Malformed JSON arguments fall back to
+    /// `Value::Null` so a single bad call doesn't abort the whole turn.
+    #[allow(deprecated)]
+    fn parse_response_calls(
+        message: &async_openai::types::ChatCompletionResponseMessage,
+    ) -> Vec<ToolCall> {
+        if let Some(calls) = &message.tool_calls {
+            return calls
+                .iter()
+                .map(|c| {
+                    let arguments = serde_json::from_str(&c.function.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    ToolCall {
+                        id: c.id.clone(),
+                        name: c.function.name.clone(),
+                        arguments,
+                    }
+                })
+                .collect();
+        }
+        if let Some(fc) = &message.function_call {
+            let arguments = serde_json::from_str(&fc.arguments).unwrap_or(serde_json::Value::Null);
+            return vec![ToolCall {
+                id: "fn_0".into(),
+                name: fc.name.clone(),
+                arguments,
+            }];
+        }
+        Vec::new()
     }
 
     #[async_trait]
@@ -283,6 +339,148 @@ mod openai_impl {
             };
             Ok(Box::pin(s))
         }
+
+        async fn complete_with_tools(
+            &self,
+            req: &ModelRequest,
+            tools: &[Tool],
+        ) -> Result<ModelTurn, CoreError> {
+            let messages = vec![
+                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                    content: req.system.clone().into(),
+                    ..Default::default()
+                }),
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(format!(
+                        "{}\n\nUSER: {}",
+                        req.context, req.input
+                    )),
+                    ..Default::default()
+                }),
+            ];
+            let tools = build_codex_tools(tools);
+            let mut args = CreateChatCompletionRequestArgs::default();
+            let mut b = args.model(self.model.clone()).messages(messages);
+            if !tools.is_empty() {
+                b = b
+                    .tools(tools)
+                    .tool_choice(ChatCompletionToolChoiceOption::Auto);
+            }
+            let request = b.build().map_err(|e| CoreError::Model(e.to_string()))?;
+            let resp = self
+                .client
+                .chat()
+                .create(request)
+                .await
+                .map_err(|e| CoreError::Model(e.to_string()))?;
+            let choice = resp
+                .choices
+                .first()
+                .ok_or_else(|| CoreError::Model("empty choices from model".into()))?;
+            let text = choice.message.content.clone().unwrap_or_default();
+            let tool_calls = parse_response_calls(&choice.message);
+            Ok(ModelTurn { text, tool_calls })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use async_openai::types::ChatCompletionMessageToolCall;
+        use async_openai::types::ChatCompletionResponseMessage;
+        use async_openai::types::ChatCompletionToolType;
+        use async_openai::types::FunctionCall;
+        use async_openai::types::Role;
+
+        #[test]
+        fn build_codex_tools_maps_schema() {
+            let tools = vec![Tool {
+                name: "shell".into(),
+                description: "run a command".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "command": { "type": "string" } }
+                }),
+            }];
+            let out = build_codex_tools(&tools);
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].r#type, ChatCompletionToolType::Function);
+            assert_eq!(out[0].function.name, "shell");
+            assert_eq!(
+                out[0].function.description.as_deref(),
+                Some("run a command")
+            );
+            assert!(out[0].function.parameters.as_ref().unwrap().is_object());
+        }
+
+        #[test]
+        fn parse_response_calls_reads_modern_tool_calls() {
+            let message = ChatCompletionResponseMessage {
+                content: Some("thinking".into()),
+                refusal: None,
+                tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                    id: "call_1".into(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "shell".into(),
+                        arguments: "{\"command\":[\"echo\",\"hi\"]}".into(),
+                    },
+                }]),
+                role: Role::Assistant,
+                #[allow(deprecated)]
+                function_call: None,
+            };
+            let parsed = parse_response_calls(&message);
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].id, "call_1");
+            assert_eq!(parsed[0].name, "shell");
+            assert_eq!(
+                parsed[0].arguments,
+                serde_json::json!({"command": ["echo", "hi"]})
+            );
+        }
+
+        #[test]
+        fn parse_response_calls_reads_legacy_function_call() {
+            let message = ChatCompletionResponseMessage {
+                content: Some("thinking".into()),
+                refusal: None,
+                tool_calls: None,
+                role: Role::Assistant,
+                #[allow(deprecated)]
+                function_call: Some(FunctionCall {
+                    name: "shell".into(),
+                    arguments: "{\"command\":[\"echo\",\"hi\"]}".into(),
+                }),
+            };
+            let parsed = parse_response_calls(&message);
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].id, "fn_0");
+            assert_eq!(parsed[0].name, "shell");
+        }
+
+        #[test]
+        fn parse_response_calls_handles_invalid_json() {
+            let message = ChatCompletionResponseMessage {
+                content: None,
+                refusal: None,
+                tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                    id: "bad".into(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "shell".into(),
+                        arguments: "not-json".into(),
+                    },
+                }]),
+                role: Role::Assistant,
+                #[allow(deprecated)]
+                function_call: None,
+            };
+            let parsed = parse_response_calls(&message);
+            // Invalid JSON falls back to Null rather than aborting the turn.
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].arguments, serde_json::Value::Null);
+        }
     }
 }
 
@@ -300,7 +498,9 @@ impl Default for AgentConfig {
         Self {
             session: "default".to_string(),
             agent_name: "agent".to_string(),
-            sandbox_provider: "docker".to_string(),
+            // Production tool execution runs through codex's `SandboxManager`
+            // (ADR-0005); tests inject a local `Sandbox` via `Agent::with_sandbox`.
+            sandbox_provider: "codex".to_string(),
             model: "gpt-4o-mini".to_string(),
         }
     }
@@ -637,8 +837,10 @@ impl Agent {
     /// stream is `'static` and owns every dependency, so the [`Agent`] may be
     /// dropped while it is still consumed.
     ///
-    /// Tool execution goes through the platform [`Sandbox`](agent_sandbox::Sandbox)
-    /// seam (codex-backed per ADR-0005), never a bespoke in-process executor.
+    /// Tool execution is delegated to codex's real `SandboxManager` via the
+    /// `CodexSandbox` backend (ADR-0005 §Decision) — never a bespoke
+    /// in-process executor. Tests inject a local [`Sandbox`](agent_sandbox::Sandbox)
+    /// through [`Agent::with_sandbox`].
     pub async fn run_event_stream(
         &self,
         input: &str,
@@ -660,8 +862,12 @@ impl Agent {
             .collect::<Vec<_>>()
             .join("\n");
         // 2) persist the user turn.
-        memo.memorize(ContextFragment::new(&session, FragmentKind::Message, input.clone()))
-            .await?;
+        memo.memorize(ContextFragment::new(
+            &session,
+            FragmentKind::Message,
+            input.clone(),
+        ))
+        .await?;
 
         let wrapped = async_stream::stream! {
             yield Ok(AgentEvent::Step { phase: "recall".into(), label: None });
@@ -744,11 +950,7 @@ impl Agent {
     }
 
     /// Run an agentic turn and fold the event stream into the final text.
-    pub async fn run_agentic(
-        &self,
-        input: &str,
-        tools: &[Tool],
-    ) -> Result<String, CoreError> {
+    pub async fn run_agentic(&self, input: &str, tools: &[Tool]) -> Result<String, CoreError> {
         let stream = self.run_event_stream(input, tools).await?;
         let mut out = String::new();
         let mut stream = stream;
@@ -774,7 +976,11 @@ async fn sandbox_exec(
         .arguments
         .get("command")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .ok_or_else(|| {
             CoreError::Model(format!("tool `{}` missing `command` array arg", call.name))
         })?;
@@ -1007,7 +1213,7 @@ mod tests {
 
     // --- AgentEvent / agentic loop tests ---
 
-    use agent_sandbox::{ExecSpec, ExecOutput, SandboxError, SandboxHandle};
+    use agent_sandbox::{ExecOutput, ExecSpec, SandboxError, SandboxHandle};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A `Sandbox` that runs commands locally (no Docker) so tool-execution
@@ -1081,9 +1287,11 @@ mod tests {
         assert!(serde_json::to_string(&step)
             .unwrap()
             .contains("\"type\":\"step\""));
-        assert!(serde_json::to_string(&AgentEvent::Done { text: "x".into() })
-            .unwrap()
-            .contains("\"type\":\"done\""));
+        assert!(
+            serde_json::to_string(&AgentEvent::Done { text: "x".into() })
+                .unwrap()
+                .contains("\"type\":\"done\"")
+        );
     }
 
     #[tokio::test]
@@ -1124,7 +1332,10 @@ mod tests {
             "stream must terminate with Done"
         );
         // Both turns persisted to memo.
-        let frags = memo.recall(&RecallQuery::new("default", "hello")).await.unwrap();
+        let frags = memo
+            .recall(&RecallQuery::new("default", "hello"))
+            .await
+            .unwrap();
         assert!(frags.iter().any(|f| f.content == "hello"));
     }
 
@@ -1179,7 +1390,10 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(saw_error, "missing command must surface as an error tool result");
+        assert!(
+            saw_error,
+            "missing command must surface as an error tool result"
+        );
         assert!(done);
     }
 
@@ -1228,7 +1442,10 @@ mod tests {
         let res = agent.exec_tool_call(&call).await.unwrap();
         assert!(res.content.contains("hi"));
         assert!(!res.is_error);
-        let frags = memo.recall(&RecallQuery::new("default", "hi")).await.unwrap();
+        let frags = memo
+            .recall(&RecallQuery::new("default", "hi"))
+            .await
+            .unwrap();
         assert!(frags.iter().any(|f| f.content.contains("hi")));
     }
 
