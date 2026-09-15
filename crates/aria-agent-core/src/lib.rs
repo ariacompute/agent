@@ -16,6 +16,7 @@ use agent_sandbox::{default_sandbox, Sandbox, SandboxProvider};
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
@@ -45,6 +46,60 @@ pub struct ModelResponse {
     pub text: String,
 }
 
+/// A tool the agent may invoke during an agentic turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    /// JSON-schema object describing the tool's parameters.
+    pub parameters: Value,
+}
+
+/// A request from the model to invoke a tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// Parsed tool arguments (typically a JSON object).
+    pub arguments: Value,
+}
+
+/// The outcome of executing a tool, fed back to the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolResult {
+    pub call_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// A model reply that may request one or more tool calls (agentic loop).
+#[derive(Debug, Clone, Default)]
+pub struct ModelTurn {
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+}
+
+/// Events emitted by [`Agent::run_event_stream`] so callers can render a live
+/// agentic turn: phase boundaries, tool calls (with their results), streamed
+/// tokens, and the terminal `Done`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEvent {
+    /// A phase boundary: `recall`, `model`, `tool_exec`, `loop_guard`.
+    Step { phase: String, label: Option<String> },
+    /// A tool invocation and its (already executed) result.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: Value,
+        result: ToolResult,
+    },
+    /// A model text delta.
+    Token { text: String },
+    /// Terminal event carrying the full final reply.
+    Done { text: String },
+}
+
 /// LLM access seam. Implement this to plug in any backend.
 #[async_trait]
 pub trait ModelClient: Send + Sync {
@@ -62,6 +117,22 @@ pub trait ModelClient: Send + Sync {
         Ok(Box::pin(futures::stream::once(
             async move { Ok(resp.text) },
         )))
+    }
+
+    /// Produce a reply that may request tool calls (agentic loop). The default
+    /// implementation ignores `tools` and delegates to
+    /// [`ModelClient::complete`], so backends without function-calling support
+    /// degrade to a single-shot reply. Override this to drive the agentic loop.
+    async fn complete_with_tools(
+        &self,
+        req: &ModelRequest,
+        _tools: &[Tool],
+    ) -> Result<ModelTurn, CoreError> {
+        let resp = self.complete(req).await?;
+        Ok(ModelTurn {
+            text: resp.text,
+            tool_calls: Vec::new(),
+        })
     }
 }
 
@@ -335,9 +406,9 @@ impl ActiveHarness {
 /// hot-swapped by a self-improvement loop).
 pub struct Agent {
     config: AgentConfig,
-    model: Box<dyn ModelClient>,
+    model: Arc<dyn ModelClient>,
     memo: Arc<dyn MemoStore>,
-    sandbox: Box<dyn Sandbox>,
+    sandbox: Arc<dyn Sandbox>,
     harness: Arc<ActiveHarness>,
 }
 
@@ -353,10 +424,29 @@ impl Agent {
         let provider = SandboxProvider::parse(&config.sandbox_provider).ok_or_else(|| {
             CoreError::Config(format!("unknown sandbox: {}", config.sandbox_provider))
         })?;
-        let sandbox = agent_sandbox::from_provider(provider);
+        let sandbox = Arc::from(agent_sandbox::from_provider(provider));
         Ok(Self {
             config,
-            model,
+            model: Arc::from(model),
+            memo,
+            sandbox,
+            harness,
+        })
+    }
+
+    /// Build with an explicit sandbox backend (e.g. a local test sandbox or a
+    /// codex-backed [`Sandbox`](agent_sandbox::Sandbox)). Useful when the
+    /// provider string alone does not describe the execution environment.
+    pub fn with_sandbox(
+        config: AgentConfig,
+        model: Box<dyn ModelClient>,
+        memo: Arc<dyn MemoStore>,
+        harness: Arc<ActiveHarness>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
+            config,
+            model: Arc::from(model),
             memo,
             sandbox,
             harness,
@@ -529,6 +619,190 @@ impl Agent {
         };
         Ok(Box::pin(wrapped))
     }
+
+    /// Upper bound on model↔tool iterations within one turn (loop-guard).
+    pub const MAX_AGENTIC_STEPS: usize = 8;
+
+    /// Execute a single tool call inside the sandbox and return its captured
+    /// output. The command is taken from the `command` argument (a JSON array
+    /// of strings); the result is persisted to memo as a `ToolResult` fragment
+    /// so subsequent turns can recall it.
+    pub async fn exec_tool_call(&self, call: &ToolCall) -> Result<ToolResult, CoreError> {
+        sandbox_exec(&self.sandbox, &self.memo, &self.config.session, call).await
+    }
+
+    /// Run an agentic turn as an event stream: recall memo context → call the
+    /// model (with `tools`) → execute any requested tool calls in the sandbox →
+    /// refill memo → repeat until the model emits a final reply. The returned
+    /// stream is `'static` and owns every dependency, so the [`Agent`] may be
+    /// dropped while it is still consumed.
+    ///
+    /// Tool execution goes through the platform [`Sandbox`](agent_sandbox::Sandbox)
+    /// seam (codex-backed per ADR-0005), never a bespoke in-process executor.
+    pub async fn run_event_stream(
+        &self,
+        input: &str,
+        tools: &[Tool],
+    ) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
+        let memo = self.memo.clone();
+        let model = self.model.clone();
+        let sandbox = self.sandbox.clone();
+        let harness = self.harness.clone();
+        let session = self.config.session.clone();
+        let tools: Vec<Tool> = tools.to_vec();
+        let input = input.to_string();
+
+        // 1) recall context from memo (the ONLY context source).
+        let fragments = memo.recall(&RecallQuery::new(&session, &input)).await?;
+        let initial_context = fragments
+            .iter()
+            .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 2) persist the user turn.
+        memo.memorize(ContextFragment::new(&session, FragmentKind::Message, input.clone()))
+            .await?;
+
+        let wrapped = async_stream::stream! {
+            yield Ok(AgentEvent::Step { phase: "recall".into(), label: None });
+            let mut tool_log = String::new();
+            let mut step = 0usize;
+
+            loop {
+                step += 1;
+                if step > Agent::MAX_AGENTIC_STEPS {
+                    yield Ok(AgentEvent::Step {
+                        phase: "loop_guard".into(),
+                        label: Some("max agentic steps exceeded".into()),
+                    });
+                    yield Ok(AgentEvent::Done { text: String::new() });
+                    break;
+                }
+
+                yield Ok(AgentEvent::Step { phase: "model".into(), label: None });
+                let system = harness.get().system_text();
+                let context = if tool_log.is_empty() {
+                    initial_context.clone()
+                } else {
+                    format!("{}\n{}", initial_context, tool_log)
+                };
+                let req = ModelRequest {
+                    system,
+                    context,
+                    input: input.clone(),
+                };
+                let turn = match model.complete_with_tools(&req, &tools).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                };
+
+                if turn.tool_calls.is_empty() {
+                    // 3) final reply: stream the token then terminate.
+                    yield Ok(AgentEvent::Token { text: turn.text.clone() });
+                    let _ = memo
+                        .memorize(ContextFragment::new(
+                            &session,
+                            FragmentKind::Message,
+                            turn.text.clone(),
+                        ))
+                        .await;
+                    yield Ok(AgentEvent::Done { text: turn.text });
+                    break;
+                }
+
+                // 4) execute each requested tool call in the sandbox.
+                for call in &turn.tool_calls {
+                    yield Ok(AgentEvent::Step {
+                        phase: "tool_exec".into(),
+                        label: Some(call.name.clone()),
+                    });
+                    let result = match sandbox_exec(&sandbox, &memo, &session, call).await {
+                        Ok(r) => r,
+                        Err(e) => ToolResult {
+                            call_id: call.id.clone(),
+                            content: e.to_string(),
+                            is_error: true,
+                        },
+                    };
+                    tool_log.push_str(&format!(
+                        "\n\nTOOL_RESULT[{}]: {}",
+                        call.name, result.content
+                    ));
+                    yield Ok(AgentEvent::ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        result,
+                    });
+                }
+            }
+        };
+        Ok(Box::pin(wrapped))
+    }
+
+    /// Run an agentic turn and fold the event stream into the final text.
+    pub async fn run_agentic(
+        &self,
+        input: &str,
+        tools: &[Tool],
+    ) -> Result<String, CoreError> {
+        let stream = self.run_event_stream(input, tools).await?;
+        let mut out = String::new();
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            if let AgentEvent::Done { text } = ev? {
+                out = text;
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Execute a tool call in the sandbox and persist the result to memo. Shared by
+/// the agentic loop so it can be awaited without borrowing the [`Agent`].
+async fn sandbox_exec(
+    sandbox: &Arc<dyn Sandbox>,
+    memo: &Arc<dyn MemoStore>,
+    session: &str,
+    call: &ToolCall,
+) -> Result<ToolResult, CoreError> {
+    let command: Vec<String> = call
+        .arguments
+        .get("command")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .ok_or_else(|| {
+            CoreError::Model(format!("tool `{}` missing `command` array arg", call.name))
+        })?;
+    if command.is_empty() {
+        return Err(CoreError::Model(format!(
+            "tool `{}` command is empty",
+            call.name
+        )));
+    }
+    let spec = agent_sandbox::ExecSpec::command(command.clone());
+    let handle = sandbox.spawn(&spec).await?;
+    let out = sandbox.exec(&handle, &command).await?;
+    sandbox.destroy(handle).await?;
+    let content = format!(
+        "exit={} stdout={} stderr={}",
+        out.exit_code, out.stdout, out.stderr
+    );
+    memo.memorize(ContextFragment::new(
+        session,
+        FragmentKind::ToolResult,
+        content.clone(),
+    ))
+    .await?;
+    Ok(ToolResult {
+        call_id: call.id.clone(),
+        content,
+        is_error: false,
+    })
 }
 
 /// Convenience: a memory-backed memo store for quick local use.
@@ -729,5 +1003,342 @@ mod tests {
         let agent = Agent::with_model(AgentConfig::default(), model, memo).unwrap();
         let r = agent.run("hi").await.unwrap();
         assert!(r.contains("You are agent."));
+    }
+
+    // --- AgentEvent / agentic loop tests ---
+
+    use agent_sandbox::{ExecSpec, ExecOutput, SandboxError, SandboxHandle};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A `Sandbox` that runs commands locally (no Docker) so tool-execution
+    /// tests are hermetic and fast.
+    struct LocalSandbox;
+
+    #[async_trait]
+    impl Sandbox for LocalSandbox {
+        async fn spawn(&self, _spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
+            Ok(SandboxHandle { id: "local".into() })
+        }
+        async fn exec(
+            &self,
+            _handle: &SandboxHandle,
+            cmd: &[String],
+        ) -> Result<ExecOutput, SandboxError> {
+            let joined = cmd.join(" ");
+            let out = tokio::process::Command::new("sh")
+                .args(["-c", &joined])
+                .output()
+                .await
+                .map_err(SandboxError::Io)?;
+            Ok(ExecOutput {
+                exit_code: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            })
+        }
+        async fn destroy(&self, _handle: SandboxHandle) -> Result<(), SandboxError> {
+            Ok(())
+        }
+    }
+
+    fn local_agent(model: Box<dyn ModelClient>) -> Agent {
+        let harness = Arc::new(ActiveHarness::baseline("agent"));
+        Agent::with_sandbox(
+            AgentConfig::default(),
+            model,
+            in_memory_memo(),
+            harness,
+            Arc::new(LocalSandbox),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_event_serde_uses_type_tag() {
+        let tok = AgentEvent::Token { text: "hi".into() };
+        let j = serde_json::to_string(&tok).unwrap();
+        assert!(j.contains("\"type\":\"token\""));
+        assert_eq!(serde_json::from_str::<AgentEvent>(&j).unwrap(), tok);
+
+        let tc = AgentEvent::ToolCall {
+            id: "c".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({}),
+            result: ToolResult {
+                call_id: "c".into(),
+                content: "x".into(),
+                is_error: false,
+            },
+        };
+        let j2 = serde_json::to_string(&tc).unwrap();
+        assert!(j2.contains("\"type\":\"tool_call\""));
+        assert_eq!(serde_json::from_str::<AgentEvent>(&j2).unwrap(), tc);
+
+        let step = AgentEvent::Step {
+            phase: "recall".into(),
+            label: None,
+        };
+        assert!(serde_json::to_string(&step)
+            .unwrap()
+            .contains("\"type\":\"step\""));
+        assert!(serde_json::to_string(&AgentEvent::Done { text: "x".into() })
+            .unwrap()
+            .contains("\"type\":\"done\""));
+    }
+
+    #[tokio::test]
+    async fn stub_model_complete_with_tools_has_no_calls() {
+        let model = StubModel::new("agent");
+        let req = ModelRequest {
+            system: "s".into(),
+            context: String::new(),
+            input: "hi".into(),
+        };
+        let turn = model.complete_with_tools(&req, &[]).await.unwrap();
+        assert!(turn.tool_calls.is_empty());
+        assert!(turn.text.contains("hi"));
+    }
+
+    #[tokio::test]
+    async fn run_event_stream_single_shot_emits_events() {
+        let memo = in_memory_memo();
+        let agent = Agent::with_model(
+            AgentConfig::default(),
+            Box::new(StubModel::new("agent")),
+            memo.clone(),
+        )
+        .unwrap();
+        let stream = agent.run_event_stream("hello", &[]).await.unwrap();
+        let mut events = Vec::new();
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            events.push(ev.unwrap());
+        }
+        assert!(
+            matches!(events.first(), Some(AgentEvent::Step { phase, .. }) if phase == "recall"),
+            "first event must be the recall step"
+        );
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Token { .. })));
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Done { .. })),
+            "stream must terminate with Done"
+        );
+        // Both turns persisted to memo.
+        let frags = memo.recall(&RecallQuery::new("default", "hello")).await.unwrap();
+        assert!(frags.iter().any(|f| f.content == "hello"));
+    }
+
+    #[tokio::test]
+    async fn run_agentic_executes_tool_and_refills_memo() {
+        let agent = local_agent(Box::new(ToolLoopModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        let tools = vec![Tool {
+            name: "shell".into(),
+            description: "run a shell command".into(),
+            parameters: serde_json::json!({}),
+        }];
+        let stream = agent.run_event_stream("do it", &tools).await.unwrap();
+        let mut stream = stream;
+        let mut results = Vec::new();
+        while let Some(ev) = stream.next().await {
+            if let AgentEvent::ToolCall { result, .. } = ev.unwrap() {
+                results.push(result);
+            }
+        }
+        assert_eq!(results.len(), 1, "exactly one tool call executed");
+        assert!(results[0].content.contains("hello"));
+        assert!(!results[0].is_error);
+        // The tool result was persisted to memo and can be recalled.
+        let frags = agent
+            .memo()
+            .recall(&RecallQuery::new("default", "hello"))
+            .await
+            .unwrap();
+        assert!(frags.iter().any(|f| f.content.contains("hello")));
+    }
+
+    #[tokio::test]
+    async fn run_agentic_records_tool_failure() {
+        let agent = local_agent(Box::new(MissingCommandModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        let tools = vec![Tool {
+            name: "shell".into(),
+            description: "x".into(),
+            parameters: serde_json::json!({}),
+        }];
+        let stream = agent.run_event_stream("fail", &tools).await.unwrap();
+        let mut stream = stream;
+        let mut saw_error = false;
+        let mut done = false;
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                AgentEvent::ToolCall { result, .. } => saw_error = saw_error || result.is_error,
+                AgentEvent::Done { .. } => done = true,
+                _ => {}
+            }
+        }
+        assert!(saw_error, "missing command must surface as an error tool result");
+        assert!(done);
+    }
+
+    #[tokio::test]
+    async fn run_agentic_respects_loop_cap() {
+        let agent = local_agent(Box::new(LoopForeverModel));
+        let tools = vec![Tool {
+            name: "shell".into(),
+            description: "x".into(),
+            parameters: serde_json::json!({}),
+        }];
+        let stream = agent.run_event_stream("loop", &tools).await.unwrap();
+        let mut stream = stream;
+        let mut model_steps = 0usize;
+        let mut done = false;
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                AgentEvent::Step { phase, .. } if phase == "model" => model_steps += 1,
+                AgentEvent::Done { .. } => done = true,
+                _ => {}
+            }
+        }
+        assert!(done, "must terminate with a Done event even when looping");
+        assert!(
+            model_steps <= Agent::MAX_AGENTIC_STEPS,
+            "model steps bounded by cap, got {model_steps}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_tool_call_runs_in_sandbox_and_persists() {
+        let memo = in_memory_memo();
+        let agent = Agent::with_sandbox(
+            AgentConfig::default(),
+            Box::new(StubModel::new("agent")),
+            memo.clone(),
+            Arc::new(ActiveHarness::baseline("agent")),
+            Arc::new(LocalSandbox),
+        )
+        .unwrap();
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({ "command": ["echo", "hi"] }),
+        };
+        let res = agent.exec_tool_call(&call).await.unwrap();
+        assert!(res.content.contains("hi"));
+        assert!(!res.is_error);
+        let frags = memo.recall(&RecallQuery::new("default", "hi")).await.unwrap();
+        assert!(frags.iter().any(|f| f.content.contains("hi")));
+    }
+
+    #[tokio::test]
+    async fn exec_tool_call_missing_command_errors() {
+        let agent = local_agent(Box::new(StubModel::new("agent")));
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({}),
+        };
+        let res = agent.exec_tool_call(&call).await;
+        assert!(matches!(res, Err(CoreError::Model(_))));
+    }
+
+    /// Returns a tool call on the first turn, then a final reply afterwards.
+    struct ToolLoopModel {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelClient for ToolLoopModel {
+        async fn complete(&self, req: &ModelRequest) -> Result<ModelResponse, CoreError> {
+            Ok(ModelResponse {
+                text: format!("[stub] {}", req.input),
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            req: &ModelRequest,
+            _tools: &[Tool],
+        ) -> Result<ModelTurn, CoreError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(ModelTurn {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({ "command": ["echo", "hello"] }),
+                    }],
+                })
+            } else {
+                Ok(ModelTurn {
+                    text: format!("final reply for: {}", req.input),
+                    tool_calls: vec![],
+                })
+            }
+        }
+    }
+
+    /// Returns a tool call with no `command` arg first, then a final reply.
+    struct MissingCommandModel {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelClient for MissingCommandModel {
+        async fn complete(&self, _req: &ModelRequest) -> Result<ModelResponse, CoreError> {
+            Ok(ModelResponse {
+                text: String::new(),
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: &ModelRequest,
+            _tools: &[Tool],
+        ) -> Result<ModelTurn, CoreError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(ModelTurn {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "bad".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                })
+            } else {
+                Ok(ModelTurn {
+                    text: "recovered".into(),
+                    tool_calls: vec![],
+                })
+            }
+        }
+    }
+
+    /// Always asks for the same tool call, to exercise the loop cap.
+    struct LoopForeverModel;
+
+    #[async_trait]
+    impl ModelClient for LoopForeverModel {
+        async fn complete(&self, _req: &ModelRequest) -> Result<ModelResponse, CoreError> {
+            Ok(ModelResponse {
+                text: String::new(),
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: &ModelRequest,
+            _tools: &[Tool],
+        ) -> Result<ModelTurn, CoreError> {
+            Ok(ModelTurn {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c".into(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({ "command": ["echo", "x"] }),
+                }],
+            })
+        }
     }
 }
