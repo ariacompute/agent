@@ -212,12 +212,12 @@ API_KEY = os.environ.get("AGENT_CLOUD_API_KEY")
 headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
 
 agent = requests.post(f"{BASE}/v1/agents", json={"name": "my-agent"}, headers=headers).json()
-agent_id = agent["id"]
+agent_name = agent["name"]
 
 # one-shot run
 run = requests.post(
     f"{BASE}/v1/runs",
-    json={"agent_id": agent_id, "session": "s1", "input": "hello"},
+    json={"agent": agent_name, "session": "s1", "input": "hello"},
     headers=headers,
 ).json()
 print(run["output"])
@@ -225,7 +225,7 @@ print(run["output"])
 # streaming run
 with requests.post(
     f"{BASE}/v1/runs/stream",
-    json={"agent_id": agent_id, "session": "s1", "input": "tell me a joke"},
+    json={"agent": agent_name, "session": "s1", "input": "tell me a joke"},
     headers=headers,
     stream=True,
 ) as r:
@@ -246,7 +246,7 @@ Add `reqwest` (with `json` feature), `tokio`, `serde`, `serde_json`, and `anyhow
 use reqwest::Client;
 use serde::Deserialize;
 
-#[derive(Deserialize)] struct Agent { id: String }
+#[derive(Deserialize)] struct Agent { name: String }
 #[derive(Deserialize)] struct Run  { output: String }
 
 #[tokio::main]
@@ -266,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
 
     let run: Run = client.post(format!("{base}/v1/runs"))
         .headers(headers)
-        .json(&serde_json::json!({"agent_id": agent.id, "session": "s1", "input": "hello"}))
+        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "hello"}))
         .send().await?.json().await?;
 
     println!("{}", run.output);
@@ -290,18 +290,18 @@ const headers: Record<string, string> = {
 // create + one-shot run
 const agent = await fetch(`${base}/v1/agents`, {
   method: "POST", headers, body: JSON.stringify({ name: "my-agent" }),
-}).then((r) => r.json<{ id: string }>());
+}).then((r) => r.json<{ name: string }>());
 
 const run = await fetch(`${base}/v1/runs`, {
   method: "POST", headers,
-  body: JSON.stringify({ agent_id: agent.id, session: "s1", input: "hello" }),
+  body: JSON.stringify({ agent: agent.name, session: "s1", input: "hello" }),
 }).then((r) => r.json<{ output: string }>());
 console.log(run.output);
 
 // streaming run
 const res = await fetch(`${base}/v1/runs/stream`, {
   method: "POST", headers,
-  body: JSON.stringify({ agent_id: agent.id, session: "s1", input: "tell me a joke" }),
+  body: JSON.stringify({ agent: agent.name, session: "s1", input: "tell me a joke" }),
 });
 const reader = res.body!.getReader();
 const decoder = new TextDecoder();
