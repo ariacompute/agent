@@ -141,7 +141,10 @@ cp .env.example .env
 | `MEMO_DIR` | `/app/.memo` | Directory for the persistent memo store (used when `AGENT_MEMO_BACKEND=memo`). |
 | `REEF_DIR` | `/app/.reef` | Reef stores (records / feedback / git-versioned harness). |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
-| `CLOUD_PORT` | `3000` | Host port published for the cloud service (container always listens on 3000). |
+| `CLOUD_PORT` | `3000` | Host port published for **direct** access to the cloud service (the container always listens on 3000). |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
+| `DOCKER_GID` | `998` | GID of the host `docker` group that owns `/var/run/docker.sock`. The runtime image recreates this group and adds the non-root `aria` user to it so the socket is reachable without `root`. |
+| `NGINX_PORT` | `80` | Host port published by the `nginx` reverse proxy (forwards to `cloud:3000`). |
 
 > `.env` is git-ignored; `.env.example` is the committed template. Compose
 > auto-loads `.env` for variable substitution and the `cloud` service also reads
@@ -155,8 +158,16 @@ docker compose up --build
 
 The cloud service waits for a healthy Postgres before starting; the schema
 (`agents` / `runs`) is created automatically on boot (`ensure_schema`), so no
-init scripts are needed. The API is then available at `http://localhost:3000`
-(or `http://localhost:${CLOUD_PORT}`).
+init scripts are needed. The API is then reachable through **either** endpoint:
+
+- **Direct:** `http://localhost:3000` (or `http://localhost:${CLOUD_PORT}`) — the
+  `cloud` service port, published for debugging / when nginx is not needed.
+- **Via nginx:** `http://localhost:80` (or `http://localhost:${NGINX_PORT}`) — the
+  `nginx` reverse proxy, which forwards to `cloud:3000` (recommended entrypoint;
+  adds `X-Forwarded-*` headers and streams SSE without buffering).
+
+A `GET /healthz` endpoint (served by nginx itself) can be used for liveness
+checks.
 
 ### 3. Memo backend
 
@@ -174,6 +185,32 @@ AGENT_MEMO_BACKEND=memo docker compose up --build
 
 > Reef data (records / feedback / harness) is always persisted to the `reefdata`
 > volume regardless of the memo backend.
+
+### 4. Sandbox via the Docker socket
+
+When an agent invokes a tool that needs isolation, the cloud service spawns a
+short-lived container through the Docker **Engine API** (the default
+`docker` sandbox provider). This mirrors the playground's model: the `cloud`
+container mounts the **host** Docker socket (`/var/run/docker.sock`, DooD) and
+reaches the daemon directly — **no `docker` CLI is installed in the image**.
+
+The endpoint is controlled by `DOCKER_HOST` (default `unix:///var/run/docker.sock`),
+so you can instead point it at a remote daemon or a Docker-in-Docker sidecar
+(e.g. `tcp://dind:2375`) without code changes. Tool containers run on the host
+daemon and are named `aria-sandbox-<uuid>`; they are force-removed when the
+session ends.
+
+The `cloud` container runs as the non-root `aria` user. To reach the mounted
+socket it joins a `docker` group whose GID is `DOCKER_GID` (default `998`) and
+must match the host group that owns `/var/run/docker.sock`
+(`stat -c '%g' /var/run/docker.sock`, often 998 or 999). If they differ, rebuild
+with `docker compose build --build-arg DOCKER_GID=<gid>`, or fall back to
+`user: root` in the compose file. To disable sandboxing entirely, comment out the
+`/var/run/docker.sock` volume mount (the `DOCKER_GID` build arg is then unused).
+
+> Mounting the host socket grants the cloud container root-equivalent control of
+> the host Docker daemon. Only do this for a trusted, single-tenant deployment.
+> For stronger isolation, set `DOCKER_HOST` to a separate daemon (DinD / remote).
 
 ### Volumes
 

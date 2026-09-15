@@ -16,4 +16,9 @@ thiserror.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+# Docker Engine API client — lets the Docker sandbox talk to the daemon over the
+# mounted host socket (or any DOCKER_HOST) without a `docker` CLI inside the
+# container. Aligns with the playground's deployment model.
+bollard = "0.18"
+futures = "0.3"
 

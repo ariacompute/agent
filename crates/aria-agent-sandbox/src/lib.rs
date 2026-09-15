@@ -1,11 +1,13 @@
 //! `agent-sandbox` — pluggable execution sandbox for tool calls.
 //!
 //! Provides a provider abstraction so the same agent runtime can run under
-//! **Docker**, **Kata**, or **Cube** sandboxes. Most providers are thin CLI
-//! runners that shell out to the platform binary (`docker`,
-//! `docker --runtime=kata`, `cube`, …). This keeps the crate self-contained
-//! and runnable wherever the corresponding CLI is installed, while the
-//! [`Sandbox`] trait is the stable seam the rest of the platform depends on
+//! **Docker**, **Kata**, or **Cube** sandboxes. The **Docker** provider talks to
+//! the Docker **Engine API** through `bollard` — no `docker` CLI is required
+//! inside the container; it connects to the daemon over the mounted host socket
+//! (or whatever `DOCKER_HOST` points at). The **Kata** and **Cube** providers
+//! remain thin CLI runners that shell out to the platform binary
+//! (`docker --runtime=kata`, `cube`, …). The [`Sandbox`] trait is the stable
+//! seam the rest of the platform depends on
 //! (see `docs/adr/0003-sandbox-providers.md`).
 //!
 //! The deep codex integration (ADR-0005 §Decision) — running tool commands
@@ -19,6 +21,11 @@
 //! backend via `agent_core::Agent::with_sandbox`.
 
 use async_trait::async_trait;
+use bollard::container::{
+    Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
+};
+use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::Docker;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -218,38 +225,142 @@ impl Sandbox for CliSandbox {
 }
 
 /// Docker sandbox — the **default** provider.
+///
+/// Talks to the Docker **Engine API** through `bollard` — no `docker` CLI is
+/// required inside the container. This matches the playground's deployment model:
+/// the Compose `cloud` service mounts the host `/var/run/docker.sock` (DooD) and
+/// the API is reached directly over that socket (or whatever `DOCKER_HOST`
+/// points at). `DOCKER_HOST` is honored (e.g. `unix:///var/run/docker.sock` or a
+/// remote `tcp://…`); when unset it falls back to the local unix socket.
 pub struct DockerSandbox {
-    inner: CliSandbox,
+    docker: Docker,
 }
 
 impl DockerSandbox {
     pub fn new() -> Self {
-        Self {
-            inner: CliSandbox::new(
-                SandboxProvider::Docker,
-                "docker",
-                vec!["run".into(), "--rm".into(), "-d".into()],
-                "alpine:latest",
-            ),
-        }
+        // `connect_with_local_defaults` honors `DOCKER_HOST` and falls back to the
+        // unix socket when it is unset. If `DOCKER_HOST` is malformed we fall back
+        // to the socket default so construction never fails.
+        let docker = Docker::connect_with_local_defaults().unwrap_or_else(|_| {
+            Docker::connect_with_socket_defaults().expect("failed to connect to the Docker socket")
+        });
+        Self { docker }
     }
 }
 
 #[async_trait]
 impl Sandbox for DockerSandbox {
     async fn spawn(&self, spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
-        self.inner.spawn(spec).await
+        let image = spec
+            .image
+            .clone()
+            .unwrap_or_else(|| "alpine:latest".to_string());
+        let name = format!("aria-sandbox-{}", uuid::Uuid::new_v4());
+        self.docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: &name,
+                    platform: None,
+                }),
+                Config {
+                    image: Some(image),
+                    cmd: Some(vec!["sleep".to_string(), "3600".to_string()]),
+                    tty: Some(false),
+                    env: Some(env_to_docker(&spec.env)),
+                    working_dir: spec.workdir.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| SandboxError::Spawn(e.to_string()))?;
+        self.docker
+            .start_container(&name, None::<StartContainerOptions<String>>)
+            .await
+            .map_err(|e| SandboxError::Spawn(e.to_string()))?;
+        Ok(SandboxHandle { id: name })
     }
+
     async fn exec(
         &self,
         handle: &SandboxHandle,
         cmd: &[String],
     ) -> Result<ExecOutput, SandboxError> {
-        self.inner.exec(handle, cmd).await
+        if cmd.is_empty() {
+            return Err(SandboxError::Exec("empty command".into()));
+        }
+        let joined = shell_join(cmd);
+        let exec = self
+            .docker
+            .create_exec(
+                &handle.id,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh".to_string(), "-c".to_string(), joined]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| SandboxError::Exec(e.to_string()))?;
+
+        let id = exec.id.clone();
+        match self
+            .docker
+            .start_exec(&id, None)
+            .await
+            .map_err(|e| SandboxError::Exec(e.to_string()))?
+        {
+            StartExecResults::Attached { mut output, .. } => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                use futures::StreamExt;
+                while let Some(frame) = output.next().await {
+                    match frame.map_err(|e| SandboxError::Exec(e.to_string()))? {
+                        bollard::container::LogOutput::StdOut { message } => {
+                            stdout.push_str(&String::from_utf8_lossy(&message));
+                        }
+                        bollard::container::LogOutput::StdErr { message } => {
+                            stderr.push_str(&String::from_utf8_lossy(&message));
+                        }
+                        _ => {}
+                    }
+                }
+                let exit_code = self
+                    .docker
+                    .inspect_exec(&id)
+                    .await
+                    .map(|r| r.exit_code.unwrap_or(-1) as i32)
+                    .unwrap_or(-1);
+                Ok(ExecOutput {
+                    exit_code,
+                    stdout,
+                    stderr,
+                })
+            }
+            StartExecResults::Detached => Err(SandboxError::Exec(
+                "docker exec returned a detached stream".into(),
+            )),
+        }
     }
+
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError> {
-        self.inner.destroy(handle).await
+        self.docker
+            .remove_container(
+                &handle.id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| SandboxError::Exec(e.to_string()))?;
+        Ok(())
     }
+}
+
+/// Convert `(KEY, VALUE)` pairs into Docker's `KEY=VALUE` env strings.
+fn env_to_docker(env: &[(String, String)]) -> Vec<String> {
+    env.iter().map(|(k, v)| format!("{k}={v}")).collect()
 }
 
 /// Kata sandbox — Docker with the `kata` runtime.

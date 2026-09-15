@@ -135,7 +135,10 @@ cp .env.example .env
 | `MEMO_DIR` | `/app/.memo` | 持久化 memo 目录（仅 `AGENT_MEMO_BACKEND=memo` 时使用）。 |
 | `REEF_DIR` | `/app/.reef` | Reef 存储（records / feedback / git 版本化 harness）。 |
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
-| `CLOUD_PORT` | `3000` | 对外暴露的主机端口（容器内始终监听 3000）。 |
+| `CLOUD_PORT` | `3000` | 对 `cloud` 服务**直连**暴露的主机端口（容器内始终监听 3000）。 |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | sandbox 使用的 Docker Engine API 端点（DooD）。可改为远程 / DinD 守护进程。 |
+| `DOCKER_GID` | `998` | 宿主 `docker` 组（拥有 `/var/run/docker.sock`）的 GID。运行期镜像会重建该组并把非 root 用户 `aria` 加入，从而无需 `root` 即可访问 socket。 |
+| `NGINX_PORT` | `80` | `nginx` 反向代理对外暴露的主机端口（转发到 `cloud:3000`）。 |
 
 > `.env` 已被 git 忽略；`.env.example` 是提交到仓库的模板。Compose 会自动加载
 > `.env` 做变量替换，且 `cloud` 服务通过 `env_file` 直接读取它，因此容器进程能
@@ -148,8 +151,14 @@ docker compose up --build
 ```
 
 云端服务会等待 Postgres 健康后再启动；表结构（`agents` / `runs`）在启动时由
-`ensure_schema` 自动创建，无需初始化脚本。随后 API 在
-`http://localhost:3000`（或 `http://localhost:${CLOUD_PORT}`）可用。
+`ensure_schema` 自动创建，无需初始化脚本。API 可通过**任一**入口访问：
+
+- **直连：** `http://localhost:3000`（或 `http://localhost:${CLOUD_PORT}`）——`cloud`
+  服务端口，便于调试或不需要 nginx 时使用。
+- **经 nginx：** `http://localhost:80`（或 `http://localhost:${NGINX_PORT}`）——`nginx`
+  反向代理，转发到 `cloud:3000`（推荐入口，会附带 `X-Forwarded-*` 头且不缓冲 SSE 流式响应）。
+
+`nginx` 自身提供 `GET /healthz` 健康检查端点（直接由 nginx 返回 `ok`）。
 
 ### 3. Memo 后端
 
@@ -166,6 +175,29 @@ AGENT_MEMO_BACKEND=memo docker compose up --build
 
 > Reef 数据（records / feedback / harness）无论 memo 后端如何，始终持久化到
 > `reefdata` 卷。
+
+### 4. 通过 Docker socket 的 sandbox
+
+当 agent 调用需要隔离的工具时，云端服务通过 Docker **Engine API**（默认的
+`docker` sandbox provider）拉起一个短生命周期容器来执行。该方式对齐 playground：
+`cloud` 容器挂载**宿主** Docker socket（`/var/run/docker.sock`，DooD），直接访问
+宿主守护进程——**镜像内不安装 `docker` CLI**。
+
+端点由 `DOCKER_HOST` 控制（默认 `unix:///var/run/docker.sock`），因此你可以不改
+代码地改为指向远程守护进程或 Docker-in-Docker 边车（如 `tcp://dind:2375`）。
+工具容器运行在宿主守护进程上，命名为 `aria-sandbox-<uuid>`，会话结束时会被强制
+移除。
+
+`cloud` 容器以非 root 用户 `aria` 运行。为访问挂载的 socket，它会加入一个 GID 由
+`DOCKER_GID`（默认 `998`）指定的 `docker` 组，该 GID 必须与宿主上拥有
+`/var/run/docker.sock` 的组一致（`stat -c '%g' /var/run/docker.sock`，常为 998 或
+999）。若不一致，可用 `docker compose build --build-arg DOCKER_GID=<gid>` 重新构建，
+或在 compose 中回退为 `user: root`。若想彻底关闭 sandbox，只需注释掉
+`/var/run/docker.sock` 的挂载卷（`DOCKER_GID` 构建参数随之失效）。
+
+> 挂载宿主 socket 等于把宿主 Docker 的 root 级控制权交给了 cloud 容器，请仅在
+> 受信任的单租户部署中使用。若需更强隔离，可将 `DOCKER_HOST` 指向独立守护进程
+> （DinD / 远程）。
 
 ### 数据卷
 

@@ -3,7 +3,12 @@
 # Services:
 #   postgres  Postgres (metadata: agents / runs). Schema is created on boot by
 #             the cloud service (ensure_schema), so no init scripts are needed.
-#   cloud     The `aria-agent` axum service. Waits for a healthy Postgres.
+#   cloud     The `aria-agent` axum service. Waits for a healthy Postgres. Mounts
+#             the host Docker socket so the Docker sandbox can spawn tool-exec
+#             containers via the Engine API (no `docker` CLI inside the image).
+#             This mirrors the playground's DooD model: the socket is mounted
+#             and reached through `DOCKER_HOST` (default unix socket).
+#   nginx     Reverse proxy in front of `cloud` (see nginx/default.conf).
 #
 # All configuration lives in a local `.env` file (see `.env.example`). Copy it
 # first, then adjust values:   cp .env.example .env
@@ -12,7 +17,9 @@
 # every variable directly.
 #
 # Run:  docker compose up --build
-# Then: POST http://localhost:3000/v1/agents  (open when AGENT_CLOUD_API_KEY unset)
+# Then (pick one entrypoint):
+#   * Direct:        POST http://localhost:3000/v1/agents  (CLOUD_PORT)
+#   * Via nginx:     POST http://localhost:80/v1/agents     (NGINX_PORT)
 
 services:
   postgres:
@@ -34,19 +41,52 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # GID of the host `docker` group that owns /var/run/docker.sock. The
+        # runtime image creates a group with this GID and adds the non-root
+        # `aria` user to it so the socket is reachable without running as root.
+        # Check on the host: `stat -c '%g' /var/run/docker.sock` (often 998/999).
+        DOCKER_GID: ${DOCKER_GID:-998}
     depends_on:
       postgres:
         condition: service_healthy
     # Load every variable from the local `.env` into the container process.
     env_file:
       - .env
-    ports:
-      - "${CLOUD_PORT:-3000}:3000"
+    environment:
+      # Docker Engine endpoint for the sandbox. Defaults to the mounted host
+      # socket (DooD). Override with a remote daemon if preferred. Honored by
+      # the bollard-based Docker sandbox.
+      DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
+    # Host Docker socket so the Docker sandbox can run tool containers. Safe only
+    # when you trust the composed service. To disable sandboxing, comment this
+    # line out (and the `DOCKER_GID` build arg is then unused).
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - reefdata:/app/.reef
       - memodata:/app/.memo
+    # Direct access to the cloud API (debug / when nginx is not needed).
+    ports:
+      - "${CLOUD_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/3000 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:stable-alpine
+    depends_on:
+      cloud:
+        condition: service_healthy
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      # Reverse-proxy config: forwards everything to the `cloud` service.
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
