@@ -18,11 +18,44 @@
 > **存储边界：** memo 是**唯一的**上下文存储，从不使用 Postgres；Postgres
 > 仅由 `aria-agent-cloud` 用于存储 `agents`/`runs` 元数据。
 
+## codex 子模块
+
+本仓库以 git 子模块方式依赖 OpenAI 的
+[`codex`](https://github.com/openai/codex)，位于 `codex/`。上游 codex 的
+Rust 工作区位于 `codex/codex-rs/`，**仓库根目录没有 `Cargo.toml`**，因此通过
+git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
+
+`patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch` 把
+`codex-rs` 的工作区定义提升到仓库根目录（并把内部的 `path` 依赖统一加上
+`codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（tag `root-workspace-v1`）
+所做的改动。在检出后，于 **`codex/` 子模块内部**应用该补丁：
+
+```bash
+# 1. 克隆子模块（浅克隆）
+git submodule update --init --depth 1 codex
+
+# 2. 在子模块内部应用根工作区补丁
+git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
+```
+
+应用后，`codex/Cargo.toml` 会出现在仓库根目录，cargo 即可传递性地解析
+`codex-*` 各个 crate。该补丁**不会**提交进子模块——它存放在仓库根的
+`patch/` 目录——因此每次重新初始化子模块时都需重新执行。如需撤销补丁并恢复
+子模块原状：
+
+```bash
+git -C codex checkout -- . && git -C codex clean -fd
+```
+
+> 该补丁是 `docs/adr/0005-codex-integration.md` 描述的深度编译集成所必需的。
+> 若你只构建不依赖 codex crate 的本仓库 crate，可以跳过此步。
+
 ## 快速开始
 
 ```bash
-# 1. codex 子模块
+# 1. codex 子模块 + 根工作区补丁（见上文「codex 子模块」）
 git submodule update --init --depth 1 codex
+git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
 
 # 2. 构建
 cargo build --workspace

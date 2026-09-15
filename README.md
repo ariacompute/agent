@@ -20,11 +20,46 @@ harness, exposing agents as (a) a **Rust + Cloud API** and (b)
 > Postgres. Postgres is used *only* by `aria-agent-cloud` for `agents`/`runs`
 > metadata.
 
+## codex submodule
+
+This repo depends on OpenAI's [`codex`](https://github.com/openai/codex) as a git
+submodule at `codex/`. The upstream `codex` workspace lives at `codex/codex-rs/`
+and has **no manifest at the repo root**, so a git dependency (`package =
+"codex-*"`) cannot resolve without a patch.
+
+`patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch` promotes the
+`codex-rs` workspace definition up to the repo root (and prefixes internal
+`path` dependencies with `codex-rs/`). This is exactly what the
+`ariacompute/codex` fork (tag `root-workspace-v1`) does. Apply it **inside the
+`codex/` submodule** after checkout:
+
+```bash
+# 1. clone the submodule (shallow)
+git submodule update --init --depth 1 codex
+
+# 2. apply the root-workspace patch inside the submodule
+git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
+```
+
+After this, `codex/Cargo.toml` exists at the repo root and cargo can resolve
+`codex-*` crates transitively. The patch is **not committed** in the submodule —
+it lives in `patch/` at the repo root — so re-run it whenever you re-init the
+submodule. To undo the patch and restore the submodule:
+
+```bash
+git -C codex checkout -- . && git -C codex clean -fd
+```
+
+> The patch is required for the deep compile-integration described in
+> `docs/adr/0005-codex-integration.md`. If you only build our crates that do not
+> depend on codex crates, you can skip it.
+
 ## Quick start
 
 ```bash
-# 1. codex submodule
+# 1. codex submodule + root-workspace patch (see "codex submodule" above)
 git submodule update --init --depth 1 codex
+git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
 
 # 2. build everything
 cargo build --workspace
