@@ -143,6 +143,7 @@ cp .env.example .env
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
 | `CLOUD_PORT` | `3000` | Host port published for **direct** access to the cloud service (the container always listens on 3000). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
+| `ARIA_DOCKER_SOCKET` | _(unset)_ | Explicit sandbox socket path; takes precedence over auto-discovery (e.g. `~/.docker/run/docker.sock` on macOS). |
 | `DOCKER_GID` | `998` | GID of the host `docker` group that owns `/var/run/docker.sock`. The runtime image recreates this group and adds the non-root `aria` user to it so the socket is reachable without `root`. |
 | `NGINX_PORT` | `80` | Host port published by the `nginx` reverse proxy (forwards to `cloud:3000`). |
 
@@ -199,6 +200,14 @@ so you can instead point it at a remote daemon or a Docker-in-Docker sidecar
 (e.g. `tcp://dind:2375`) without code changes. Tool containers run on the host
 daemon and are named `aria-sandbox-<uuid>`; they are force-removed when the
 session ends.
+
+The connection is established **lazily** on the first sandbox call, so a missing
+daemon is a tool-execution error rather than a startup panic. When
+`DOCKER_HOST` / `ARIA_DOCKER_SOCKET` are unset, the well-known socket locations
+are probed in order — including `~/.docker/run/docker.sock`, which is where
+**Docker Desktop on macOS** exposes the daemon (`/var/run/docker.sock` only
+exists there if Docker Desktop's "default socket" option is enabled), plus
+Colima (`~/.colima/default/docker.sock`) and rootless Podman paths.
 
 The `cloud` container runs as the non-root `aria` user. To reach the mounted
 socket it joins a `docker` group whose GID is `DOCKER_GID` (default `998`) and

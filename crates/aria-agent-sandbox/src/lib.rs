@@ -25,9 +25,11 @@ use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::Docker;
+use bollard::{Docker, API_DEFAULT_VERSION};
 use serde::{Deserialize, Serialize};
+use std::env;
 use thiserror::Error;
+use tokio::sync::OnceCell;
 
 /// Specification of a command to execute inside a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +226,80 @@ impl Sandbox for CliSandbox {
     }
 }
 
+/// Connect timeout (seconds) used when probing Docker sockets.
+const DOCKER_TIMEOUT_SECS: u64 = 120;
+
+/// Well-known Docker daemon socket locations, probed in order.
+///
+/// `/var/run/docker.sock` is the classic Linux location, but it is **not**
+/// universal: Docker Desktop on macOS exposes the daemon at
+/// `~/.docker/run/docker.sock` (and only symlinks `/var/run/docker.sock` when
+/// the "default socket" option is enabled), Colima uses
+/// `~/.colima/default/docker.sock`, and rootless setups (Docker Desktop on
+/// Linux, Podman) live under `XDG_RUNTIME_DIR`. `ARIA_DOCKER_SOCKET` and
+/// `DOCKER_HOST` (`unix://…`) always win when set.
+fn candidate_sockets() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |p: String| {
+        let p = p.trim().to_string();
+        if !p.is_empty() && !out.contains(&p) {
+            out.push(p);
+        }
+    };
+
+    if let Ok(p) = env::var("ARIA_DOCKER_SOCKET") {
+        push(p);
+    }
+    if let Ok(h) = env::var("DOCKER_HOST") {
+        if let Some(rest) = h.strip_prefix("unix://") {
+            push(rest.to_string());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        push("/var/run/docker.sock".into());
+        if let Ok(home) = env::var("HOME") {
+            // Docker Desktop (macOS) and Colima.
+            push(format!("{home}/.docker/run/docker.sock"));
+            push(format!("{home}/.colima/default/docker.sock"));
+        }
+        if let Ok(xdg) = env::var("XDG_RUNTIME_DIR") {
+            // Rootless Docker Desktop (Linux) and rootless Podman.
+            push(format!("{xdg}/.docker/run/docker.sock"));
+            push(format!("{xdg}/podman/podman.sock"));
+        }
+        push("/run/podman/podman.sock".into());
+    }
+
+    out
+}
+
+/// Try each candidate socket in order and return the first connection that
+/// resolves. This only *constructs* a client (the socket file must exist); no
+/// daemon round-trip is performed, so a stale socket still fails later at
+/// `spawn`/`exec` with a normal [`SandboxError`].
+fn connect_first(sockets: &[String]) -> Result<Docker, SandboxError> {
+    let mut last: Option<String> = None;
+    for path in sockets {
+        match Docker::connect_with_socket(path, DOCKER_TIMEOUT_SECS, API_DEFAULT_VERSION) {
+            Ok(docker) => {
+                tracing::debug!(socket = %path, "connected to the Docker daemon");
+                return Ok(docker);
+            }
+            Err(e) => {
+                tracing::debug!(socket = %path, error = %e, "docker socket unavailable");
+                last = Some(e.to_string());
+            }
+        }
+    }
+    Err(SandboxError::NotConfigured(format!(
+        "no reachable Docker daemon: set DOCKER_HOST (or ARIA_DOCKER_SOCKET) to your daemon socket; probed: [{}]{}",
+        sockets.join(", "),
+        last.map(|e| format!(" (last error: {e})")).unwrap_or_default(),
+    )))
+}
+
 /// Docker sandbox — the **default** provider.
 ///
 /// Talks to the Docker **Engine API** through `bollard` — no `docker` CLI is
@@ -231,32 +307,64 @@ impl Sandbox for CliSandbox {
 /// the Compose `cloud` service mounts the host `/var/run/docker.sock` (DooD) and
 /// the API is reached directly over that socket (or whatever `DOCKER_HOST`
 /// points at). `DOCKER_HOST` is honored (e.g. `unix:///var/run/docker.sock` or a
-/// remote `tcp://…`); when unset it falls back to the local unix socket.
+/// remote `tcp://…`); when unset the well-known socket locations are probed.
+///
+/// The daemon connection is **lazy**: constructing a sandbox never panics and
+/// never fails, so the agent runtime (and the whole test suite) works on
+/// machines without a reachable daemon — including macOS, where Docker Desktop
+/// does not expose `/var/run/docker.sock` by default. The connection is
+/// established on the first `spawn`/`exec`/`destroy`, which then returns
+/// [`SandboxError::NotConfigured`] if no daemon could be reached.
 pub struct DockerSandbox {
-    docker: Docker,
+    docker: OnceCell<Docker>,
+    /// Explicit socket override; when set, discovery is skipped entirely.
+    sockets: Option<Vec<String>>,
 }
 
 impl DockerSandbox {
     pub fn new() -> Self {
-        // `connect_with_local_defaults` honors `DOCKER_HOST` and falls back to the
-        // unix socket when it is unset. If `DOCKER_HOST` is malformed we fall back
-        // to the socket default so construction never fails.
-        let docker = Docker::connect_with_local_defaults().unwrap_or_else(|_| {
-            Docker::connect_with_socket_defaults().expect("failed to connect to the Docker socket")
-        });
-        Self { docker }
+        Self {
+            docker: OnceCell::new(),
+            sockets: None,
+        }
+    }
+
+    /// Pin the sandbox to one socket path (no `DOCKER_HOST`/auto-discovery).
+    pub fn with_socket(path: impl Into<String>) -> Self {
+        Self {
+            docker: OnceCell::new(),
+            sockets: Some(vec![path.into()]),
+        }
+    }
+
+    /// Resolve (and memoize) the daemon client.
+    pub async fn client(&self) -> Result<&Docker, SandboxError> {
+        self.docker
+            .get_or_try_init(|| async {
+                match &self.sockets {
+                    Some(sockets) => connect_first(sockets),
+                    // `connect_with_local_defaults` honors `DOCKER_HOST` (including
+                    // `tcp://…` and the Windows named pipe) and TLS settings.
+                    None => match Docker::connect_with_local_defaults() {
+                        Ok(docker) => Ok(docker),
+                        Err(_) => connect_first(&candidate_sockets()),
+                    },
+                }
+            })
+            .await
     }
 }
 
 #[async_trait]
 impl Sandbox for DockerSandbox {
     async fn spawn(&self, spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
+        let docker = self.client().await?;
         let image = spec
             .image
             .clone()
             .unwrap_or_else(|| "alpine:latest".to_string());
         let name = format!("aria-sandbox-{}", uuid::Uuid::new_v4());
-        self.docker
+        docker
             .create_container(
                 Some(CreateContainerOptions {
                     name: &name,
@@ -273,7 +381,7 @@ impl Sandbox for DockerSandbox {
             )
             .await
             .map_err(|e| SandboxError::Spawn(e.to_string()))?;
-        self.docker
+        docker
             .start_container(&name, None::<StartContainerOptions<String>>)
             .await
             .map_err(|e| SandboxError::Spawn(e.to_string()))?;
@@ -289,8 +397,8 @@ impl Sandbox for DockerSandbox {
             return Err(SandboxError::Exec("empty command".into()));
         }
         let joined = shell_join(cmd);
-        let exec = self
-            .docker
+        let docker = self.client().await?;
+        let exec = docker
             .create_exec(
                 &handle.id,
                 CreateExecOptions {
@@ -304,8 +412,7 @@ impl Sandbox for DockerSandbox {
             .map_err(|e| SandboxError::Exec(e.to_string()))?;
 
         let id = exec.id.clone();
-        match self
-            .docker
+        match docker
             .start_exec(&id, None)
             .await
             .map_err(|e| SandboxError::Exec(e.to_string()))?
@@ -325,8 +432,7 @@ impl Sandbox for DockerSandbox {
                         _ => {}
                     }
                 }
-                let exit_code = self
-                    .docker
+                let exit_code = docker
                     .inspect_exec(&id)
                     .await
                     .map(|r| r.exit_code.unwrap_or(-1) as i32)
@@ -344,7 +450,8 @@ impl Sandbox for DockerSandbox {
     }
 
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError> {
-        self.docker
+        let docker = self.client().await?;
+        docker
             .remove_container(
                 &handle.id,
                 Some(RemoveContainerOptions {
@@ -506,6 +613,57 @@ mod tests {
         let s = default_sandbox();
         // type-erased; just ensure construction does not panic
         let _ = s;
+    }
+
+    #[test]
+    fn docker_sandbox_construction_never_panics() {
+        // Regression: on macOS the daemon socket is not `/var/run/docker.sock`,
+        // and construction used to `expect()` on that path.
+        let _ = DockerSandbox::new();
+        let _ = DockerSandbox::with_socket("/definitely/not/a/docker.sock");
+        let _ = default_sandbox();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_sockets_include_desktop_and_colima() {
+        let cands = candidate_sockets();
+        assert!(cands.contains(&"/var/run/docker.sock".to_string()));
+        if let Ok(home) = env::var("HOME") {
+            // Docker Desktop (macOS) keeps the daemon here by default.
+            assert!(cands.contains(&format!("{home}/.docker/run/docker.sock")));
+            assert!(cands.contains(&format!("{home}/.colima/default/docker.sock")));
+        }
+        // No duplicates.
+        let mut seen = std::collections::HashSet::new();
+        for c in &cands {
+            assert!(seen.insert(c.clone()), "duplicate candidate: {c}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_docker_returns_error_instead_of_panicking() {
+        // Whether or not a daemon exists locally, resolution must not panic;
+        // when it fails it must be a `NotConfigured` naming the env override.
+        match DockerSandbox::new().client().await {
+            Ok(_) => {}
+            Err(SandboxError::NotConfigured(msg)) => assert!(msg.contains("DOCKER_HOST")),
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_daemon_surfaces_error_not_panic() {
+        let sandbox = DockerSandbox::with_socket("/definitely/not/a/docker.sock");
+        let spec = ExecSpec::command(vec!["true".into()]);
+        let res = sandbox.spawn(&spec).await;
+        assert!(res.is_err(), "spawn must fail when no daemon is reachable");
+        let err = sandbox
+            .exec(&SandboxHandle { id: "nope".into() }, &["true".into()])
+            .await;
+        assert!(err.is_err());
+        let destroyed = sandbox.destroy(SandboxHandle { id: "nope".into() }).await;
+        assert!(destroyed.is_err());
     }
 
     #[test]

@@ -137,6 +137,7 @@ cp .env.example .env
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
 | `CLOUD_PORT` | `3000` | 对 `cloud` 服务**直连**暴露的主机端口（容器内始终监听 3000）。 |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | sandbox 使用的 Docker Engine API 端点（DooD）。可改为远程 / DinD 守护进程。 |
+| `ARIA_DOCKER_SOCKET` | _(未设置)_ | 显式指定 sandbox socket 路径，优先于自动探测（如 macOS 的 `~/.docker/run/docker.sock`）。 |
 | `DOCKER_GID` | `998` | 宿主 `docker` 组（拥有 `/var/run/docker.sock`）的 GID。运行期镜像会重建该组并把非 root 用户 `aria` 加入，从而无需 `root` 即可访问 socket。 |
 | `NGINX_PORT` | `80` | `nginx` 反向代理对外暴露的主机端口（转发到 `cloud:3000`）。 |
 
@@ -187,6 +188,12 @@ AGENT_MEMO_BACKEND=memo docker compose up --build
 代码地改为指向远程守护进程或 Docker-in-Docker 边车（如 `tcp://dind:2375`）。
 工具容器运行在宿主守护进程上，命名为 `aria-sandbox-<uuid>`，会话结束时会被强制
 移除。
+
+连接在**首次 sandbox 调用时惰性建立**，因此守护进程缺失只会让工具执行报错，而不
+会导致启动 panic。`DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 未设置时，会按顺序探测常见
+socket 路径——包括 `~/.docker/run/docker.sock`（**macOS Docker Desktop** 的默认位置，
+`/var/run/docker.sock` 只有在开启 Docker Desktop 的「默认 socket」选项后才存在）、
+Colima（`~/.colima/default/docker.sock`）以及 rootless Podman 路径。
 
 `cloud` 容器以非 root 用户 `aria` 运行。为访问挂载的 socket，它会加入一个 GID 由
 `DOCKER_GID`（默认 `998`）指定的 `docker` 组，该 GID 必须与宿主上拥有
