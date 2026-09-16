@@ -299,7 +299,7 @@ with requests.post(
         if event["type"] == "response.output_text.delta":
             print(event["delta"], end="", flush=True)
         elif event["type"] == "response.completed":
-            # 终止事件 —— 其后还有一帧 `data: [DONE]`
+            # 终止事件（其后还有一帧 `data: [DONE]`）
             print("\n收执 ID：", event["response"]["metadata"]["reef_record_id"])
             break
 ```
@@ -414,14 +414,15 @@ outer: for (;;) {
 }
 ```
 
-### Swift（原生 SDK）
+### Swift
 
 嵌入 `libaria-agent_ffi` 与生成的 `AriaAgent` 模块（详见
-`bindings/swift/README.md`）：
+`bindings/swift/README.md`）可在**进程内**运行智能体，也可以通过 HTTP 消费云端流：
 
 ```swift
 import AriaAgent
 
+// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）
 let agent = createAgent(AgentConfig(
     session: "default",
     agentName: "agent",
@@ -431,22 +432,93 @@ let reply = agent.run("hello")
 let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
 print(session.recall(key: "fact1") ?? "")
+
+// 云端流式（兼容 OpenAI）：消费 /v1/runs/stream 的 response.* 事件
+let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
+var request = URLRequest(url: URL(string: "\(base)/v1/runs/stream")!)
+request.httpMethod = "POST"
+request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+request.httpBody = try? JSONSerialization.data(withJSONObject: [
+    "agent": "Agent Demo", "session": "s1", "input": "tell me a joke"
+])
+
+let (stream, response) = try await URLSession.shared.bytes(for: request)
+// Reef 收执 ID 同时通过 x-reef-agent-record-id 响应头返回。
+let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
+
+outer: for try await line in stream.lines {
+    guard line.hasPrefix("data:") else { continue }
+    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+    guard let data = payload.data(using: .utf8),
+          let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
+    switch event.type {
+    case "response.output_text.delta":
+        print(event.delta ?? "", terminator: "")
+    case "response.completed":
+        // 终止事件（其后还有一帧 `data: [DONE]`）
+        print("\n收执 ID：", event.response?.metadata?.reefRecordId ?? receipt ?? "")
+        break outer
+    default:
+        break   // response.created / response.in_progress / output_item.* …
+    }
+}
 ```
 
-### Kotlin（原生 SDK）
+### Kotlin
 
 引入 `com.ariacompute:agent` 构件与 `libaria-agent_ffi` 原生库（详见
-`bindings/kotlin/agent-sdk/README.md`）：
+`bindings/kotlin/agent-sdk/README.md`）可在**进程内**运行智能体，也可以通过 HTTP
+消费云端流：
 
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
+// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）
 fun main() {
     val agent = createAgent(AgentConfig("default", "agent", "docker", "gpt-4o-mini"))
     val reply = agent.run("hello")
     val session = agent.session()
     session.memorize("fact1", "the moon is cheese")
     println(session.recall("fact1"))
+}
+
+// 云端流式（兼容 OpenAI）：消费 /v1/runs/stream 的 response.* 事件
+val json = Json { ignoreUnknownKeys = true }
+val client = OkHttpClient()
+val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
+
+val request = Request.Builder()
+    .url("$base/v1/runs/stream")
+    .header("Accept", "text/event-stream")
+    .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
+        .toRequestBody())
+    .build()
+
+client.newCall(request).execute().use { resp ->
+    // Reef 收执 ID 同时通过 x-reef-agent-record-id 响应头返回。
+    val receipt = resp.header("x-reef-agent-record-id")
+    resp.body!!.byteStream().bufferedReader().useLines { lines ->
+        run loop@{
+            for (line in lines) {
+                if (!line.startsWith("data:")) continue
+                val event = json.parseToJsonElement(line.removePrefix("data:").trim()).jsonObject
+                when (event["type"]?.jsonPrimitive?.content) {
+                    "response.output_text.delta" ->
+                        print(event["delta"]?.jsonPrimitive?.content.orEmpty())
+                    "response.completed" -> {
+                        // 终止事件（其后还有一帧 `data: [DONE]`）
+                        println(
+                            "\n收执 ID： " + (event["response"]?.jsonObject
+                                ?.get("metadata")?.jsonObject
+                                ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
+                        )
+                        return@loop
+                    }
+                }
+            }
+        }
+    }
 }
 ```
 

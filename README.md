@@ -317,7 +317,7 @@ with requests.post(
         if event["type"] == "response.output_text.delta":
             print(event["delta"], end="", flush=True)
         elif event["type"] == "response.completed":
-            # terminal event — the trailing `data: [DONE]` frame follows it
+            # terminal event (a trailing `data: [DONE]` frame follows)
             print("\nreceipt:", event["response"]["metadata"]["reef_record_id"])
             break
 ```
@@ -371,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
             if event["type"] == "response.output_text.delta" {
                 print!("{}", event["delta"].as_str().unwrap_or_default());
             } else if event["type"] == "response.completed" {
-                return Ok(()); // terminal event (a `data: [DONE]` frame follows)
+                return Ok(()); // terminal event (a trailing `data: [DONE]` frame follows)
             }
         }
     }
@@ -424,7 +424,7 @@ outer: for (;;) {
     if (event.type === "response.output_text.delta") {
       process.stdout.write(event.delta);
     } else if (event.type === "response.completed") {
-      // terminal event (a `data: [DONE]` frame follows it)
+      // terminal event (a trailing `data: [DONE]` frame follows)
       console.log("\nreceipt:", event.response.metadata.reef_record_id);
       break outer;
     }
@@ -432,14 +432,16 @@ outer: for (;;) {
 }
 ```
 
-### Swift (native SDK)
+### Swift
 
 Embed `libaria-agent_ffi` and the generated `AriaAgent` module (see
-`bindings/swift/README.md`):
+`bindings/swift/README.md`) to run the agent **in-process**, or consume the
+cloud stream over HTTP:
 
 ```swift
 import AriaAgent
 
+// Native SDK — the runtime embedded in-process (no server, no network)
 let agent = createAgent(AgentConfig(
     session: "default",
     agentName: "agent",
@@ -449,22 +451,93 @@ let reply = agent.run("hello")
 let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
 print(session.recall(key: "fact1") ?? "")
+
+// Cloud streaming (OpenAI-compatible): consume /v1/runs/stream response.* events
+let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
+var request = URLRequest(url: URL(string: "\(base)/v1/runs/stream")!)
+request.httpMethod = "POST"
+request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+request.httpBody = try? JSONSerialization.data(withJSONObject: [
+    "agent": "Agent Demo", "session": "s1", "input": "tell me a joke"
+])
+
+let (stream, response) = try await URLSession.shared.bytes(for: request)
+// The Reef receipt is also returned as the x-reef-agent-record-id header.
+let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
+
+outer: for try await line in stream.lines {
+    guard line.hasPrefix("data:") else { continue }
+    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+    guard let data = payload.data(using: .utf8),
+          let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
+    switch event.type {
+    case "response.output_text.delta":
+        print(event.delta ?? "", terminator: "")
+    case "response.completed":
+        // terminal event (a trailing `data: [DONE]` frame follows)
+        print("\nreceipt:", event.response?.metadata?.reefRecordId ?? receipt ?? "")
+        break outer
+    default:
+        break   // response.created / response.in_progress / output_item.* …
+    }
+}
 ```
 
-### Kotlin (native SDK)
+### Kotlin
 
 Add the `com.ariacompute:agent` artifact and the `libaria-agent_ffi` native
-library (see `bindings/kotlin/agent-sdk/README.md`):
+library (see `bindings/kotlin/agent-sdk/README.md`) to run the agent
+**in-process**, or consume the cloud stream over HTTP:
 
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
+// Native SDK — the runtime embedded in-process (no server, no network)
 fun main() {
     val agent = createAgent(AgentConfig("default", "agent", "docker", "gpt-4o-mini"))
     val reply = agent.run("hello")
     val session = agent.session()
     session.memorize("fact1", "the moon is cheese")
     println(session.recall("fact1"))
+}
+
+// Cloud streaming (OpenAI-compatible): consume /v1/runs/stream response.* events
+val json = Json { ignoreUnknownKeys = true }
+val client = OkHttpClient()
+val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
+
+val request = Request.Builder()
+    .url("$base/v1/runs/stream")
+    .header("Accept", "text/event-stream")
+    .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
+        .toRequestBody())
+    .build()
+
+client.newCall(request).execute().use { resp ->
+    // The Reef receipt is also returned as the x-reef-agent-record-id header.
+    val receipt = resp.header("x-reef-agent-record-id")
+    resp.body!!.byteStream().bufferedReader().useLines { lines ->
+        run loop@{
+            for (line in lines) {
+                if (!line.startsWith("data:")) continue
+                val event = json.parseToJsonElement(line.removePrefix("data:").trim()).jsonObject
+                when (event["type"]?.jsonPrimitive?.content) {
+                    "response.output_text.delta" ->
+                        print(event["delta"]?.jsonPrimitive?.content.orEmpty())
+                    "response.completed" -> {
+                        // terminal event (a trailing `data: [DONE]` frame follows)
+                        println(
+                            "\nreceipt: " + (event["response"]?.jsonObject
+                                ?.get("metadata")?.jsonObject
+                                ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
+                        )
+                        return@loop
+                    }
+                }
+            }
+        }
+    }
 }
 ```
 
