@@ -983,4 +983,32 @@ mod tests {
             "kata spawn must fail when no daemon is reachable"
         );
     }
+
+    #[tokio::test]
+    async fn cube_missing_binary_surfaces_error_not_panic() {
+        // Model the `cube` CLI being absent: route the same CliSandbox path that
+        // `CubeSandbox` uses through a non-existent runner. spawn/exec must fail
+        // with an error (not panic); destroy must never panic.
+        let sandbox = CliSandbox::new(
+            SandboxProvider::Cube,
+            "definitely-no-such-binary-xyz",
+            vec!["sandbox".into(), "run".into(), "--rm".into()],
+            "cube-image:latest",
+        );
+        let spec = ExecSpec::command(vec!["true".into()]);
+        let res = sandbox.spawn(&spec).await;
+        assert!(
+            res.is_err(),
+            "spawn must error when the cube binary is missing"
+        );
+        let err = sandbox
+            .exec(&SandboxHandle { id: "nope".into() }, &["true".into()])
+            .await;
+        assert!(
+            err.is_err(),
+            "exec must error when the cube binary is missing"
+        );
+        // destroy logs-and-continues on failure; it must not panic.
+        let _ = sandbox.destroy(SandboxHandle { id: "nope".into() }).await;
+    }
 }
