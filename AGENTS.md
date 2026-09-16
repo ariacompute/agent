@@ -88,8 +88,11 @@ cloud API plus native (Swift/Kotlin) SDKs.
     `function_call_arguments.delta` chunks + `output_item.done`, `Token` →
     `output_text.delta` (with the message item lifecycle), `Done` →
     `output_text.done` + `response.completed`, errors → `response.failed`. Every
-    frame carries a monotonic `sequence_number`; the stream ends with
-    `data: [DONE]`. Data the Responses schema does not model (the agentic
+    frame carries a monotonic `sequence_number`; `response.completed` is the
+    terminal event. A trailing `data: [DONE]` frame is appended **only** for
+    OpenAI wire compatibility — clients must key on `response.completed`
+    (or `response.failed`), never on the sentinel. Data the Responses schema
+    does not model (the agentic
     `phase` / `label`, the executed tool `result`, the Reef receipt
     `reef_record_id`) travels as **extra fields inside** those OpenAI-shaped
     frames, so strict OpenAI clients ignore them. Changing this contract is a

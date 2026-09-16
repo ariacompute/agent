@@ -24,7 +24,13 @@ pub mod event_type {
     pub const FAILED: &str = "response.failed";
 }
 
-/// Stream terminator, mirroring the OpenAI SSE sentinel.
+/// Trailing SSE sentinel emitted **after** the terminal event.
+///
+/// `response.completed` (or `response.failed`) is the semantic terminal event —
+/// that is what clients should key on, and what our own clients stop at. The
+/// `[DONE]` frame is appended purely for OpenAI wire compatibility, because
+/// strict SSE clients (and OpenAI's own tooling) expect that conventional
+/// end-of-stream marker. It carries no data and is safe to ignore.
 pub const DONE_SENTINEL: &str = "[DONE]";
 
 /// Max bytes per `function_call_arguments.delta` chunk.
@@ -43,6 +49,10 @@ pub struct EventEnvelope {
     msg_item_id: String,
     msg_open: bool,
     text: String,
+    // Set once a terminal frame (`response.completed` / `response.failed`) has
+    // been emitted. No `[DONE]` sentinel exists, so this is what makes
+    // "the last frame is terminal" a hard guarantee.
+    closed: bool,
 }
 
 impl EventEnvelope {
@@ -56,6 +66,7 @@ impl EventEnvelope {
             msg_item_id: format!("msg_{run_id}"),
             msg_open: false,
             text: String::new(),
+            closed: false,
         }
     }
 
@@ -96,6 +107,7 @@ impl EventEnvelope {
         }
         out.extend(self.close_message());
         out.push(self.completed());
+        self.closed = true;
         out
     }
 
@@ -105,11 +117,28 @@ impl EventEnvelope {
         let seq = self.next_seq();
         let mut response = self.response_object("failed");
         response["error"] = json!({ "code": "server_error", "message": message });
+        self.closed = true;
+        self.msg_open = false;
         json!({
             "type": event_type::FAILED,
             "sequence_number": seq,
             "response": response,
         })
+    }
+
+    /// Guarantees the stream always ends on a terminal event.
+    ///
+    /// Since no `[DONE]` sentinel is emitted, `response.completed` (or
+    /// `response.failed`) is the *only* end-of-stream signal a client can key
+    /// on. If the core event stream ended without producing a terminal frame,
+    /// emit `response.completed` so the contract — "the last frame is always a
+    /// terminal one" — holds unconditionally. Returns an empty vec when a
+    /// terminal frame was already emitted.
+    pub fn ensure_closed(&mut self) -> Vec<Value> {
+        if self.closed {
+            return Vec::new();
+        }
+        self.finish("")
     }
 
     // --- frame builders ---
@@ -438,6 +467,35 @@ mod tests {
         assert_eq!(frame["type"], json!(event_type::FAILED));
         assert_eq!(frame["response"]["status"], json!("failed"));
         assert_eq!(frame["response"]["error"]["message"], json!("boom"));
+    }
+
+    // There is no `[DONE]` sentinel: `response.completed` / `response.failed`
+    // is the only end-of-stream signal, so the last frame MUST always be a
+    // terminal one.
+    #[test]
+    fn last_frame_is_always_terminal() {
+        // Normal completion via `Done`.
+        let mut env = envelope();
+        let frames = env.push(&AgentEvent::Done { text: "ok".into() });
+        assert_eq!(frames.last().unwrap()["type"], json!(event_type::COMPLETED));
+        // Already terminal: a second call must not emit a duplicate frame.
+        assert!(env.ensure_closed().is_empty());
+
+        // Stream that ends without ever producing `Done`.
+        let mut env = envelope();
+        env.push(&AgentEvent::Token {
+            text: "partial".into(),
+        });
+        let frames = env.ensure_closed();
+        assert_eq!(frames.last().unwrap()["type"], json!(event_type::COMPLETED));
+        // Now closed, so a further call is a no-op.
+        assert!(env.ensure_closed().is_empty());
+
+        // A failed run is terminal too, and closes the run.
+        let mut env = envelope();
+        let frame = env.failed("boom");
+        assert_eq!(frame["type"], json!(event_type::FAILED));
+        assert!(env.ensure_closed().is_empty());
     }
 
     #[test]

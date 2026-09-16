@@ -79,10 +79,13 @@
       `response.in_progress` / `response.output_item.added` /
       `response.function_call_arguments.delta` / `response.output_text.delta` /
       `response.output_text.done` / `response.output_item.done` /
-      `response.completed` / `response.failed`, monotonic `sequence_number`,
-      `data: [DONE]` terminator); no private `aria.*` frames — phase, tool
-      result and `reef_record_id` travel as extra fields inside OpenAI-shaped
-      frames. Unit tests assert the mapping and that no private frame leaks.
+      `response.completed` / `response.failed`, monotonic `sequence_number`);
+      `response.completed` is the terminal event and is always the last event
+      (`ensure_closed` guarantees it), with a trailing `data: [DONE]` frame
+      kept only for OpenAI wire compatibility. No private `aria.*` frames —
+      phase, tool result and `reef_record_id` travel as extra fields inside
+      OpenAI-shaped frames. Unit tests assert the mapping, that no private
+      frame leaks, and that the last frame is always terminal.
 - [x] `aria-agent-cloud`: `run_agent_stream` drives
       `Agent::run_event_stream(input, agent_tools())` with a `shell` tool,
       executed by the codex sandbox backend (`sandbox_provider = "codex"`,

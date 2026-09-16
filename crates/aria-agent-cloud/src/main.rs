@@ -1005,8 +1005,9 @@ async fn run_agent(
 /// by [`event_envelope::EventEnvelope`]: the run opens with
 /// `response.created`, streams `response.output_text.delta` /
 /// `response.function_call_arguments.delta` / `response.output_item.*`, and
-/// closes with `response.completed` followed by the `[DONE]` sentinel. The Reef
-/// receipt id is echoed both as the `x-reef-agent-record-id` header and in
+/// closes with `response.completed`, which is the stream's terminal event; a
+/// trailing `data: [DONE]` frame follows it for OpenAI wire compatibility. The
+/// Reef receipt id is echoed both as the `x-reef-agent-record-id` header and in
 /// `response.*.metadata.reef_record_id`.
 async fn run_agent_stream(
     State(state): State<AppState>,
@@ -1088,12 +1089,24 @@ async fn run_agent_stream(
             }
         }
 
+        // The event stream is exhausted. `ensure_closed` guarantees the last
+        // frame is a terminal one even if the core stream never produced a
+        // `Done`, because there is no `[DONE]` sentinel to fall back on.
+        for frame in envelope.ensure_closed() {
+            yield frame;
+        }
+
         let mut final_rec =
             Record::new(&agent_id, &session, None, &sys, &input, &collected, DEFAULT_MODEL);
         final_rec.id = rec_id_inner.clone();
         let _ = records.record_turn(final_rec).await;
     };
 
+    // `response.completed` (emitted by `EventEnvelope::finish`) is the semantic
+    // terminal event. The trailing `[DONE]` frame is appended only for OpenAI
+    // wire compatibility: our own clients stop at `response.completed` and
+    // never read it, while strict SSE clients still see the conventional
+    // end-of-stream marker.
     let sse = wrapped
         .map(|frame| {
             Ok::<Event, Infallible>(

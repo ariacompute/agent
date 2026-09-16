@@ -35,7 +35,8 @@ print(session.recall(key: "fact1") ?? "")
 
 `POST /v1/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
 SSE events, so a Swift client parses `response.*` frames with no Aria-specific
-logic. Each `data:` frame is one event; the stream ends with `data: [DONE]`.
+logic. Each `data:` frame is one event; `response.completed` is the terminal
+one (a trailing `data: [DONE]` frame follows for OpenAI wire compatibility).
 
 ```swift
 import Foundation
@@ -64,17 +65,18 @@ let (stream, response) = try await URLSession.shared.bytes(for: request)
 // The Reef receipt is also returned as the x-reef-agent-record-id header.
 let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
 
-for try await line in stream.lines {
+outer: for try await line in stream.lines {
     guard line.hasPrefix("data:") else { continue }
     let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-    if payload == "[DONE]" { break }
     guard let data = payload.data(using: .utf8),
           let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
     switch event.type {
     case "response.output_text.delta":
         print(event.delta ?? "", terminator: "")
     case "response.completed":
+        // terminal event — the stream ends here
         print("\nreceipt:", event.response?.metadata?.reefRecordId ?? receipt ?? "")
+        break outer
     default:
         break   // response.created / response.in_progress / output_item.* …
     }

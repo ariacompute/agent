@@ -265,7 +265,7 @@ There are two ways to use an Aria Agent:
   Python, Rust, TypeScript, or any HTTP client. Streaming is SSE emitting
   **OpenAI Responses API events** (`response.created`,
   `response.output_text.delta`, `response.function_call_arguments.delta`, …),
-  terminated by `data: [DONE]` — see
+  terminated by `response.completed` (followed by a `data: [DONE]` frame) — see
   [OpenAI Agents API compatibility](#openai-agents-api-compatibility).
 - **Native SDK (in-process)** — the UniFFI bindings embed the runtime directly
   in Swift / Kotlin apps (no server, no network).
@@ -313,13 +313,13 @@ with requests.post(
         if not line.startswith("data:"):
             continue
         payload = line[len("data:"):].strip()
-        if payload == "[DONE]":
-            break
         event = json.loads(payload)
         if event["type"] == "response.output_text.delta":
             print(event["delta"], end="", flush=True)
         elif event["type"] == "response.completed":
+            # terminal event — the trailing `data: [DONE]` frame follows it
             print("\nreceipt:", event["response"]["metadata"]["reef_record_id"])
+            break
 ```
 
 ### Rust (cloud API)
@@ -367,11 +367,11 @@ async fn main() -> anyhow::Result<()> {
             let line = buf[..idx].trim().to_string();
             buf.drain(..=idx);
             let Some(payload) = line.strip_prefix("data:") else { continue };
-            let payload = payload.trim();
-            if payload == "[DONE]" { return Ok(()); }
-            let event: serde_json::Value = serde_json::from_str(payload)?;
+            let event: serde_json::Value = serde_json::from_str(payload.trim())?;
             if event["type"] == "response.output_text.delta" {
                 print!("{}", event["delta"].as_str().unwrap_or_default());
+            } else if event["type"] == "response.completed" {
+                return Ok(()); // terminal event (a `data: [DONE]` frame follows)
             }
         }
     }
@@ -420,13 +420,13 @@ outer: for (;;) {
     const line = buf.slice(0, idx).trim();
     buf = buf.slice(idx + 1);
     if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break outer;
-    const event = JSON.parse(payload);
+    const event = JSON.parse(line.slice(5).trim());
     if (event.type === "response.output_text.delta") {
       process.stdout.write(event.delta);
     } else if (event.type === "response.completed") {
+      // terminal event (a `data: [DONE]` frame follows it)
       console.log("\nreceipt:", event.response.metadata.reef_record_id);
+      break outer;
     }
   }
 }
@@ -487,9 +487,12 @@ so OpenAI SDKs and the OpenAI Agents SDK can consume it unchanged. Every SSE
 | `response.completed` | `response.status = "completed"`, `response.metadata.reef_record_id` |
 | `response.failed` | `response.error` |
 
-The stream terminates with the OpenAI sentinel `data: [DONE]`. Every run also
-returns the Reef receipt id as the `x-reef-agent-record-id` response header —
-the same value exposed as `response.metadata.reef_record_id`.
+`response.completed` is the terminal event: when a client sees it the run is
+finished. A trailing `data: [DONE]` frame is still emitted afterwards, purely
+for OpenAI wire compatibility — stop on `response.completed` and ignore it, or
+read to the sentinel if you prefer. Every run also returns the Reef receipt id
+as the `x-reef-agent-record-id` response header — the same value exposed as
+`response.metadata.reef_record_id`.
 
 Extra fields our orchestration needs but the Responses schema does not model
 (the agentic `phase`, the tool `result`, the Reef receipt id) are carried

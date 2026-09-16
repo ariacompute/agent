@@ -247,7 +247,8 @@ echo "DOCKER_GID set to $DOCKER_GID"
 - **云端 API（HTTP）** —— 语言无关的 REST 端点，可在 Python、Rust、
   TypeScript 或任意 HTTP 客户端中调用。流式返回为 SSE，输出 **OpenAI
   Responses API 事件**（`response.created`、`response.output_text.delta`、
-  `response.function_call_arguments.delta` 等），以 `data: [DONE]` 结束 —— 详见
+  `response.function_call_arguments.delta` 等），以 `response.completed` 结束
+  （其后仍有一帧 `data: [DONE]`）—— 详见
   [OpenAI Agents API 兼容性](#openai-agents-api-兼容性)。
 - **原生 SDK（进程内）** —— 通过 UniFFI 绑定把运行时直接嵌入 Swift / Kotlin
   应用（无服务端、无网络）。
@@ -294,13 +295,13 @@ with requests.post(
         if not line.startswith("data:"):
             continue
         payload = line[len("data:"):].strip()
-        if payload == "[DONE]":
-            break
         event = json.loads(payload)
         if event["type"] == "response.output_text.delta":
             print(event["delta"], end="", flush=True)
         elif event["type"] == "response.completed":
+            # 终止事件 —— 其后还有一帧 `data: [DONE]`
             print("\n收执 ID：", event["response"]["metadata"]["reef_record_id"])
+            break
 ```
 
 ### Rust（云端 API）
@@ -348,11 +349,11 @@ async fn main() -> anyhow::Result<()> {
             let line = buf[..idx].trim().to_string();
             buf.drain(..=idx);
             let Some(payload) = line.strip_prefix("data:") else { continue };
-            let payload = payload.trim();
-            if payload == "[DONE]" { return Ok(()); }
-            let event: serde_json::Value = serde_json::from_str(payload)?;
+            let event: serde_json::Value = serde_json::from_str(payload.trim())?;
             if event["type"] == "response.output_text.delta" {
                 print!("{}", event["delta"].as_str().unwrap_or_default());
+            } else if event["type"] == "response.completed" {
+                return Ok(()); // 终止事件（其后还有一帧 `data: [DONE]`）
             }
         }
     }
@@ -401,13 +402,13 @@ outer: for (;;) {
     const line = buf.slice(0, idx).trim();
     buf = buf.slice(idx + 1);
     if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break outer;
-    const event = JSON.parse(payload);
+    const event = JSON.parse(line.slice(5).trim());
     if (event.type === "response.output_text.delta") {
       process.stdout.write(event.delta);
     } else if (event.type === "response.completed") {
+      // 终止事件（其后还有一帧 `data: [DONE]`）
       console.log("\n收执 ID：", event.response.metadata.reef_record_id);
+      break outer;
     }
   }
 }
@@ -467,7 +468,9 @@ fun main() {
 | `response.completed` | `response.status = "completed"`、`response.metadata.reef_record_id` |
 | `response.failed` | `response.error` |
 
-流以 OpenAI 终止哨兵 `data: [DONE]` 结束。每次运行还会通过响应头
+`response.completed` 即为终止事件：客户端收到它便意味着运行结束。其后仍会补发
+一帧 `data: [DONE]`，仅为兼容 OpenAI 的线上约定——可在 `response.completed`
+处停止并忽略它，也可以一直读到该哨兵为止。每次运行还会通过响应头
 `x-reef-agent-record-id` 返回 Reef 收执 ID，取值与
 `response.metadata.reef_record_id` 完全一致。
 

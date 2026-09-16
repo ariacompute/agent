@@ -22,7 +22,9 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
   `response.function_call_arguments.delta`, `response.output_text.delta`,
   `response.output_text.done`, `response.output_item.done`,
   `response.completed`, `response.failed` — each with a monotonic
-  `sequence_number`, terminated by `data: [DONE]`. No private `aria.*` frames:
+  `sequence_number`; `response.completed` is the terminal event, followed by a
+  trailing `data: [DONE]` frame kept for OpenAI wire compatibility. No private
+  `aria.*` frames:
   the agentic phase (`recall` / `model` / `tool_exec` / `loop_guard`), the
   executed tool `result` and the Reef receipt `reef_record_id` ride along as
   extra fields inside OpenAI-shaped frames. The mapping lives in

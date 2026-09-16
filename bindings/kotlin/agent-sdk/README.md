@@ -38,7 +38,8 @@ fun main() {
 
 `POST /v1/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
 SSE events, so a Kotlin client parses `response.*` frames with no Aria-specific
-logic. Each `data:` frame is one event; the stream ends with `data: [DONE]`.
+logic. Each `data:` frame is one event; `response.completed` is the terminal
+one (a trailing `data: [DONE]` frame follows for OpenAI wire compatibility).
 
 ```kotlin
 import kotlinx.coroutines.flow.*
@@ -62,19 +63,23 @@ client.newCall(request).execute().use { resp ->
     // The Reef receipt is also returned as the x-reef-agent-record-id header.
     val receipt = resp.header("x-reef-agent-record-id")
     resp.body!!.byteStream().bufferedReader().useLines { lines ->
-        for (line in lines) {
-            if (!line.startsWith("data:")) continue
-            val payload = line.removePrefix("data:").trim()
-            if (payload == "[DONE]") break
-            val event = json.parseToJsonElement(payload).jsonObject
-            when (event["type"]?.jsonPrimitive?.content) {
-                "response.output_text.delta" ->
-                    print(event["delta"]?.jsonPrimitive?.content.orEmpty())
-                "response.completed" -> println(
-                    "\nreceipt: " + (event["response"]?.jsonObject
-                        ?.get("metadata")?.jsonObject
-                        ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
-                )
+        run loop@{
+            for (line in lines) {
+                if (!line.startsWith("data:")) continue
+                val event = json.parseToJsonElement(line.removePrefix("data:").trim()).jsonObject
+                when (event["type"]?.jsonPrimitive?.content) {
+                    "response.output_text.delta" ->
+                        print(event["delta"]?.jsonPrimitive?.content.orEmpty())
+                    "response.completed" -> {
+                        // terminal event — the stream ends here
+                        println(
+                            "\nreceipt: " + (event["response"]?.jsonObject
+                                ?.get("metadata")?.jsonObject
+                                ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
+                        )
+                        return@loop
+                    }
+                }
             }
         }
     }
