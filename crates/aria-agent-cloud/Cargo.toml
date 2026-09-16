@@ -46,14 +46,14 @@ aria-agent-sandbox.workspace = true
 
 # Deep codex integration (ADR-0005 §Decision): tool execution is delegated to
 # codex's real `SandboxManager` / `SandboxType` primitives. Pulled as a git
-# dependency from our codex fork (ariacompute/codex, tag `root-workspace-v1`).
+# dependency from our codex fork (ariacompute/codex, branch `main`).
 # These crates are intentionally NOT in the published `aria-agent-sandbox`
 # manifest — they are git-only and crates.io cannot resolve them.
-codex-sandboxing = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-sandboxing" }
-codex-protocol = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-protocol" }
-codex-utils-absolute-path = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-absolute-path" }
-codex-utils-path-uri = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-path-uri" }
-codex-utils-pty = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-utils-pty" }
+codex-sandboxing = { git = "https://github.com/ariacompute/codex", branch = "main", package = "codex-sandboxing" }
+codex-protocol = { git = "https://github.com/ariacompute/codex", branch = "main", package = "codex-protocol" }
+codex-utils-absolute-path = { git = "https://github.com/ariacompute/codex", branch = "main", package = "codex-utils-absolute-path" }
+codex-utils-path-uri = { git = "https://github.com/ariacompute/codex", branch = "main", package = "codex-utils-path-uri" }
+codex-utils-pty = { git = "https://github.com/ariacompute/codex", branch = "main", package = "codex-utils-pty" }
 
 # Pin the entire `rama-*` family to the exact alpha.4 codex locks, otherwise
 # cargo upgrades sibling crates to the released 0.3.0 and produces ~139 API

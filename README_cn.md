@@ -27,7 +27,7 @@ git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
 
 `patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch` 把
 `codex-rs` 的工作区定义提升到仓库根目录（并把内部的 `path` 依赖统一加上
-`codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（tag `root-workspace-v1`）
+`codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（branch `main`）
 所做的改动。在检出后，于 **`codex/` 子模块内部**应用该补丁：
 
 ```bash

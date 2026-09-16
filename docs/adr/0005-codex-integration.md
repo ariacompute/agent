@@ -7,7 +7,7 @@ named upstream blocker (`rama-http` failing to compile) no longer reproduces
 under current stable Rust (re-tested 2026-09-15, `rustc 1.98.0`). End-to-end
 validation is complete for the agent-side pull-in: `aria-agent-cloud`
 (publish = false) depends on `codex-sandboxing` through a git dependency on the
-`ariacompute/codex` fork (tag `root-workspace-v1`, which adds the repo-root
+`ariacompute/codex` fork (branch `main`, which adds the repo-root
 workspace manifest), and `cargo check -p aria-agent-cloud` pulls codex's full
 graph (`rama-*`, `mxc`, `tungstenite` forks) transitively. The codex-backed
 `CodexSandbox` is injected into `aria-agent-core`'s `Agent` via `with_sandbox`;
@@ -39,11 +39,11 @@ codex's Rust workspace lives at `codex/codex-rs/`; the repo *root* has no
 The fix is to maintain a **fork** (`ariacompute/codex`) whose repo root *is* a
 workspace: promote the `codex-rs` workspace definition up to `Cargo.toml` at the
 repo root, prefix every member + internal `path` dependency with `codex-rs/`, and
-delete the old `codex-rs/Cargo.toml`. That commit is tagged `root-workspace-v1`.
+delete the old `codex-rs/Cargo.toml`. That support lives on the fork's `main` branch.
 The dependency then needs no `path` qualifier:
 
 ```toml
-codex-sandboxing = { git = "https://github.com/ariacompute/codex", tag = "root-workspace-v1", package = "codex-sandboxing" }
+codex-sandboxing = { git = "https://github.com/ariacompute/codex", branch = "main", package = "codex-sandboxing" }
 ```
 
 (codex's edition is already `2024` via `[workspace.package]`, so no edition bump
@@ -96,7 +96,7 @@ compiler side.
 
 * Keep `codex` as a submodule (per ADR 0001), but the *compile* dependency on
   codex's concrete crates is satisfied via a **git dependency on the
-  `ariacompute/codex` fork** (tag `root-workspace-v1`), not a path into the
+  `ariacompute/codex` fork** (branch `main`), not a path into the
   submodule. The fork's repo-root workspace is what lets `package = "codex-*"`
   resolve (see above).
 * The codex-backed tool-execution backend (`CodexSandbox`, using codex's
@@ -122,5 +122,5 @@ compiler side.
   2026-09-15), and the full `rama-*` family is pinned to `=0.3.0-alpha.4` so the
   released `0.3.0` siblings are not pulled in.
 * The deep compile-integration of codex's concrete crates is **active**, via the
-  `ariacompute/codex` fork; the fork must keep `root-workspace-v1` (or a
-  successor tag) in sync with the pinned submodule commit.
+  `ariacompute/codex` fork; the fork's `main` branch must stay in sync with the
+  pinned submodule commit (or pin a successor commit).

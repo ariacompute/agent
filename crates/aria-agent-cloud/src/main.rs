@@ -101,7 +101,7 @@ mod codex_sandbox {
                 environment_id: None,
                 network: None,
                 sandbox_policy_cwd: &uri,
-                codex_linux_sandbox_exe: None,
+                sandbox_exe: None,
                 use_legacy_landlock: false,
                 windows_sandbox_level: WindowsSandboxLevel::default(),
                 windows_sandbox_private_desktop: false,

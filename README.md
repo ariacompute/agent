@@ -30,7 +30,7 @@ and has **no manifest at the repo root**, so a git dependency (`package =
 `patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch` promotes the
 `codex-rs` workspace definition up to the repo root (and prefixes internal
 `path` dependencies with `codex-rs/`). This is exactly what the
-`ariacompute/codex` fork (tag `root-workspace-v1`) does. Apply it **inside the
+`ariacompute/codex` fork (branch `main`) does. Apply it **inside the
 `codex/` submodule** after checkout:
 
 ```bash
