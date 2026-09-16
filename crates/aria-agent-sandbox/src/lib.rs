@@ -1011,4 +1011,39 @@ mod tests {
         // destroy logs-and-continues on failure; it must not panic.
         let _ = sandbox.destroy(SandboxHandle { id: "nope".into() }).await;
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cube_invalid_invocation_surfaces_error_not_panic() {
+        // Model the `cube` CLI being present but rejecting our flags (or failing
+        // for any reason): `false` is a real binary that always exits non-zero,
+        // exercising the non-success -> Spawn error path through the same
+        // CliSandbox that `CubeSandbox` uses. spawn/exec must surface an error,
+        // never panic.
+        let sandbox = CliSandbox::new(
+            SandboxProvider::Cube,
+            "false",
+            vec!["sandbox".into(), "run".into(), "--rm".into()],
+            "cube-image:latest",
+        );
+        let spec = ExecSpec::command(vec!["true".into()]);
+        let res = sandbox.spawn(&spec).await;
+        assert!(
+            res.is_err(),
+            "spawn must error when the cube invocation fails"
+        );
+        // exec spawns the present binary fine (no panic); the failed invocation
+        // is reflected in the exit code, not as a spawn error. Only `spawn`
+        // guards on success.
+        let out = sandbox
+            .exec(&SandboxHandle { id: "nope".into() }, &["true".into()])
+            .await;
+        assert!(
+            out.is_ok(),
+            "exec must not panic when the cube binary is present"
+        );
+        assert_eq!(out.unwrap().exit_code, 1);
+        // destroy logs-and-continues on failure; it must not panic.
+        let _ = sandbox.destroy(SandboxHandle { id: "nope".into() }).await;
+    }
 }
