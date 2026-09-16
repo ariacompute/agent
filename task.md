@@ -72,9 +72,37 @@
       `signAllPublications()` + in-memory GPG signing.
 - [x] `bindings/swift/AriaAgent.podspec`: CocoaPods spec wrapping `libaria-agent_ffi` for Swift.
 
+## Milestone 9 — OpenAI-compatible streaming & default agent
+- [x] `aria-agent-cloud`: replace the bare-token SSE with a frozen
+      **OpenAI Responses API** event envelope via
+      `crates/aria-agent-cloud/src/event_envelope.rs` (`response.created` /
+      `response.in_progress` / `response.output_item.added` /
+      `response.function_call_arguments.delta` / `response.output_text.delta` /
+      `response.output_text.done` / `response.output_item.done` /
+      `response.completed` / `response.failed`, monotonic `sequence_number`,
+      `data: [DONE]` terminator); no private `aria.*` frames — phase, tool
+      result and `reef_record_id` travel as extra fields inside OpenAI-shaped
+      frames. Unit tests assert the mapping and that no private frame leaks.
+- [x] `aria-agent-cloud`: `run_agent_stream` drives
+      `Agent::run_event_stream(input, agent_tools())` with a `shell` tool,
+      executed by the codex sandbox backend (`sandbox_provider = "codex"`,
+      ADR-0005).
+- [x] `aria-agent-cloud`: `GET /v1/agents` list (admins see all, tenants their
+      own) + idempotent default agent seed `agent-demo` / `Agent Demo` with an
+      in-place rename of the legacy `playground-demo` row.
+- [x] `aria-agent-core`: `OpenAiModel` honours `OPENAI_BASE_URL` so the agent
+      can target an OpenAI-compatible gateway.
+- [x] Docs: `README.md` / `README_cn.md` streaming examples (Python / Rust /
+      TypeScript) parse `response.*`, plus a new "OpenAI Agents API
+      compatibility" section (event table + official-SDK snippet) and the
+      default-agent note; `bindings/swift/README.md` and
+      `bindings/kotlin/agent-sdk/README.md` gain Cloud streaming examples.
+- [x] `cargo test --workspace`, `cargo fmt --check` all green.
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.
-* Add authn/z to the cloud API and structured run streaming tokens.
 * Expose `record` / `report` via `ariacompute-agent` (UniFFI) — currently deferred to
   avoid breaking the stable FFI surface.
+* Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
+  runs render the same timeline as the cloud stream.

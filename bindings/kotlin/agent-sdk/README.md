@@ -33,3 +33,50 @@ fun main() {
     println(session.recall("fact1"))
 }
 ```
+
+## Cloud streaming (OpenAI-compatible)
+
+`POST /v1/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
+SSE events, so a Kotlin client parses `response.*` frames with no Aria-specific
+logic. Each `data:` frame is one event; the stream ends with `data: [DONE]`.
+
+```kotlin
+import kotlinx.coroutines.flow.*
+import kotlinx.serialization.json.*
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+
+val json = Json { ignoreUnknownKeys = true }
+val client = OkHttpClient()
+val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
+
+val request = Request.Builder()
+    .url("$base/v1/runs/stream")
+    .header("Accept", "text/event-stream")
+    .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
+        .toRequestBody())
+    .build()
+
+client.newCall(request).execute().use { resp ->
+    // The Reef receipt is also returned as the x-reef-agent-record-id header.
+    val receipt = resp.header("x-reef-agent-record-id")
+    resp.body!!.byteStream().bufferedReader().useLines { lines ->
+        for (line in lines) {
+            if (!line.startsWith("data:")) continue
+            val payload = line.removePrefix("data:").trim()
+            if (payload == "[DONE]") break
+            val event = json.parseToJsonElement(payload).jsonObject
+            when (event["type"]?.jsonPrimitive?.content) {
+                "response.output_text.delta" ->
+                    print(event["delta"]?.jsonPrimitive?.content.orEmpty())
+                "response.completed" -> println(
+                    "\nreceipt: " + (event["response"]?.jsonObject
+                        ?.get("metadata")?.jsonObject
+                        ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
+                )
+            }
+        }
+    }
+}
+```

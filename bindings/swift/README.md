@@ -30,3 +30,53 @@ let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
 print(session.recall(key: "fact1") ?? "")
 ```
+
+## Cloud streaming (OpenAI-compatible)
+
+`POST /v1/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
+SSE events, so a Swift client parses `response.*` frames with no Aria-specific
+logic. Each `data:` frame is one event; the stream ends with `data: [DONE]`.
+
+```swift
+import Foundation
+
+struct CloudEvent: Decodable {
+    let type: String
+    let delta: String?          // response.output_text.delta
+    let response: CloudResponse?
+}
+struct CloudResponse: Decodable {
+    struct Metadata: Decodable { let reefRecordId: String?
+        enum CodingKeys: String, CodingKey { case reefRecordId = "reef_record_id" } }
+    let metadata: Metadata?
+}
+
+let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
+var request = URLRequest(url: URL(string: "\(base)/v1/runs/stream")!)
+request.httpMethod = "POST"
+request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+request.httpBody = try? JSONSerialization.data(withJSONObject: [
+    "agent": "Agent Demo", "session": "s1", "input": "tell me a joke"
+])
+
+let (stream, response) = try await URLSession.shared.bytes(for: request)
+// The Reef receipt is also returned as the x-reef-agent-record-id header.
+let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
+
+for try await line in stream.lines {
+    guard line.hasPrefix("data:") else { continue }
+    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+    if payload == "[DONE]" { break }
+    guard let data = payload.data(using: .utf8),
+          let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
+    switch event.type {
+    case "response.output_text.delta":
+        print(event.delta ?? "", terminator: "")
+    case "response.completed":
+        print("\nreceipt:", event.response?.metadata?.reefRecordId ?? receipt ?? "")
+    default:
+        break   // response.created / response.in_progress / output_item.* …
+    }
+}
+```

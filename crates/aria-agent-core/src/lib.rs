@@ -192,7 +192,16 @@ mod openai_impl {
     impl OpenAiModel {
         pub fn new(model: &str) -> Self {
             let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-            let config = OpenAIConfig::new().with_api_key(api_key);
+            let mut config = OpenAIConfig::new().with_api_key(api_key);
+            // Optional override so a deployment can point the agent at any
+            // OpenAI-compatible endpoint (e.g. the aria-compute gateway) without
+            // rebuilding. Unset means the public OpenAI API.
+            if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
+                let base = base.trim().trim_end_matches('/').to_string();
+                if !base.is_empty() {
+                    config = config.with_api_base(base);
+                }
+            }
             Self {
                 client: Client::with_config(config),
                 model: model.to_string(),

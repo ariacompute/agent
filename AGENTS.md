@@ -12,6 +12,8 @@ cloud API plus native (Swift/Kotlin) SDKs.
   Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
   regenerate via `just ffi`; the podspec and Gradle publishing config are hand-maintained.
 * `codex/` is a **git submodule** (do not add it to the Cargo workspace).
+* `crates/aria-agent-cloud/src/event_envelope.rs` is the frozen SSE envelope:
+  `AgentEvent` → OpenAI Responses API streaming frames (see rule 10).
 
 ## Rules
 
@@ -26,8 +28,12 @@ cloud API plus native (Swift/Kotlin) SDKs.
    After any change run `just ffi` and commit the regenerated bindings. See
    `docs/adr/0002-ffi-boundary.md`.
 3. **Sandbox is pluggable.** Add providers by implementing the `Sandbox` trait
-   and registering them in `from_provider`. Docker is the default. See
-   `docs/adr/0003-sandbox-providers.md`.
+   and registering them in `from_provider`. Docker is the default. The cloud
+   selects the **codex** backend (`sandbox_provider = "codex"` in
+   `agent_config`) for agentic tool execution, resolved by this runtime to
+   `codex_sandbox::CodexSandbox` (ADR-0005); Docker/Kata/Cube remain available
+   through `from_provider`. See `docs/adr/0003-sandbox-providers.md` and
+   `docs/adr/0005-codex-integration.md`.
 4. **Submodule discipline.** Keep `codex` out of the workspace member list;
    reference codex crate shapes by design. Deep compile-integration of codex's
    `sandboxing`/`memories` crates is prescribed in
@@ -49,8 +55,10 @@ cloud API plus native (Swift/Kotlin) SDKs.
    feedback` AND each tenant's `ActiveHarness` are sharded per `principal_id` (sled
    subdirs / `REEF_DIR/tenants/<pid>`, isolated git repos); the admin principal
    keeps the legacy root paths. `agents` / `runs` carry `principal_id` and are
-   scoped per tenant (admins see all). Token streaming is served at
-   `POST /v1/runs/stream` (SSE, terminated by `[DONE]`). See `docs/adr/0007-*.md`.
+   scoped per tenant (admins see all). `GET /v1/agents` lists the agents a
+   caller can see (admins: all; tenants: their own). Streaming is served at
+   `POST /v1/runs/stream` — see rule 10 for the frozen event contract. See
+   `docs/adr/0007-*.md`.
 8. **Reef stores are separate from context/metadata.** `aria-agent-reef` logs every
    turn (`RecordStore`) and binds feedback (`FeedbackStore`) in a **local sled
    DB**, and versions winning harnesses in a **`.reef/` Git repo** — never in
@@ -70,6 +78,28 @@ cloud API plus native (Swift/Kotlin) SDKs.
    (Maven Central `com.ariacompute:agent` via vanniktech, `secrets.SONATYPE_*` +
    `secrets.GPG_*`). `aria-agent-cloud` (CLI) and `aria-agent-ffigen` (`publish = false`) are NOT
    published to crates.io.
+
+10. **Streaming contract is OpenAI-compatible and frozen.** `POST /v1/runs/stream`
+    emits **OpenAI Responses API** streaming events (never bare
+    `{"token":"..."}`, never private `aria.*` frames), so OpenAI SDKs and the
+    Agents SDK consume it unchanged. `crates/aria-agent-cloud/src/event_envelope.rs`
+    is the single translation point from `AgentEvent` to wire frames:
+    `Step` → `response.in_progress`, `ToolCall` → `output_item.added` +
+    `function_call_arguments.delta` chunks + `output_item.done`, `Token` →
+    `output_text.delta` (with the message item lifecycle), `Done` →
+    `output_text.done` + `response.completed`, errors → `response.failed`. Every
+    frame carries a monotonic `sequence_number`; the stream ends with
+    `data: [DONE]`. Data the Responses schema does not model (the agentic
+    `phase` / `label`, the executed tool `result`, the Reef receipt
+    `reef_record_id`) travels as **extra fields inside** those OpenAI-shaped
+    frames, so strict OpenAI clients ignore them. Changing this contract is a
+    breaking change for downstream consumers (the Aria Playground's Agent
+    playground included) — update `event_envelope.rs`, its unit tests, both
+    READMEs and the Swift/Kotlin binding examples together.
+11. **Default agent seed.** `ensure_schema` seeds `id: agent-demo` /
+    `name: Agent Demo` (owned by the admin principal) and renames the legacy
+    `playground-demo` row in place. Both statements are idempotent and the
+    rename is skipped once `agent-demo` exists.
 
 ## Common commands
 

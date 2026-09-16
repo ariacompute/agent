@@ -245,8 +245,10 @@ echo "DOCKER_GID set to $DOCKER_GID"
 使用 Aria Agent 有两种方式：
 
 - **云端 API（HTTP）** —— 语言无关的 REST 端点，可在 Python、Rust、
-  TypeScript 或任意 HTTP 客户端中调用。流式返回为 SSE
-  （`data: {"token":"..."}`，以 `data: [DONE]` 结束）。
+  TypeScript 或任意 HTTP 客户端中调用。流式返回为 SSE，输出 **OpenAI
+  Responses API 事件**（`response.created`、`response.output_text.delta`、
+  `response.function_call_arguments.delta` 等），以 `data: [DONE]` 结束 —— 详见
+  [OpenAI Agents API 兼容性](#openai-agents-api-兼容性)。
 - **原生 SDK（进程内）** —— 通过 UniFFI 绑定把运行时直接嵌入 Swift / Kotlin
   应用（无服务端、无网络）。
 
@@ -278,25 +280,32 @@ run = requests.post(
 ).json()
 print(run["output"])
 
-# 流式运行
+# 流式运行 —— OpenAI Responses API 事件
 with requests.post(
     f"{BASE}/v1/runs/stream",
     json={"agent": agent_name, "session": "s1", "input": "tell me a joke"},
     headers=headers,
     stream=True,
 ) as r:
-    for line in r.iter_lines():
-        if not line:
+    for raw in r.iter_lines():
+        if not raw:
             continue
-        if line == "data: [DONE]":
+        line = raw.decode() if isinstance(raw, bytes) else raw
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
             break
-        token = json.loads(line[len("data: "):])["token"]
-        print(token, end="", flush=True)
+        event = json.loads(payload)
+        if event["type"] == "response.output_text.delta":
+            print(event["delta"], end="", flush=True)
+        elif event["type"] == "response.completed":
+            print("\n收执 ID：", event["response"]["metadata"]["reef_record_id"])
 ```
 
 ### Rust（云端 API）
 
-添加 `reqwest`（开启 `json` 特性）、`tokio`、`serde`、`serde_json` 与 `anyhow`：
+添加 `reqwest`（开启 `json` 与 `stream` 特性）、`tokio`、`serde`、`serde_json` 与 `anyhow`：
 
 ```rust
 use reqwest::Client;
@@ -326,6 +335,27 @@ async fn main() -> anyhow::Result<()> {
         .send().await?.json().await?;
 
     println!("{}", run.output);
+
+    // 流式运行 —— OpenAI Responses API 事件
+    let mut res = client.post(format!("{base}/v1/runs/stream"))
+        .headers(headers)
+        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "tell me a joke"}))
+        .send().await?;
+    let mut buf = String::new();
+    while let Some(chunk) = res.chunk().await? {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].trim().to_string();
+            buf.drain(..=idx);
+            let Some(payload) = line.strip_prefix("data:") else { continue };
+            let payload = payload.trim();
+            if payload == "[DONE]" { return Ok(()); }
+            let event: serde_json::Value = serde_json::from_str(payload)?;
+            if event["type"] == "response.output_text.delta" {
+                print!("{}", event["delta"].as_str().unwrap_or_default());
+            }
+        }
+    }
     Ok(())
 }
 ```
@@ -354,7 +384,7 @@ const run = await fetch(`${base}/v1/runs`, {
 }).then((r) => r.json<{ output: string }>());
 console.log(run.output);
 
-// 流式运行
+// 流式运行 —— OpenAI Responses API 事件
 const res = await fetch(`${base}/v1/runs/stream`, {
   method: "POST", headers,
   body: JSON.stringify({ agent: agent.name, session: "s1", input: "tell me a joke" }),
@@ -362,7 +392,7 @@ const res = await fetch(`${base}/v1/runs/stream`, {
 const reader = res.body!.getReader();
 const decoder = new TextDecoder();
 let buf = "";
-for (;;) {
+outer: for (;;) {
   const { value, done } = await reader.read();
   if (done) break;
   buf += decoder.decode(value, { stream: true });
@@ -372,8 +402,13 @@ for (;;) {
     buf = buf.slice(idx + 1);
     if (!line.startsWith("data:")) continue;
     const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    process.stdout.write(JSON.parse(payload).token);
+    if (payload === "[DONE]") break outer;
+    const event = JSON.parse(payload);
+    if (event.type === "response.output_text.delta") {
+      process.stdout.write(event.delta);
+    } else if (event.type === "response.completed") {
+      console.log("\n收执 ID：", event.response.metadata.reef_record_id);
+    }
   }
 }
 ```
@@ -413,6 +448,54 @@ fun main() {
     println(session.recall("fact1"))
 }
 ```
+
+## OpenAI Agents API 兼容性
+
+`POST /v1/runs/stream` 采用 **OpenAI Responses API 流式协议**，因此 OpenAI SDK
+与 OpenAI Agents SDK 可以零改造直接消费。每个 SSE `data:` 帧都是一个带 `type`
+和单调递增 `sequence_number` 的 Responses 事件：
+
+| 事件 | 载荷 |
+|---|---|
+| `response.created` | `response.id`、`response.metadata`（`agent_id`、`session`、`reef_record_id`） |
+| `response.in_progress` | 阶段边界；额外带 `phase`（`recall` / `model` / `tool_exec` / `loop_guard`）与 `label` |
+| `response.output_item.added` | `item` —— `message`（assistant）或 `function_call` |
+| `response.function_call_arguments.delta` | `item_id`、`delta`（参数 JSON 分片） |
+| `response.output_item.done` | 完成的 `item`；`function_call` 还附带执行结果 `result` |
+| `response.output_text.delta` | `item_id`、`content_index`、`delta` |
+| `response.output_text.done` | `item_id`、`content_index`、`text` |
+| `response.completed` | `response.status = "completed"`、`response.metadata.reef_record_id` |
+| `response.failed` | `response.error` |
+
+流以 OpenAI 终止哨兵 `data: [DONE]` 结束。每次运行还会通过响应头
+`x-reef-agent-record-id` 返回 Reef 收执 ID，取值与
+`response.metadata.reef_record_id` 完全一致。
+
+编排所需、但 Responses 协议未建模的字段（agentic `phase`、工具 `result`、Reef
+收执 ID）都被放在这些 **OpenAI 形状帧的内部**作为额外字段，严格的 OpenAI
+客户端会自动忽略，不会产生私有 `aria.*` 帧。
+
+```python
+# 用官方 OpenAI SDK 消费（无需任何 Aria 专属解析）
+from openai import OpenAI
+client = OpenAI(base_url=f"{BASE}/v1", api_key=API_KEY or "unused")
+for event in client.responses.create(
+    model="gpt-4o-mini",
+    input="tell me a joke",
+    extra_body={"agent": "Agent Demo"},
+    stream=True,
+):
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="", flush=True)
+```
+
+### 默认智能体
+
+`ensure_schema` 会预置一个默认智能体 —— `id: agent-demo`、
+`name: Agent Demo` —— 让全新部署（以及 Aria Playground）开箱即可运行。
+已用旧默认值（`playground-demo`）预置过的部署，会在下次启动时被就地重命名。
+用 `GET /v1/agents` 可列出当前密钥可见的智能体（管理员看到全部，租户只看自己
+的）。
 
 ## 许可证
 

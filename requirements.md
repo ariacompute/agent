@@ -8,24 +8,56 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 * Not a Cargo workspace member; our crates reference codex's shapes by design.
 
 ## 2. Agents Cloud API (Rust + Postgres)
-* axum HTTP service exposing `/v1/agents` (create/get) and `/v1/runs`
-  (JSON) plus SSE-streaming `/v1/runs/stream`.
+* axum HTTP service exposing `/v1/agents` (create / get / **list**) and
+  `/v1/runs` (JSON) plus SSE-streaming `/v1/runs/stream`.
 * Calls the OpenAI Agents / Responses API through `aria-agent-core`'s
-  `OpenAiModel` (feature `openai`).
+  `OpenAiModel` (feature `openai`). `OPENAI_BASE_URL` overrides the endpoint
+  so a deployment can target any OpenAI-compatible gateway; `OPENAI_API_KEY`
+  supplies the credential.
 * **Postgres stores only metadata** (`agents`, `runs`); context is injected
   from memo.
+* **Streaming contract (frozen, OpenAI-compatible).** `/v1/runs/stream`
+  emits OpenAI Responses API streaming events — `response.created`,
+  `response.in_progress`, `response.output_item.added`,
+  `response.function_call_arguments.delta`, `response.output_text.delta`,
+  `response.output_text.done`, `response.output_item.done`,
+  `response.completed`, `response.failed` — each with a monotonic
+  `sequence_number`, terminated by `data: [DONE]`. No private `aria.*` frames:
+  the agentic phase (`recall` / `model` / `tool_exec` / `loop_guard`), the
+  executed tool `result` and the Reef receipt `reef_record_id` ride along as
+  extra fields inside OpenAI-shaped frames. The mapping lives in
+  `crates/aria-agent-cloud/src/event_envelope.rs`. See the
+  "OpenAI Agents API compatibility" section of `README.md` / `README_cn.md`.
+* **Agentic runs.** `run_agent_stream` drives
+  `Agent::run_event_stream(input, agent_tools())`: a single `shell` tool
+  (`command` = `[program, ...args]`) executed by the **codex** sandbox backend
+  (ADR-0005), with the loop guard and memo persistence handled by
+  `aria-agent-core`.
+* **Default agent.** `ensure_schema` seeds `id: agent-demo` /
+  `name: Agent Demo` (admin-owned) so a fresh deployment is usable
+  immediately; a pre-existing legacy `playground-demo` row is renamed in
+  place. Both statements are idempotent.
 
 ## 3. Agent SDK (UniFFI, Swift / Kotlin)
 * Stable FFI surface: `SdkAgent` (`run`, `session`), `SdkSession`
   (`memorize`, `recall`), `create_agent`, `SdkAgentConfig`, `SdkError`.
 * Compiled to a cross-platform `cdylib` (`libaria-agent_ffi`).
 * Swift (SwiftPM) and Kotlin (Android) bindings generated from the cdylib.
+* Both binding READMEs additionally document **cloud streaming**
+  (OpenAI-compatible): consuming `/v1/runs/stream` `response.*` events from
+  Swift / Kotlin over HTTP. This is documentation only — the FFI surface
+  itself is unchanged and needs no `just ffi` regeneration.
 
-## 4. Pluggable Sandbox (docker / kata / cubesandbox)
+## 4. Pluggable Sandbox (docker / kata / cubesandbox / codex)
 * `Sandbox` trait (`spawn` / `exec` / `destroy`) with an `ExecSpec` /
   `ExecOutput` shape mirroring codex's `sandboxing`.
 * Providers: `DockerSandbox` (default), `KataSandbox`, `CubeSandbox`;
   config-driven selection.
+* **`CodexSandbox`** is provided by the `aria-agent-cloud` runtime (it depends
+  on codex's git-only crates, so it must stay out of the published
+  `aria-agent-sandbox`). It runs commands through codex's real
+  `SandboxManager` and is the backend the cloud selects for agentic tool
+  execution. See `docs/adr/0005-codex-integration.md`.
 
 ## 5. Memo (Context Memory)
 * Unified context memory store (`aria-agent-memo`), local/embedded (**sled**,

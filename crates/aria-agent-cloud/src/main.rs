@@ -13,6 +13,7 @@
 //!   `ActiveHarness` so live traffic picks it up without a restart.
 
 mod cli_config;
+mod event_envelope;
 mod upgrade;
 
 /// Deep codex integration (ADR-0005 §Decision): the codex-backed sandbox backend.
@@ -184,7 +185,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::{ActiveHarness, Agent, AgentConfig, CoreError, ModelClient, OpenAiModel};
+use agent_core::{
+    ActiveHarness, Agent, AgentConfig, AgentEvent, CoreError, ModelClient, OpenAiModel, Tool,
+};
 use agent_memo::{MemoStore, SledMemoStore};
 use agent_reef::engine::EvolutionEngine;
 use agent_reef::feedback::{Feedback, FeedbackStore, SledFeedbackStore};
@@ -667,10 +670,31 @@ impl IntoResponse for AppError {
     }
 }
 
-/// One streamed token, serialized into an SSE `data:` frame.
-#[derive(Serialize)]
-struct StreamToken {
-    token: String,
+/// The frozen agentic toolset handed to every cloud run.
+///
+/// A single `shell` exec tool whose `command` is a `[program, ...args]` array —
+/// exactly the shape `Agent::run_event_stream` feeds to the sandbox. Execution
+/// is delegated to the codex sandbox backend (ADR-0005), which is selected via
+/// [`agent_config`].
+fn agent_tools() -> Vec<Tool> {
+    vec![Tool {
+        name: "shell".into(),
+        description:
+            "Execute a shell command inside the agent sandbox and return its combined output."
+                .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Program followed by its arguments, e.g. [\"ls\", \"-la\"]."
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        }),
+    }]
 }
 
 /// Bearer / ApiKey auth gate.
@@ -878,6 +902,33 @@ async fn get_agent(
     }))
 }
 
+/// List agents visible to the caller: admins see every agent, tenants only
+/// their own. Backs the playground's agent picker.
+async fn list_agents(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<AgentRecord>>, AppError> {
+    let rows = if principal.kind == PrincipalKind::Admin {
+        sqlx::query("SELECT id, name FROM agents ORDER BY created_at, name")
+            .fetch_all(&state.pool)
+            .await
+    } else {
+        sqlx::query("SELECT id, name FROM agents WHERE principal_id = $1 ORDER BY created_at, name")
+            .bind(&principal.id)
+            .fetch_all(&state.pool)
+            .await
+    }
+    .map_err(AppError::Db)?;
+    let out = rows
+        .iter()
+        .map(|r| AgentRecord {
+            id: r.get("id"),
+            name: r.get("name"),
+        })
+        .collect();
+    Ok(Json(out))
+}
+
 async fn run_agent(
     State(state): State<AppState>,
     principal: Principal,
@@ -948,6 +999,15 @@ async fn run_agent(
     resp
 }
 
+/// Stream one agentic turn as **OpenAI Responses API** events.
+///
+/// The core stream ([`Agent::run_event_stream`]) is translated frame by frame
+/// by [`event_envelope::EventEnvelope`]: the run opens with
+/// `response.created`, streams `response.output_text.delta` /
+/// `response.function_call_arguments.delta` / `response.output_item.*`, and
+/// closes with `response.completed` followed by the `[DONE]` sentinel. The Reef
+/// receipt id is echoed both as the `x-reef-agent-record-id` header and in
+/// `response.*.metadata.reef_record_id`.
 async fn run_agent_stream(
     State(state): State<AppState>,
     principal: Principal,
@@ -968,6 +1028,7 @@ async fn run_agent_stream(
     };
 
     let sys = state.harness_for(&principal).get().system_text();
+    let run_id = Uuid::new_v4().to_string();
     let rec_id = Uuid::new_v4().to_string();
     let records = state.records_for(&principal);
     // Placeholder record so the receipt id is known before streaming begins.
@@ -986,7 +1047,8 @@ async fn run_agent_stream(
         tracing::warn!("reef: failed to record turn placeholder: {e}");
     }
 
-    let token_stream = match agent.run_stream(&body.input).await {
+    let tools = agent_tools();
+    let event_stream = match agent.run_event_stream(&body.input, &tools).await {
         Ok(s) => s,
         Err(e) => return AppError::Core(e).into_response(),
     };
@@ -997,21 +1059,35 @@ async fn run_agent_stream(
     let session = session.clone();
     let input = body.input.clone();
     let rec_id_inner = rec_id.clone();
+    let run_id_inner = run_id.clone();
     let wrapped = async_stream::stream! {
+        let mut envelope =
+            event_envelope::EventEnvelope::new(&run_id_inner, &agent_id, &session, &rec_id_inner);
+        yield envelope.created();
+
         let mut collected = String::new();
-        let mut s = token_stream;
+        let mut s = event_stream;
         while let Some(item) = s.next().await {
             match item {
-                Ok(tok) => {
-                    collected.push_str(&tok);
-                    yield Ok(tok);
+                Ok(ev) => {
+                    match &ev {
+                        AgentEvent::Token { text } => collected.push_str(text),
+                        // `Done` carries the full reply; prefer it so tool-only
+                        // turns still persist the final answer.
+                        AgentEvent::Done { text } if !text.is_empty() => collected = text.clone(),
+                        _ => {}
+                    }
+                    for frame in envelope.push(&ev) {
+                        yield frame;
+                    }
                 }
                 Err(e) => {
-                    yield Err(e);
+                    yield envelope.failed(&e.to_string());
                     return;
                 }
             }
         }
+
         let mut final_rec =
             Record::new(&agent_id, &session, None, &sys, &input, &collected, DEFAULT_MODEL);
         final_rec.id = rec_id_inner.clone();
@@ -1019,15 +1095,16 @@ async fn run_agent_stream(
     };
 
     let sse = wrapped
-        .map(|res| {
-            Ok::<Event, Infallible>(match res {
-                Ok(token) => Event::default()
-                    .json_data(StreamToken { token })
+        .map(|frame| {
+            Ok::<Event, Infallible>(
+                Event::default()
+                    .json_data(frame)
                     .unwrap_or_else(|_| Event::default().data("[encode-error]")),
-                Err(e) => Event::default().data(format!("error: {e}")),
-            })
+            )
         })
-        .chain(stream::once(async { Ok(Event::default().data("[DONE]")) }));
+        .chain(stream::once(async {
+            Ok(Event::default().data(event_envelope::DONE_SENTINEL))
+        }));
     let mut resp = Sse::new(Box::pin(sse)).into_response();
     resp.headers_mut().insert(
         HeaderName::from_static(REEF_RECORD_HEADER),
@@ -1091,7 +1168,12 @@ fn agent_config(name: &str, session: &str) -> AgentConfig {
     AgentConfig {
         session: session.to_string(),
         agent_name: name.to_string(),
-        sandbox_provider: "docker".into(),
+        // Tool execution is delegated to the codex sandbox backend (ADR-0005):
+        // `SandboxProvider::Codex` is resolved by this runtime to
+        // `codex_sandbox::CodexSandbox`, which runs commands through codex's
+        // real `SandboxManager`. Docker/Kata/Cube remain available via
+        // `agent_sandbox::from_provider` for non-tool (`/v1/runs`) traffic.
+        sandbox_provider: "codex".into(),
         model: DEFAULT_MODEL.into(),
     }
 }
@@ -1327,6 +1409,23 @@ async fn ensure_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     // Attribute agents to the owning principal (tenant isolation).
     pool.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS principal_id TEXT")
         .await?;
+    // Seed the default playground agent so the Agent playground works out of
+    // the box. Both statements are idempotent: the UPDATE renames the legacy
+    // seed (`playground-demo`) in place and is skipped once `agent-demo`
+    // exists, so a deployment that already created the new id keeps it; the
+    // INSERT then (re)creates the default when it is missing.
+    pool.execute(
+        "UPDATE agents SET id = 'agent-demo', name = 'Agent Demo' \
+         WHERE id = 'playground-demo' \
+           AND NOT EXISTS (SELECT 1 FROM agents WHERE id = 'agent-demo')",
+    )
+    .await?;
+    pool.execute(
+        "INSERT INTO agents (id, name, principal_id) \
+         VALUES ('agent-demo', 'Agent Demo', 'admin') \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .await?;
     Ok(())
 }
 
@@ -1599,7 +1698,7 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let app = Router::new()
-        .route("/v1/agents", post(create_agent))
+        .route("/v1/agents", post(create_agent).get(list_agents))
         .route("/v1/agents/:id", get(get_agent))
         .route("/v1/runs", post(run_agent))
         .route("/v1/runs/stream", post(run_agent_stream))

@@ -262,8 +262,11 @@ warning, so the service always boots.
 There are two ways to use an Aria Agent:
 
 - **Cloud API (HTTP)** — a language-agnostic REST endpoint. Call it from
-  Python, Rust, TypeScript, or any HTTP client. Streaming is SSE
-  (`data: {"token":"..."}`, terminated by `data: [DONE]`).
+  Python, Rust, TypeScript, or any HTTP client. Streaming is SSE emitting
+  **OpenAI Responses API events** (`response.created`,
+  `response.output_text.delta`, `response.function_call_arguments.delta`, …),
+  terminated by `data: [DONE]` — see
+  [OpenAI Agents API compatibility](#openai-agents-api-compatibility).
 - **Native SDK (in-process)** — the UniFFI bindings embed the runtime directly
   in Swift / Kotlin apps (no server, no network).
 
@@ -296,25 +299,32 @@ run = requests.post(
 ).json()
 print(run["output"])
 
-# streaming run
+# streaming run — OpenAI Responses API events
 with requests.post(
     f"{BASE}/v1/runs/stream",
     json={"agent": agent_name, "session": "s1", "input": "tell me a joke"},
     headers=headers,
     stream=True,
 ) as r:
-    for line in r.iter_lines():
-        if not line:
+    for raw in r.iter_lines():
+        if not raw:
             continue
-        if line == "data: [DONE]":
+        line = raw.decode() if isinstance(raw, bytes) else raw
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
             break
-        token = json.loads(line[len("data: "):])["token"]
-        print(token, end="", flush=True)
+        event = json.loads(payload)
+        if event["type"] == "response.output_text.delta":
+            print(event["delta"], end="", flush=True)
+        elif event["type"] == "response.completed":
+            print("\nreceipt:", event["response"]["metadata"]["reef_record_id"])
 ```
 
 ### Rust (cloud API)
 
-Add `reqwest` (with `json` feature), `tokio`, `serde`, `serde_json`, and `anyhow`:
+Add `reqwest` (with the `json` and `stream` features), `tokio`, `serde`, `serde_json`, and `anyhow`:
 
 ```rust
 use reqwest::Client;
@@ -344,6 +354,27 @@ async fn main() -> anyhow::Result<()> {
         .send().await?.json().await?;
 
     println!("{}", run.output);
+
+    // streaming run — OpenAI Responses API events
+    let mut res = client.post(format!("{base}/v1/runs/stream"))
+        .headers(headers)
+        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "tell me a joke"}))
+        .send().await?;
+    let mut buf = String::new();
+    while let Some(chunk) = res.chunk().await? {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].trim().to_string();
+            buf.drain(..=idx);
+            let Some(payload) = line.strip_prefix("data:") else { continue };
+            let payload = payload.trim();
+            if payload == "[DONE]" { return Ok(()); }
+            let event: serde_json::Value = serde_json::from_str(payload)?;
+            if event["type"] == "response.output_text.delta" {
+                print!("{}", event["delta"].as_str().unwrap_or_default());
+            }
+        }
+    }
     Ok(())
 }
 ```
@@ -372,7 +403,7 @@ const run = await fetch(`${base}/v1/runs`, {
 }).then((r) => r.json<{ output: string }>());
 console.log(run.output);
 
-// streaming run
+// streaming run — OpenAI Responses API events
 const res = await fetch(`${base}/v1/runs/stream`, {
   method: "POST", headers,
   body: JSON.stringify({ agent: agent.name, session: "s1", input: "tell me a joke" }),
@@ -380,7 +411,7 @@ const res = await fetch(`${base}/v1/runs/stream`, {
 const reader = res.body!.getReader();
 const decoder = new TextDecoder();
 let buf = "";
-for (;;) {
+outer: for (;;) {
   const { value, done } = await reader.read();
   if (done) break;
   buf += decoder.decode(value, { stream: true });
@@ -390,8 +421,13 @@ for (;;) {
     buf = buf.slice(idx + 1);
     if (!line.startsWith("data:")) continue;
     const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    process.stdout.write(JSON.parse(payload).token);
+    if (payload === "[DONE]") break outer;
+    const event = JSON.parse(payload);
+    if (event.type === "response.output_text.delta") {
+      process.stdout.write(event.delta);
+    } else if (event.type === "response.completed") {
+      console.log("\nreceipt:", event.response.metadata.reef_record_id);
+    }
   }
 }
 ```
@@ -431,6 +467,57 @@ fun main() {
     println(session.recall("fact1"))
 }
 ```
+
+## OpenAI Agents API compatibility
+
+`POST /v1/runs/stream` speaks the **OpenAI Responses API streaming protocol**,
+so OpenAI SDKs and the OpenAI Agents SDK can consume it unchanged. Every SSE
+`data:` frame is a Responses event with a `type` and a monotonic
+`sequence_number`:
+
+| Event | Payload |
+|---|---|
+| `response.created` | `response.id`, `response.metadata` (`agent_id`, `session`, `reef_record_id`) |
+| `response.in_progress` | phase boundary; extra `phase` (`recall` / `model` / `tool_exec` / `loop_guard`) + `label` |
+| `response.output_item.added` | `item` — `message` (assistant) or `function_call` |
+| `response.function_call_arguments.delta` | `item_id`, `delta` (JSON argument chunk) |
+| `response.output_item.done` | completed `item`; a `function_call` also carries the executed `result` |
+| `response.output_text.delta` | `item_id`, `content_index`, `delta` |
+| `response.output_text.done` | `item_id`, `content_index`, `text` |
+| `response.completed` | `response.status = "completed"`, `response.metadata.reef_record_id` |
+| `response.failed` | `response.error` |
+
+The stream terminates with the OpenAI sentinel `data: [DONE]`. Every run also
+returns the Reef receipt id as the `x-reef-agent-record-id` response header —
+the same value exposed as `response.metadata.reef_record_id`.
+
+Extra fields our orchestration needs but the Responses schema does not model
+(the agentic `phase`, the tool `result`, the Reef receipt id) are carried
+**inside** these OpenAI-shaped frames, so strict OpenAI clients simply ignore
+them. No private `aria.*` frames are emitted.
+
+```python
+# Consume it with the official OpenAI SDK (no Aria-specific parsing needed).
+from openai import OpenAI
+client = OpenAI(base_url=f"{BASE}/v1", api_key=API_KEY or "unused")
+for event in client.responses.create(
+    model="gpt-4o-mini",
+    input="tell me a joke",
+    extra_body={"agent": "Agent Demo"},
+    stream=True,
+):
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="", flush=True)
+```
+
+### Default agent
+
+`ensure_schema` seeds a default agent — `id: agent-demo`,
+`name: Agent Demo` — so a fresh deployment (and the Aria Playground) has
+something to run out of the box. Deployments seeded with the previous default
+(`playground-demo`) are renamed in place on the next boot. List the agents
+visible to your key with `GET /v1/agents` (admins see every agent, tenants
+only their own).
 
 ## License
 
