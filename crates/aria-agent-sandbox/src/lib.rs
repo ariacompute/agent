@@ -3,10 +3,11 @@
 //! Provides a provider abstraction so the same agent runtime can run under
 //! **Docker**, **Kata**, or **Cube** sandboxes. The **Docker** provider talks to
 //! the Docker **Engine API** through `bollard` — no `docker` CLI is required
-//! inside the container; it connects to the daemon over the mounted host socket
-//! (or whatever `DOCKER_HOST` points at). The **Kata** and **Cube** providers
-//! remain thin CLI runners that shell out to the platform binary
-//! (`docker --runtime=kata`, `cube`, …). The [`Sandbox`] trait is the stable
+//! inside the container; they connect to the daemon over the mounted host socket
+//! (or whatever `DOCKER_HOST` points at). Kata is the same Engine API path but
+//! runs containers under the `kata` runtime (`HostConfig.runtime`). The **Cube**
+//! provider remains a thin CLI runner that shells out to the `cube` binary. The
+//! [`Sandbox`] trait is the stable
 //! seam the rest of the platform depends on
 //! (see `docs/adr/0003-sandbox-providers.md`).
 //!
@@ -30,6 +31,117 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use thiserror::Error;
 use tokio::sync::OnceCell;
+
+/// Resource limits applied to every sandbox container/VM.
+///
+/// Parsed once from `.env` (`SANDBOX_*`) at construction; any parse error falls
+/// back to conservative defaults instead of panicking — the sandbox must build
+/// on hosts where these vars are unset. The Docker/Kata backends push these
+/// straight into a bollard `HostConfig`; the Cube backend best-effort maps them
+/// to `cube` CLI flags.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxResourceLimits {
+    /// Logical CPUs (e.g. `1.0`, `0.5`).
+    pub cpus: f64,
+    /// Memory cap in bytes (human-readable units are parsed by [`parse_size`]).
+    pub memory_bytes: i64,
+    /// Maximum number of processes (pids cgroup).
+    pub pids_limit: i64,
+}
+
+impl SandboxResourceLimits {
+    /// Read the limits from the process environment, falling back to
+    /// `cpus=1.0`, `memory=512m`, `pids_limit=256` on any parse error.
+    pub fn from_env() -> Self {
+        Self {
+            cpus: parse_cpu(env::var("SANDBOX_CPUS").ok(), 1.0),
+            memory_bytes: parse_memory(env::var("SANDBOX_MEMORY").ok(), 512 * 1024 * 1024),
+            pids_limit: parse_pids(env::var("SANDBOX_PIDS_LIMIT").ok(), 256),
+        }
+    }
+}
+
+/// Build a bollard `HostConfig` carrying the resource limits. `runtime` is only
+/// set for Kata (`"kata"`); `None` means the default Docker runtime.
+///
+/// `memory_swap = -1` disables swap accounting so a memory cap does not trip the
+/// cgroup "memory swap must be >= memory" constraint.
+pub fn build_host_config(
+    res: &SandboxResourceLimits,
+    runtime: Option<&str>,
+) -> bollard::service::HostConfig {
+    bollard::service::HostConfig {
+        nano_cpus: Some((res.cpus * 1e9).round() as i64),
+        memory: Some(res.memory_bytes),
+        memory_swap: Some(-1),
+        pids_limit: Some(res.pids_limit),
+        runtime: runtime.map(|s| s.to_string()),
+        ..Default::default()
+    }
+}
+
+fn parse_cpu(raw: Option<String>, default: f64) -> f64 {
+    match raw {
+        Some(s) => match s.trim().parse::<f64>() {
+            Ok(v) if v > 0.0 => v,
+            _ => {
+                tracing::warn!(value = %s.trim(), default, "invalid SANDBOX_CPUS; using default");
+                default
+            }
+        },
+        None => default,
+    }
+}
+
+fn parse_memory(raw: Option<String>, default: i64) -> i64 {
+    match raw {
+        Some(s) => match parse_size(&s) {
+            Some(v) => v,
+            None => {
+                tracing::warn!(value = %s.trim(), default, "invalid SANDBOX_MEMORY; using default");
+                default
+            }
+        },
+        None => default,
+    }
+}
+
+fn parse_pids(raw: Option<String>, default: i64) -> i64 {
+    match raw {
+        Some(s) => match s.trim().parse::<i64>() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                tracing::warn!(value = %s.trim(), default, "invalid SANDBOX_PIDS_LIMIT; using default");
+                default
+            }
+        },
+        None => default,
+    }
+}
+
+/// Parse a human-readable size (`512m`, `1g`, `1024`) into bytes. No unit or `b`
+/// means bytes; `k/m/g/t` are powers of 1024. Returns `None` on any error or a
+/// non-positive value.
+fn parse_size(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let split = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let value: f64 = num.trim().parse().ok()?;
+    let mult: i64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" => 1024,
+        "m" => 1024 * 1024,
+        "g" => 1024 * 1024 * 1024,
+        "t" => 1024 * 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    if value <= 0.0 {
+        return None;
+    }
+    Some((value * mult as f64) as i64)
+}
 
 /// Specification of a command to execute inside a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +272,12 @@ impl CliSandbox {
         spec.image
             .clone()
             .unwrap_or_else(|| self.default_image.clone())
+    }
+
+    /// CLI args inserted before the image (introspection aid for tests).
+    #[cfg(test)]
+    fn run_args(&self) -> &[String] {
+        &self.run_args
     }
 }
 
@@ -319,6 +437,10 @@ pub struct DockerSandbox {
     docker: OnceCell<Docker>,
     /// Explicit socket override; when set, discovery is skipped entirely.
     sockets: Option<Vec<String>>,
+    /// Resource limits applied to every spawned sandbox container.
+    resources: SandboxResourceLimits,
+    /// Optional container runtime (e.g. `"kata"`). `None` = default runtime.
+    runtime: Option<String>,
 }
 
 impl DockerSandbox {
@@ -326,7 +448,15 @@ impl DockerSandbox {
         Self {
             docker: OnceCell::new(),
             sockets: None,
+            resources: SandboxResourceLimits::from_env(),
+            runtime: None,
         }
+    }
+
+    /// Return the pinned container runtime, if any (e.g. `"kata"`). `None`
+    /// means the daemon's default runtime.
+    pub fn runtime(&self) -> Option<&str> {
+        self.runtime.as_deref()
     }
 
     /// Pin the sandbox to one socket path (no `DOCKER_HOST`/auto-discovery).
@@ -334,6 +464,20 @@ impl DockerSandbox {
         Self {
             docker: OnceCell::new(),
             sockets: Some(vec![path.into()]),
+            resources: SandboxResourceLimits::from_env(),
+            runtime: None,
+        }
+    }
+
+    /// Build a sandbox that runs containers under a specific Docker runtime
+    /// (e.g. `"kata"`). Used by [`KataSandbox`]; reuses the same bollard client
+    /// and the same [`SandboxResourceLimits`] as the default Docker provider.
+    pub fn with_runtime(runtime: impl Into<String>) -> Self {
+        Self {
+            docker: OnceCell::new(),
+            sockets: None,
+            resources: SandboxResourceLimits::from_env(),
+            runtime: Some(runtime.into()),
         }
     }
 
@@ -376,6 +520,7 @@ impl Sandbox for DockerSandbox {
                     tty: Some(false),
                     env: Some(env_to_docker(&spec.env)),
                     working_dir: spec.workdir.clone(),
+                    host_config: Some(build_host_config(&self.resources, self.runtime.as_deref())),
                     ..Default::default()
                 },
             )
@@ -470,27 +615,26 @@ fn env_to_docker(env: &[(String, String)]) -> Vec<String> {
     env.iter().map(|(k, v)| format!("{k}={v}")).collect()
 }
 
-/// Kata sandbox — Docker with the `kata` runtime.
+/// Kata sandbox — Docker Engine API with the `kata` runtime.
+///
+/// Kata containers are started exactly like Docker containers but with
+/// `HostConfig.runtime = "kata"`, so they reuse the same bollard client and the
+/// same [`SandboxResourceLimits`] as the default Docker provider. No `docker`
+/// CLI is involved.
 pub struct KataSandbox {
-    inner: CliSandbox,
+    inner: DockerSandbox,
 }
 
 impl KataSandbox {
     pub fn new() -> Self {
         Self {
-            inner: CliSandbox::new(
-                SandboxProvider::Kata,
-                "docker",
-                vec![
-                    "run".into(),
-                    "--runtime".into(),
-                    "kata".into(),
-                    "--rm".into(),
-                    "-d".into(),
-                ],
-                "alpine:latest",
-            ),
+            inner: DockerSandbox::with_runtime("kata"),
         }
+    }
+
+    /// Runtime this Kata sandbox pins (`"kata"`).
+    pub fn runtime(&self) -> Option<&str> {
+        self.inner.runtime()
     }
 }
 
@@ -519,15 +663,31 @@ pub struct CubeSandbox {
 
 impl CubeSandbox {
     pub fn new() -> Self {
+        let res = SandboxResourceLimits::from_env();
+        // `cube` is a standalone microVM runtime with its own CLI; it does **not**
+        // speak the Docker Engine API, so resource limits are best-effort here.
+        // These flags mirror docker-style options and may need adjustment for
+        // your deployed Cube runtime.
+        let run_args = vec![
+            "sandbox".into(),
+            "run".into(),
+            "--rm".into(),
+            "--cpus".into(),
+            res.cpus.to_string(),
+            "--memory".into(),
+            res.memory_bytes.to_string(),
+        ];
         Self {
-            inner: CliSandbox::new(
-                SandboxProvider::Cube,
-                "cube",
-                // Plausible `cube` invocation; align with your deployment.
-                vec!["sandbox".into(), "run".into(), "--rm".into()],
-                "cube-image:latest",
-            ),
+            inner: CliSandbox::new(SandboxProvider::Cube, "cube", run_args, "cube-image:latest"),
         }
+    }
+
+    /// Resource flags this Cube sandbox passes to the `cube` CLI. Introspection
+    /// aid for tests; the Cube runtime may require different flags per
+    /// deployment, so this is not part of the public contract.
+    #[cfg(test)]
+    pub(crate) fn run_args(&self) -> &[String] {
+        self.inner.run_args()
     }
 }
 
@@ -750,5 +910,77 @@ mod tests {
         ));
         let _ = CubeSandbox::new();
         let _ = KataSandbox::new();
+    }
+
+    #[test]
+    fn resource_limit_parsers_default_and_reject_bad_input() {
+        // cpus
+        assert_eq!(parse_cpu(Some("1.5".into()), 1.0), 1.5);
+        assert_eq!(parse_cpu(Some("0".into()), 1.0), 1.0);
+        assert_eq!(parse_cpu(Some("nope".into()), 2.0), 2.0);
+        assert_eq!(parse_cpu(None, 1.0), 1.0);
+        // memory
+        assert_eq!(parse_memory(Some("512m".into()), 0), 512 * 1024 * 1024);
+        assert_eq!(parse_memory(Some("1g".into()), 0), 1024 * 1024 * 1024);
+        assert_eq!(parse_memory(Some("1024".into()), 0), 1024);
+        assert_eq!(parse_memory(Some("bad".into()), 999), 999);
+        assert_eq!(parse_memory(None, 123), 123);
+        // pids
+        assert_eq!(parse_pids(Some("100".into()), 256), 100);
+        assert_eq!(parse_pids(Some("-1".into()), 256), 256);
+        assert_eq!(parse_pids(None, 256), 256);
+    }
+
+    #[test]
+    fn kata_sandbox_wraps_docker_with_kata_runtime() {
+        // Kata must build without a daemon and wrap a Docker-backed sandbox.
+        let _ = KataSandbox::new();
+    }
+
+    #[test]
+    fn kata_runtime_is_kata() {
+        // Kata must pin the Docker runtime to "kata" and build without a daemon.
+        let kata = KataSandbox::new();
+        assert_eq!(kata.runtime(), Some("kata"));
+        let _ = kata;
+    }
+
+    #[test]
+    fn cube_and_kata_construction_never_panics() {
+        let _ = KataSandbox::new();
+        let _ = CubeSandbox::new();
+    }
+
+    #[test]
+    fn cube_sandbox_maps_resource_limits_to_cli_flags() {
+        // The Cube CLI must carry the parsed SANDBOX_* values into its run args.
+        // Computed against `from_env()` so the expectation stays in sync with the
+        // actual parsing (deterministic when the vars are unset).
+        let cube = CubeSandbox::new();
+        let res = SandboxResourceLimits::from_env();
+        let expected = [
+            "sandbox".to_string(),
+            "run".to_string(),
+            "--rm".to_string(),
+            "--cpus".to_string(),
+            res.cpus.to_string(),
+            "--memory".to_string(),
+            res.memory_bytes.to_string(),
+        ];
+        assert_eq!(cube.run_args(), &expected[..]);
+    }
+
+    #[tokio::test]
+    async fn kata_spawn_surfaces_error_without_daemon() {
+        // Kata shares the bollard path with Docker: spawn/exec/destroy must
+        // surface an error (not panic) when no daemon is reachable.
+        let kata = KataSandbox::new();
+        assert_eq!(kata.runtime(), Some("kata"));
+        let spec = ExecSpec::command(vec!["true".into()]);
+        let res = kata.spawn(&spec).await;
+        assert!(
+            res.is_err(),
+            "kata spawn must fail when no daemon is reachable"
+        );
     }
 }

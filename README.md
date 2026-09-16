@@ -145,6 +145,9 @@ cp .env.example .env
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
 | `ARIA_DOCKER_SOCKET` | _(unset)_ | Explicit sandbox socket path; takes precedence over auto-discovery (e.g. `~/.docker/run/docker.sock` on macOS). |
 | `DOCKER_GID` | `998` | GID of the host `docker` group that owns `/var/run/docker.sock`. The runtime image recreates this group and adds the non-root `aria` user to it so the socket is reachable without `root`. |
+| `SANDBOX_CPUS` | `1.0` | Per-tool sandbox CPU cap (e.g. `1.0`, `0.5`). Applied to Docker & Kata via the Engine API. |
+| `SANDBOX_MEMORY` | `512m` | Per-tool sandbox memory cap, human-readable units (`512m`, `1g`, …). Applied to Docker & Kata; best-effort for Cube. |
+| `SANDBOX_PIDS_LIMIT` | `256` | Max processes inside the sandbox (pids cgroup). Applied to Docker & Kata; best-effort for Cube. |
 | `NGINX_PORT` | `80` | Host port published by the `nginx` reverse proxy (forwards to `cloud:3000`). |
 
 > `.env` is git-ignored; `.env.example` is the committed template. Compose
@@ -220,6 +223,31 @@ with `docker compose build --build-arg DOCKER_GID=<gid>`, or fall back to
 > Mounting the host socket grants the cloud container root-equivalent control of
 > the host Docker daemon. Only do this for a trusted, single-tenant deployment.
 > For stronger isolation, set `DOCKER_HOST` to a separate daemon (DinD / remote).
+
+#### Auto-detecting `DOCKER_GID`
+
+The `DOCKER_GID` in `.env` must match the host group that owns the socket.
+Read it once and write it straight into `.env`:
+
+```bash
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+sed -i "s/^DOCKER_GID=.*/DOCKER_GID=$DOCKER_GID/" .env
+echo "DOCKER_GID set to $DOCKER_GID"
+```
+
+Then rebuild so the runtime image picks up the new group:
+`docker compose build --build-arg DOCKER_GID=$DOCKER_GID`.
+
+#### Sandbox resource limits
+
+Every tool container is capped by `SANDBOX_CPUS`, `SANDBOX_MEMORY`, and
+`SANDBOX_PIDS_LIMIT` (see the table above). For the **Docker** and **Kata**
+providers these are passed straight to the Engine API (`HostConfig`:
+`NanoCpus`, `Memory`, `PidsLimit`); for **Kata** the container additionally
+runs under the `kata` runtime. The **Cube** provider maps them to best-effort
+`cube` CLI flags (`--cpus` / `--memory`) and may need adjustment for your
+deployed Cube runtime. Invalid values fall back to the defaults and log a
+warning, so the service always boots.
 
 ### Volumes
 

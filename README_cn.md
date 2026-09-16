@@ -139,6 +139,9 @@ cp .env.example .env
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | sandbox 使用的 Docker Engine API 端点（DooD）。可改为远程 / DinD 守护进程。 |
 | `ARIA_DOCKER_SOCKET` | _(未设置)_ | 显式指定 sandbox socket 路径，优先于自动探测（如 macOS 的 `~/.docker/run/docker.sock`）。 |
 | `DOCKER_GID` | `998` | 宿主 `docker` 组（拥有 `/var/run/docker.sock`）的 GID。运行期镜像会重建该组并把非 root 用户 `aria` 加入，从而无需 `root` 即可访问 socket。 |
+| `SANDBOX_CPUS` | `1.0` | 每个工具的 sandbox CPU 上限（如 `1.0`、`0.5`）。通过 Engine API 作用于 Docker 与 Kata。 |
+| `SANDBOX_MEMORY` | `512m` | 每个工具的 sandbox 内存上限，可读单位（`512m`、`1g` …）。作用于 Docker 与 Kata；Cube 为 best-effort。 |
+| `SANDBOX_PIDS_LIMIT` | `256` | sandbox 内最大进程数（pids cgroup）。作用于 Docker 与 Kata；Cube 为 best-effort。 |
 | `NGINX_PORT` | `80` | `nginx` 反向代理对外暴露的主机端口（转发到 `cloud:3000`）。 |
 
 > `.env` 已被 git 忽略；`.env.example` 是提交到仓库的模板。Compose 会自动加载
@@ -205,6 +208,29 @@ Colima（`~/.colima/default/docker.sock`）以及 rootless Podman 路径。
 > 挂载宿主 socket 等于把宿主 Docker 的 root 级控制权交给了 cloud 容器，请仅在
 > 受信任的单租户部署中使用。若需更强隔离，可将 `DOCKER_HOST` 指向独立守护进程
 > （DinD / 远程）。
+
+#### 自动探测 `DOCKER_GID`
+
+`.env` 中的 `DOCKER_GID` 必须与宿主上拥有 socket 的组一致。可一次性读出并写回
+`.env`：
+
+```bash
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+sed -i "s/^DOCKER_GID=.*/DOCKER_GID=$DOCKER_GID/" .env
+echo "DOCKER_GID set to $DOCKER_GID"
+```
+
+随后重新构建，使运行期镜像采用新的组：
+`docker compose build --build-arg DOCKER_GID=$DOCKER_GID`。
+
+#### sandbox 资源限制
+
+每个工具容器都受 `SANDBOX_CPUS`、`SANDBOX_MEMORY`、`SANDBOX_PIDS_LIMIT`
+限制（见上表）。**Docker** 与 **Kata** provider 直接经 Engine API 下发
+（`HostConfig` 的 `NanoCpus`、`Memory`、`PidsLimit`）；**Kata** 还会让容器运行在
+`kata` runtime 下。**Cube** provider 则映射为 best-effort 的 `cube` CLI 参数
+（`--cpus` / `--memory`），可能需要按你部署的 Cube 运行时调整。取值非法时会回退
+默认值并记录告警，因此服务总能正常启动。
 
 ### 数据卷
 
