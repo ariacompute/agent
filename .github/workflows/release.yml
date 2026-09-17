@@ -196,11 +196,11 @@ jobs:
         run: |
           echo "crates.io publish handled by publish-cargo.yml (ariacompute-agent + deps)"
           echo "crates.io publish stub"
-      - name: CocoaPods Swift AriaAgent
+      - name: CocoaPods Swift AriaComputeAgent
         env:
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
         run: |
-          echo "Configure COCOAPODS_TRUNK_TOKEN then: pod trunk push bindings/swift/AriaAgent.podspec"
+          echo "Configure COCOAPODS_TRUNK_TOKEN then: pod trunk push bindings/swift/AriaComputeAgent.podspec"
           echo "CocoaPods publish stub (fail-pass)"
       - name: Maven Central com.ariacompute:agent (Android AAR)
         run: |

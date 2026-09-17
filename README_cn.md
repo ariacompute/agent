@@ -252,7 +252,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | Python | `pip install ariacompute-agent` | `ariacompute_agent`（镜像 `openai-agents`） |
 | TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent`（镜像 `@openai/agents`） |
 | Rust | `cargo add ariacompute-agent` | `aria_agent_ffi`（进程内 / 原生） |
-| Swift | SwiftPM / CocoaPods `AriaAgent` | `bindings/swift`（进程内 / 原生） |
+| Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift`（进程内 / 原生） |
 | Kotlin | `com.ariacompute:agent` | `bindings/kotlin`（进程内 / 原生） |
 
 JS / Python SDK 是服务仍然暴露的 beta Agents REST API 的薄客户端 —— 协议细节见
@@ -452,10 +452,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Swift（进程内）
 
-嵌入 `libaria-agent_ffi` 与生成的 `AriaAgent` 模块（见 `bindings/swift/README.md`）。
+嵌入 `libaria-agent_ffi` 与生成的 `AriaComputeAgent` 模块（见 `bindings/swift/README.md`）。
 
 ```swift
-import AriaAgent
+import AriaComputeAgent
 
 do {
     // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域

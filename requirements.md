@@ -89,7 +89,7 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   `secrets.GPG_*`).
 * `publish-npm.yml` publishes `@ariacompute/agent` (`secrets.NPM_TOKEN`);
   `publish-pypi.yml` publishes `ariacompute-agent` (`secrets.PYPI_API_TOKEN`).
-* Swift is published via CocoaPods from `bindings/swift/AriaAgent.podspec`
+* Swift is published via CocoaPods from `bindings/swift/AriaComputeAgent.podspec`
   (`secrets.COCOAPODS_TRUNK_TOKEN`).
 
 ## 7. Removed features

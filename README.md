@@ -261,7 +261,7 @@ SDKs mirror the OpenAI Agents SDK shape: define an `Agent`, then run it.
 | Python | `pip install ariacompute-agent` | `ariacompute_agent` (mirrors `openai-agents`) |
 | TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent` (mirrors `@openai/agents`) |
 | Rust | `cargo add ariacompute-agent` | `aria_agent_ffi` (in-process, native) |
-| Swift | SwiftPM / CocoaPods `AriaAgent` | `bindings/swift` (in-process, native) |
+| Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift` (in-process, native) |
 | Kotlin | `com.ariacompute:agent` | `bindings/kotlin` (in-process, native) |
 
 The JS / Python SDKs are thin clients over the beta Agents REST API that the
@@ -469,11 +469,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Swift (in-process)
 
-Embed `libaria-agent_ffi` and the generated `AriaAgent` module (see
+Embed `libaria-agent_ffi` and the generated `AriaComputeAgent` module (see
 `bindings/swift/README.md`).
 
 ```swift
-import AriaAgent
+import AriaComputeAgent
 
 do {
     // No session argument: the runtime assigns one isolated context scope per agent.

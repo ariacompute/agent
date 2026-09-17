@@ -8,7 +8,7 @@ language (JS/Python) SDKs.
 
 * `crates/aria-agent-core`, `aria-agent-sandbox`, `aria-agent-memo` (aria memo),
   `ariacompute-agent`, `aria-agent-cloud`, `aria-agent-ffigen`
-* `bindings/swift` (`Package.swift` SwiftPM + `AriaAgent.podspec` CocoaPods),
+* `bindings/swift` (`Package.swift` SwiftPM + `AriaComputeAgent.podspec` CocoaPods),
   `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
   Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
   regenerate via `just ffi`; the podspec and Gradle publishing config are hand-maintained.
@@ -104,7 +104,7 @@ language (JS/Python) SDKs.
 * Release & publish: `.github/workflows/release.yml` (binary + cdylib assets),
   `publish-cargo.yml` (crates.io: sandbox → core → memo → ariacompute-agent),
   `publish-maven.yml` (Maven Central), `publish-npm.yml`, `publish-pypi.yml`;
-  Swift via CocoaPods `bindings/swift/AriaAgent.podspec`.
+  Swift via CocoaPods `bindings/swift/AriaComputeAgent.podspec`.
 
 Windows build (release matrix `windows-x86_64`): `aria-agent-cloud` pulls
 `codex-utils-pty`, whose conpty code mixes `winapi::ctypes::c_void` with

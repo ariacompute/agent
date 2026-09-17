@@ -1,5 +1,5 @@
 Pod::Spec.new do |s|
-  s.name                   = 'AriaAgent'
+  s.name                   = 'AriaComputeAgent'
   s.version                = ENV['ARIA_VERSION'] || '0.1.0'
   s.summary                = 'Swift binding for the Aria agent platform (libaria-agent_ffi FFI).'
   s.description            = 'High-level Swift API over the native libaria-agent_ffi cdylib, ' \
@@ -14,13 +14,13 @@ Pod::Spec.new do |s|
   s.osx.deployment_target  = '11.0'
 
   # High-level Swift wrapper + the low-level FFI modulemap/header.
-  s.source_files           = 'Sources/AriaAgent/**/*', 'Sources/aria_agent_ffi/aria_agent_ffi.h', 'Sources/aria_agent_ffi/aria_agent_ffi.modulemap'
+  s.source_files           = 'Sources/AriaComputeAgent/**/*', 'Sources/aria_agent_ffi/aria_agent_ffi.h', 'Sources/aria_agent_ffi/aria_agent_ffi.modulemap'
   s.preserve_paths         = 'Sources/aria_agent_ffi/aria_agent_ffi.modulemap', 'Sources/aria_agent_ffi/aria_agent_ffi.h'
 
   # The native lib is built separately (cargo build -p ariacompute-agent) and dropped in
   # next to this podspec before `pod trunk push`.
   s.vendored_libraries     = 'Sources/aria_agent_ffi/libaria-agent_ffi.a'
   s.xcconfig               = {
-    'OTHER_LDFLAGS' => '-L${PODS_ROOT}/AriaAgent/Sources/aria_agent_ffi'
+    'OTHER_LDFLAGS' => '-L${PODS_ROOT}/AriaComputeAgent/Sources/aria_agent_ffi'
   }
 end

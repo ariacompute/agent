@@ -64,7 +64,7 @@ see `docs/followups/*` for the downstream cleanups.
       `ARIA_AGENT_VERSION`; upload assets with `softprops/action-gh-release`
       (`secrets.ARIACOMPUTE_TOKEN`).
 - [x] `release.yml` `publish-packages` job: fail-pass (`continue-on-error: true`),
-      stubs crates.io / CocoaPods Swift (`bindings/swift/AriaAgent.podspec`) / Maven
+      stubs crates.io / CocoaPods Swift (`bindings/swift/AriaComputeAgent.podspec`) / Maven
       Central so language packages never block CLI/FFI assets.
 - [x] `.github/workflows/publish-cargo.yml`: topological crates.io publish of
       `aria-agent-memo` → `aria-agent-sandbox` → `aria-agent-core` → `ariacompute-agent` with version
@@ -74,7 +74,7 @@ see `docs/followups/*` for the downstream cleanups.
 - [x] `bindings/kotlin/ariacompute-agent/build.gradle.kts`: apply `com.vanniktech.maven.publish`
       with `publishToMavenCentral(CENTRAL_PORTAL, automaticRelease)` +
       `signAllPublications()` + in-memory GPG signing.
-- [x] `bindings/swift/AriaAgent.podspec`: CocoaPods spec wrapping `libaria-agent_ffi` for Swift.
+- [x] `bindings/swift/AriaComputeAgent.podspec`: CocoaPods spec wrapping `libaria-agent_ffi` for Swift.
 
 ## Milestone 9 — OpenAI-compatible streaming & default agent
 - [x] `aria-agent-cloud`: replace the bare-token SSE with a frozen

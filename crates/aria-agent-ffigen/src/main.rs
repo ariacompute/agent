@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     let lib = Utf8Path::new("target/debug/libaria_agent_ffi.so");
     let supplier = CrateConfigSupplier::default();
 
-    let swift_out = Utf8Path::new("bindings/swift/Sources/AriaAgent");
+    let swift_out = Utf8Path::new("bindings/swift/Sources/AriaComputeAgent");
     let kotlin_out =
         Utf8Path::new("bindings/kotlin/agent-sdk/src/main/kotlin/com/ariacompute/agent");
 
