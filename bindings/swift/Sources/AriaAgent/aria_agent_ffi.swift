@@ -446,6 +446,11 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol SdkAgentProtocol : AnyObject {
     
     /**
+     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     */
+    func memoryBackend()  -> String
+    
+    /**
      * Run a single turn and return the assistant reply.
      */
     func run(input: String) throws  -> String
@@ -523,6 +528,16 @@ open class SdkAgent:
 
     
 
+    
+    /**
+     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     */
+open func memoryBackend() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(self.uniffiClonePointer(),$0
+    )
+})
+}
     
     /**
      * Run a single turn and return the assistant reply.
@@ -628,26 +643,41 @@ public func FfiConverterTypeSdkAgent_lower(_ value: SdkAgent) -> UnsafeMutableRa
 
 
 /**
- * A session's context handle (long-term / externalized memory). The on-device
- * store is embedded (sled); the cloud uses Postgres + pgvector.
+ * A session's context handle (long-term / externalized memory).
+ *
+ * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
+ * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
+ * override it for a single call.
  */
 public protocol SdkSessionProtocol : AnyObject {
     
     /**
      * Write a long-term memory under `key`.
+     *
+     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
+     * this call; pass `null` to use the default.
      */
-    func memorize(key: String, value: String) throws 
+    func memorize(key: String, value: String, backend: String?) throws 
     
     /**
-     * Read a long-term memory by `key`.
+     * The backend this session defaults to (`cloud` / `local` / `both`).
      */
-    func recall(key: String) throws  -> String?
+    func memoryBackend()  -> String
+    
+    /**
+     * Read a long-term memory by `key` (same `backend` override as
+     * [`SdkSession::memorize`]).
+     */
+    func recall(key: String, backend: String?) throws  -> String?
     
 }
 
 /**
- * A session's context handle (long-term / externalized memory). The on-device
- * store is embedded (sled); the cloud uses Postgres + pgvector.
+ * A session's context handle (long-term / externalized memory).
+ *
+ * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
+ * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
+ * override it for a single call.
  */
 open class SdkSession:
     SdkSessionProtocol {
@@ -701,22 +731,38 @@ open class SdkSession:
     
     /**
      * Write a long-term memory under `key`.
+     *
+     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
+     * this call; pass `null` to use the default.
      */
-open func memorize(key: String, value: String)throws  {try rustCallWithError(FfiConverterTypeSdkError.lift) {
+open func memorize(key: String, value: String, backend: String?)throws  {try rustCallWithError(FfiConverterTypeSdkError.lift) {
     uniffi_aria_agent_ffi_fn_method_sdksession_memorize(self.uniffiClonePointer(),
         FfiConverterString.lower(key),
-        FfiConverterString.lower(value),$0
+        FfiConverterString.lower(value),
+        FfiConverterOptionString.lower(backend),$0
     )
 }
 }
     
     /**
-     * Read a long-term memory by `key`.
+     * The backend this session defaults to (`cloud` / `local` / `both`).
      */
-open func recall(key: String)throws  -> String? {
+open func memoryBackend() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Read a long-term memory by `key` (same `backend` override as
+     * [`SdkSession::memorize`]).
+     */
+open func recall(key: String, backend: String?)throws  -> String? {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
     uniffi_aria_agent_ffi_fn_method_sdksession_recall(self.uniffiClonePointer(),
-        FfiConverterString.lower(key),$0
+        FfiConverterString.lower(key),
+        FfiConverterOptionString.lower(backend),$0
     )
 })
 }
@@ -787,14 +833,16 @@ public struct SdkAgentConfig {
     public var instructions: String
     public var model: String
     public var sandboxProvider: String
+    public var memory: SdkMemoryConfig
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(agentName: String, instructions: String, model: String, sandboxProvider: String) {
+    public init(agentName: String, instructions: String, model: String, sandboxProvider: String, memory: SdkMemoryConfig) {
         self.agentName = agentName
         self.instructions = instructions
         self.model = model
         self.sandboxProvider = sandboxProvider
+        self.memory = memory
     }
 }
 
@@ -814,6 +862,9 @@ extension SdkAgentConfig: Equatable, Hashable {
         if lhs.sandboxProvider != rhs.sandboxProvider {
             return false
         }
+        if lhs.memory != rhs.memory {
+            return false
+        }
         return true
     }
 
@@ -822,6 +873,7 @@ extension SdkAgentConfig: Equatable, Hashable {
         hasher.combine(instructions)
         hasher.combine(model)
         hasher.combine(sandboxProvider)
+        hasher.combine(memory)
     }
 }
 
@@ -836,7 +888,8 @@ public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
                 agentName: FfiConverterString.read(from: &buf), 
                 instructions: FfiConverterString.read(from: &buf), 
                 model: FfiConverterString.read(from: &buf), 
-                sandboxProvider: FfiConverterString.read(from: &buf)
+                sandboxProvider: FfiConverterString.read(from: &buf), 
+                memory: FfiConverterTypeSdkMemoryConfig.read(from: &buf)
         )
     }
 
@@ -845,6 +898,7 @@ public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.instructions, into: &buf)
         FfiConverterString.write(value.model, into: &buf)
         FfiConverterString.write(value.sandboxProvider, into: &buf)
+        FfiConverterTypeSdkMemoryConfig.write(value.memory, into: &buf)
     }
 }
 
@@ -861,6 +915,120 @@ public func FfiConverterTypeSdkAgentConfig_lift(_ buf: RustBuffer) throws -> Sdk
 #endif
 public func FfiConverterTypeSdkAgentConfig_lower(_ value: SdkAgentConfig) -> RustBuffer {
     return FfiConverterTypeSdkAgentConfig.lower(value)
+}
+
+
+/**
+ * Where the agent's memory context lives.
+ *
+ * `backend` is `cloud` | `local` | `both` (unknown values fall back to
+ * `local`, the offline-first default for the native SDK).
+ */
+public struct SdkMemoryConfig {
+    /**
+     * `cloud` | `local` | `both`.
+     */
+    public var backend: String
+    /**
+     * aria memo database path (empty ⇒ a temporary per-process database).
+     */
+    public var localDbPath: String
+    /**
+     * agent-cloud base URL for the `cloud` / `both` backends
+     * (empty ⇒ `ARIA_AGENT_BASE_URL` or `http://localhost:3000`).
+     */
+    public var cloudBaseUrl: String
+    /**
+     * API key for the cloud backend (empty ⇒ `ARIA_AGENT_API_KEY`).
+     */
+    public var cloudApiKey: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `cloud` | `local` | `both`.
+         */backend: String, 
+        /**
+         * aria memo database path (empty ⇒ a temporary per-process database).
+         */localDbPath: String, 
+        /**
+         * agent-cloud base URL for the `cloud` / `both` backends
+         * (empty ⇒ `ARIA_AGENT_BASE_URL` or `http://localhost:3000`).
+         */cloudBaseUrl: String, 
+        /**
+         * API key for the cloud backend (empty ⇒ `ARIA_AGENT_API_KEY`).
+         */cloudApiKey: String) {
+        self.backend = backend
+        self.localDbPath = localDbPath
+        self.cloudBaseUrl = cloudBaseUrl
+        self.cloudApiKey = cloudApiKey
+    }
+}
+
+
+
+extension SdkMemoryConfig: Equatable, Hashable {
+    public static func ==(lhs: SdkMemoryConfig, rhs: SdkMemoryConfig) -> Bool {
+        if lhs.backend != rhs.backend {
+            return false
+        }
+        if lhs.localDbPath != rhs.localDbPath {
+            return false
+        }
+        if lhs.cloudBaseUrl != rhs.cloudBaseUrl {
+            return false
+        }
+        if lhs.cloudApiKey != rhs.cloudApiKey {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(backend)
+        hasher.combine(localDbPath)
+        hasher.combine(cloudBaseUrl)
+        hasher.combine(cloudApiKey)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSdkMemoryConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkMemoryConfig {
+        return
+            try SdkMemoryConfig(
+                backend: FfiConverterString.read(from: &buf), 
+                localDbPath: FfiConverterString.read(from: &buf), 
+                cloudBaseUrl: FfiConverterString.read(from: &buf), 
+                cloudApiKey: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SdkMemoryConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.backend, into: &buf)
+        FfiConverterString.write(value.localDbPath, into: &buf)
+        FfiConverterString.write(value.cloudBaseUrl, into: &buf)
+        FfiConverterString.write(value.cloudApiKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSdkMemoryConfig_lift(_ buf: RustBuffer) throws -> SdkMemoryConfig {
+    return try FfiConverterTypeSdkMemoryConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSdkMemoryConfig_lower(_ value: SdkMemoryConfig) -> RustBuffer {
+    return FfiConverterTypeSdkMemoryConfig.lower(value)
 }
 
 
@@ -1175,7 +1343,9 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 }
 /**
  * Minimal quickstart entry — `Agent(name, model)`, no session required.
- * The sandbox defaults to Docker. Streaming is via [`SdkAgent::run_stream`].
+ *
+ * The sandbox defaults to Docker and the memory backend to **local**
+ * (aria memo). Streaming is via [`SdkAgent::run_stream`].
  */
 public func createAgent(agentName: String, model: String)throws  -> SdkAgent {
     return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
@@ -1186,8 +1356,9 @@ public func createAgent(agentName: String, model: String)throws  -> SdkAgent {
 })
 }
 /**
- * Minimal tenant-scoped quickstart entry (per-tenant memo isolation like the
- * cloud enforces server-side). Empty `tenant_id` behaves like [`create_agent`].
+ * Minimal tenant-scoped quickstart entry: the tenant id selects a separate
+ * aria memo database (local backend). Empty `tenant_id` behaves like
+ * [`create_agent`].
  */
 public func createAgentForTenant(tenantId: String, agentName: String, model: String)throws  -> SdkAgent {
     return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
@@ -1211,7 +1382,7 @@ public func createAgentForTenantWith(tenantId: String, config: SdkAgentConfig)th
 }
 /**
  * Advanced entry accepting a full [`SdkAgentConfig`] (instructions, custom
- * sandbox, …).
+ * sandbox, memory backend, …).
  */
 public func createAgentWith(config: SdkAgentConfig)throws  -> SdkAgent {
     return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
@@ -1236,16 +1407,19 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 16266) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 7131) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 59195) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 41014) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 42291) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 4189) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend() != 43728) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471) {
@@ -1260,10 +1434,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 6609) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 5103) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 50855) {
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend() != 60477) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 29904) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event() != 35179) {

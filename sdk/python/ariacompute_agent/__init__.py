@@ -24,6 +24,12 @@ asyncio.run(main())
 """
 
 from .agent import Agent
+from .memory import (
+    CloudMemoryStore,
+    CompositeMemoryStore,
+    LocalMemoryStore,
+    MemoryBackend,
+)
 from .runner import Runner
 from .session import Session
 from .tool import function_tool, tool_from_function
@@ -47,6 +53,10 @@ __all__ = [
     "Agent",
     "Runner",
     "Session",
+    "MemoryBackend",
+    "LocalMemoryStore",
+    "CloudMemoryStore",
+    "CompositeMemoryStore",
     "function_tool",
     "tool_from_function",
     "ClientOptions",

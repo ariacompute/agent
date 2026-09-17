@@ -1,10 +1,10 @@
 //! Context memory contract shared by every runtime tier.
 //!
-//! Historically this lived in `aria-agent-memo` as `MemoStore` (sled-only,
-//! local/embedded). The contract is lifted into `agent-core` so the cloud can
-//! ship a **Postgres + pgvector** implementation (see
+//! Historically this lived in `aria-agent-memo` as `MemoStore` (local/embedded).
+//! The contract is lifted into `agent-core` so the cloud can ship a
+//! **Postgres + pgvector** implementation (see
 //! `crates/aria-agent-cloud/src/context/pg.rs`) while the on-device SDK keeps
-//! the embedded sled implementation (`aria-agent-memo`). The two share:
+//! the **aria memo** implementation (`aria-agent-memo`). The two share:
 //!
 //! * [`ContextStore`] — the storage contract (`memorize` / `recall` / `compact`
 //!   / `get_by_key`),
@@ -25,8 +25,9 @@ use uuid::Uuid;
 
 /// Dimension of the dense embedding produced by [`embed::LocalEmbedder`].
 ///
-/// Fixed so every backend (Postgres `vector(256)`, sled, in-memory) agrees on
-/// the vector width; [`embed::cosine`] returns `None` on a width mismatch.
+/// Fixed so every backend (Postgres `vector(256)`, aria memo, in-memory)
+/// agrees on the vector width; [`embed::cosine`] returns `None` on a width
+/// mismatch.
 pub const EMBED_DIM: usize = 256;
 
 /// Kinds of context fragments a store can hold.
@@ -139,12 +140,56 @@ pub enum ContextError {
     Embedding(String),
 }
 
+/// Where a memory context lives.
+///
+/// * `Cloud` — the agent-cloud store (Postgres + pgvector), shared across
+///   devices and instances.
+/// * `Local` — the on-device **aria memo** store (SQLite), works offline.
+/// * `Both` — write to both, read merged (see [`CompositeContextStore`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryBackend {
+    #[default]
+    Cloud,
+    Local,
+    Both,
+}
+
+impl MemoryBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryBackend::Cloud => "cloud",
+            MemoryBackend::Local => "local",
+            MemoryBackend::Both => "both",
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cloud" => Ok(MemoryBackend::Cloud),
+            "local" => Ok(MemoryBackend::Local),
+            "both" => Ok(MemoryBackend::Both),
+            other => Err(format!("unknown memory backend: {other}")),
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The unified context-memory contract. Everything that needs conversational
 /// or long-term context goes through this trait.
 ///
 /// Implementations:
-/// * `aria-agent-memo::SledContextStore` — on-device / embedded (sled),
-/// * `aria-agent-cloud::context::PgContextStore` — cloud (Postgres + pgvector).
+/// * `aria-agent-memo::MemoContextStore` — on-device / local (aria memo, SQLite),
+/// * `aria-agent-cloud::context::PgContextStore` — cloud (Postgres + pgvector),
+/// * [`CompositeContextStore`] — `both`: writes to two stores, reads merged.
 #[async_trait]
 pub trait ContextStore: Send + Sync {
     /// Persist a fragment.
@@ -159,6 +204,13 @@ pub trait ContextStore: Send + Sync {
         session: &str,
         key: &str,
     ) -> Result<Option<ContextFragment>, ContextError>;
+    /// Every fragment of a session, oldest first (used by `compact` and by the
+    /// session memory listing).
+    async fn list_session(
+        &self,
+        session: &str,
+        top_k: usize,
+    ) -> Result<Vec<ContextFragment>, ContextError>;
 }
 
 /// Embed a fragment's content when it carries no vector yet. Shared by every
@@ -233,10 +285,168 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Merge results from two backends: a fragment is a duplicate when **either**
+/// its `id` or its `key` was already seen; the freshest copy wins.
+pub fn merge_fragments(a: Vec<ContextFragment>, b: Vec<ContextFragment>) -> Vec<ContextFragment> {
+    let mut out: Vec<ContextFragment> = Vec::with_capacity(a.len() + b.len());
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for frag in a.into_iter().chain(b) {
+        let ids: Vec<String> = [
+            Some(frag.id.clone()).filter(|s| !s.is_empty()),
+            frag.key.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let existing = ids.iter().find_map(|k| index.get(k).copied());
+        match existing {
+            Some(i) if frag.created_at > out[i].created_at => {
+                for k in &ids {
+                    index.insert(k.clone(), i);
+                }
+                out[i] = frag;
+            }
+            Some(_) => {}
+            None => {
+                let i = out.len();
+                for k in &ids {
+                    index.insert(k.clone(), i);
+                }
+                out.push(frag);
+            }
+        }
+    }
+    out
+}
+
+/// The `both` backend: a local (aria memo) store plus a cloud store.
+///
+/// * `memorize` writes to both (local first, so an offline write still lands);
+///   a single-side failure is logged and tolerated — only a total failure
+///   returns an error.
+/// * `recall` queries both, merges, dedupes and re-ranks with the shared
+///   [`rank`] scoring so ordering matches a single-backend run.
+/// * `get_by_key` prefers the cloud copy and falls back to local.
+pub struct CompositeContextStore {
+    local: Arc<dyn ContextStore>,
+    cloud: Arc<dyn ContextStore>,
+}
+
+impl CompositeContextStore {
+    pub fn new(local: Arc<dyn ContextStore>, cloud: Arc<dyn ContextStore>) -> Arc<Self> {
+        Arc::new(Self { local, cloud })
+    }
+
+    pub fn local(&self) -> &Arc<dyn ContextStore> {
+        &self.local
+    }
+
+    pub fn cloud(&self) -> &Arc<dyn ContextStore> {
+        &self.cloud
+    }
+}
+
+#[async_trait]
+impl ContextStore for CompositeContextStore {
+    async fn memorize(&self, frag: ContextFragment) -> Result<(), ContextError> {
+        let local = self.local.memorize(frag.clone()).await;
+        let cloud = self.cloud.memorize(frag).await;
+        match (local, cloud) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(e)) => {
+                tracing::warn!("context: cloud memorize failed, kept local copy: {e}");
+                Ok(())
+            }
+            (Err(e), Ok(())) => {
+                tracing::warn!("context: local memorize failed, kept cloud copy: {e}");
+                Ok(())
+            }
+            (Err(e), Err(_)) => Err(e),
+        }
+    }
+
+    async fn recall(&self, query: &RecallQuery) -> Result<Vec<ContextFragment>, ContextError> {
+        let local = self.local.recall(query).await;
+        let cloud = self.cloud.recall(query).await;
+        let (local, cloud) = match (local, cloud) {
+            (Ok(l), Ok(c)) => (l, c),
+            (Ok(l), Err(e)) => {
+                tracing::warn!("context: cloud recall failed, using local only: {e}");
+                (l, Vec::new())
+            }
+            (Err(e), Ok(c)) => {
+                tracing::warn!("context: local recall failed, using cloud only: {e}");
+                (Vec::new(), c)
+            }
+            (Err(e), Err(_)) => return Err(e),
+        };
+        let merged = merge_fragments(local, cloud);
+        let q_emb = embed::LocalEmbedder::new(EMBED_DIM).embed(&query.text).ok();
+        Ok(rank(&query.text, q_emb.as_deref(), merged, query.top_k))
+    }
+
+    async fn compact(&self, session: &str) -> Result<ContextFragment, ContextError> {
+        // Compact from whichever side has the session; the cloud copy wins when
+        // both do, and the result is persisted back to both.
+        let compacted = match self.cloud.compact(session).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("context: cloud compact failed, using local: {e}");
+                match self.local.compact(session).await {
+                    Ok(c) => c,
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        self.memorize(compacted.clone()).await?;
+        Ok(compacted)
+    }
+
+    async fn get_by_key(
+        &self,
+        session: &str,
+        key: &str,
+    ) -> Result<Option<ContextFragment>, ContextError> {
+        match self.cloud.get_by_key(session, key).await {
+            Ok(Some(f)) => Ok(Some(f)),
+            Ok(None) => self.local.get_by_key(session, key).await,
+            Err(e) => {
+                tracing::warn!("context: cloud get_by_key failed, trying local: {e}");
+                self.local.get_by_key(session, key).await
+            }
+        }
+    }
+
+    async fn list_session(
+        &self,
+        session: &str,
+        top_k: usize,
+    ) -> Result<Vec<ContextFragment>, ContextError> {
+        let local = self.local.list_session(session, top_k).await;
+        let cloud = self.cloud.list_session(session, top_k).await;
+        let (local, cloud) = match (local, cloud) {
+            (Ok(l), Ok(c)) => (l, c),
+            (Ok(l), Err(e)) => {
+                tracing::warn!("context: cloud list failed, using local only: {e}");
+                (l, Vec::new())
+            }
+            (Err(e), Ok(c)) => {
+                tracing::warn!("context: local list failed, using cloud only: {e}");
+                (Vec::new(), c)
+            }
+            (Err(e), Err(_)) => return Err(e),
+        };
+        let mut merged = merge_fragments(local, cloud);
+        merged.sort_by_key(|f| f.created_at);
+        merged.truncate(top_k);
+        Ok(merged)
+    }
+}
+
 /// In-process [`ContextStore`] used by tests and by the SDK default.
 ///
-/// Kept in `agent-core` so core's tests need no sled (and no dependency on the
-/// embedded store crate).
+/// Kept in `agent-core` so core's tests need no on-device database (and no
+/// dependency on the embedded store crate).
 pub struct MemoryContextStore {
     inner: RwLock<HashMap<String, ContextFragment>>,
 }
@@ -323,6 +533,25 @@ impl ContextStore for MemoryContextStore {
         Ok(g.values()
             .find(|f| f.session == session && f.key.as_deref() == Some(key))
             .cloned())
+    }
+
+    async fn list_session(
+        &self,
+        session: &str,
+        top_k: usize,
+    ) -> Result<Vec<ContextFragment>, ContextError> {
+        let g = self
+            .inner
+            .read()
+            .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+        let mut out: Vec<ContextFragment> = g
+            .values()
+            .filter(|f| f.session == session)
+            .cloned()
+            .collect();
+        out.sort_by_key(|f| f.created_at);
+        out.truncate(top_k);
+        Ok(out)
     }
 }
 
@@ -588,6 +817,237 @@ mod tests {
             .await
             .unwrap();
         assert!(notes.is_empty());
+    }
+
+    // --- MemoryBackend / composite ("both") backend ---
+
+    struct FailingStore;
+
+    #[async_trait]
+    impl ContextStore for FailingStore {
+        async fn memorize(&self, _frag: ContextFragment) -> Result<(), ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn recall(&self, _query: &RecallQuery) -> Result<Vec<ContextFragment>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn compact(&self, session: &str) -> Result<ContextFragment, ContextError> {
+            Err(ContextError::NotFound(session.to_string()))
+        }
+        async fn get_by_key(
+            &self,
+            _session: &str,
+            _key: &str,
+        ) -> Result<Option<ContextFragment>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn list_session(
+            &self,
+            _session: &str,
+            _top_k: usize,
+        ) -> Result<Vec<ContextFragment>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+    }
+
+    #[test]
+    fn memory_backend_parses_and_roundtrips() {
+        assert_eq!(MemoryBackend::default(), MemoryBackend::Cloud);
+        for (raw, expected) in [
+            ("cloud", MemoryBackend::Cloud),
+            ("local", MemoryBackend::Local),
+            ("both", MemoryBackend::Both),
+            (" LOCAL ", MemoryBackend::Local),
+        ] {
+            let parsed: MemoryBackend = raw.parse().unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), expected.as_str());
+            assert_eq!(parsed.to_string(), expected.as_str());
+        }
+        assert!("nope".parse::<MemoryBackend>().is_err());
+    }
+
+    #[test]
+    fn merge_fragments_dedupes_by_id_keeping_the_freshest() {
+        let mut older = ContextFragment::new("s", FragmentKind::Message, "old");
+        older.id = "id-1".into();
+        older.created_at = 1;
+        let mut newer = ContextFragment::new("s", FragmentKind::Message, "new");
+        newer.id = "id-1".into();
+        newer.created_at = 2;
+        let mut other = ContextFragment::new("s", FragmentKind::Note, "other");
+        other.id = "id-2".into();
+
+        let merged = merge_fragments(vec![older, other.clone()], vec![newer]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|f| f.id == "id-1" && f.content == "new"));
+        assert!(merged
+            .iter()
+            .any(|f| f.id == "id-2" && f.content == "other"));
+    }
+
+    #[test]
+    fn merge_fragments_falls_back_to_key_when_id_missing() {
+        let a = ContextFragment::new("s", FragmentKind::LongTerm, "v1").with_key("k");
+        let mut b = ContextFragment::new("s", FragmentKind::LongTerm, "v2").with_key("k");
+        b.created_at = a.created_at + 5;
+        let merged = merge_fragments(vec![a], vec![b]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].content, "v2");
+    }
+
+    #[tokio::test]
+    async fn composite_writes_to_both_backends() {
+        let local = MemoryContextStore::new();
+        let cloud = MemoryContextStore::new();
+        let composite = CompositeContextStore::new(local.clone(), cloud.clone());
+
+        composite
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "fact"))
+            .await
+            .unwrap();
+
+        let q = RecallQuery::new("s", "fact");
+        assert_eq!(local.recall(&q).await.unwrap().len(), 1);
+        assert_eq!(cloud.recall(&q).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn composite_tolerates_one_failing_write() {
+        let local = MemoryContextStore::new();
+        let composite = CompositeContextStore::new(local.clone(), Arc::new(FailingStore));
+        composite
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "kept"))
+            .await
+            .unwrap();
+        assert_eq!(
+            local
+                .recall(&RecallQuery::new("s", "kept"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let cloud_only =
+            CompositeContextStore::new(Arc::new(FailingStore), MemoryContextStore::new());
+        cloud_only
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "kept"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn composite_errors_when_every_write_fails() {
+        let composite = CompositeContextStore::new(Arc::new(FailingStore), Arc::new(FailingStore));
+        let res = composite
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "x"))
+            .await;
+        assert!(matches!(res, Err(ContextError::Storage(_))));
+    }
+
+    #[tokio::test]
+    async fn composite_recall_merges_and_dedupes() {
+        let local = MemoryContextStore::new();
+        let cloud = MemoryContextStore::new();
+        let composite = CompositeContextStore::new(local.clone(), cloud.clone());
+
+        // Same fragment id written on both sides must appear once.
+        let mut frag = ContextFragment::new("s", FragmentKind::LongTerm, "shared memory");
+        frag.id = "shared".into();
+        local.memorize(frag.clone()).await.unwrap();
+        cloud.memorize(frag).await.unwrap();
+        // Unique to each side (both match the query so both are recalled).
+        local
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::Note,
+                "local memory",
+            ))
+            .await
+            .unwrap();
+        cloud
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::Note,
+                "cloud memory",
+            ))
+            .await
+            .unwrap();
+
+        let out = composite
+            .recall(&RecallQuery {
+                session: "s".into(),
+                text: "memory".into(),
+                top_k: 10,
+                kind: None,
+            })
+            .await
+            .unwrap();
+        let shared_hits = out.iter().filter(|f| f.id == "shared").count();
+        assert_eq!(shared_hits, 1, "duplicate fragments must be collapsed");
+        assert!(out.iter().any(|f| f.content == "local memory"));
+        assert!(out.iter().any(|f| f.content == "cloud memory"));
+    }
+
+    #[tokio::test]
+    async fn composite_recall_survives_one_failing_backend() {
+        let local = MemoryContextStore::new();
+        local
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::Message,
+                "offline fact",
+            ))
+            .await
+            .unwrap();
+        let composite = CompositeContextStore::new(local, Arc::new(FailingStore));
+        let out = composite
+            .recall(&RecallQuery::new("s", "offline fact"))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 1);
+
+        let both_broken =
+            CompositeContextStore::new(Arc::new(FailingStore), Arc::new(FailingStore));
+        assert!(both_broken
+            .recall(&RecallQuery::new("s", "x"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn composite_get_by_key_prefers_cloud_then_local() {
+        let local = MemoryContextStore::new();
+        let cloud = MemoryContextStore::new();
+        local
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "from local").with_key("k"))
+            .await
+            .unwrap();
+        let composite = CompositeContextStore::new(local.clone(), cloud.clone());
+        assert_eq!(
+            composite
+                .get_by_key("s", "k")
+                .await
+                .unwrap()
+                .unwrap()
+                .content,
+            "from local"
+        );
+
+        cloud
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "from cloud").with_key("k"))
+            .await
+            .unwrap();
+        assert_eq!(
+            composite
+                .get_by_key("s", "k")
+                .await
+                .unwrap()
+                .unwrap()
+                .content,
+            "from cloud"
+        );
     }
 
     #[tokio::test]

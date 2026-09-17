@@ -3,7 +3,7 @@ name = "aria-agent-memo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "On-device / embedded context store for the agent platform (sled). Implements aria-agent-core's ContextStore contract; the cloud uses Postgres + pgvector instead."
+description = "On-device / local context store for the agent platform, backed by aria memo (SQLite). Implements aria-agent-core's ContextStore contract; the cloud uses Postgres + pgvector instead."
 
 [lib]
 name = "agent_memo"
@@ -15,5 +15,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
-sled = "0.34"
+rusqlite = { version = "0.32", features = ["bundled"] }
 aria-agent-core.workspace = true

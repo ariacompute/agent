@@ -186,7 +186,11 @@ describe("Session long-term memory", () => {
     await session.memorize("user_name", "Ada");
     expect(calls[0].url).toBe("http://aria.test/v1/agents/sessions/sess_1/memory");
     expect(calls[0].init.method).toBe("POST");
-    expect(JSON.parse(calls[0].init.body)).toEqual({ key: "user_name", value: "Ada" });
+    expect(JSON.parse(calls[0].init.body)).toEqual({
+      key: "user_name",
+      value: "Ada",
+      kind: "long_term",
+    });
   });
 
   test("recall reads the value and returns null when missing", async () => {

@@ -6,6 +6,25 @@
  * `runStreamed`, `tool`, `Session`, `result.finalOutput`, `result.history`.
  */
 
+/// Where the memory context lives: agent-cloud, aria memo (local), or both.
+export type MemoryBackend = "cloud" | "local" | "both";
+
+/// Per-call backend override for `memorize` / `recall`.
+export interface MemoryOptions {
+  backend?: MemoryBackend;
+}
+
+/// Memory configuration shared by `Agent` and `Session`.
+export interface MemoryConfig extends ClientOptions {
+  backend?: MemoryBackend;
+  /** `aria-memo` binary for the local backend (default `aria-memo`). */
+  memoBin?: string;
+  /** aria memo database path (default `memo.db`). */
+  memoDb?: string;
+  /** Injectable `aria-memo` runner (tests). */
+  exec?: (args: string[]) => Promise<string>;
+}
+
 export interface ClientOptions {
   /** Base URL of the aria-agent-cloud service (e.g. `http://localhost:3000`). */
   baseUrl?: string;
@@ -42,6 +61,8 @@ export interface AgentConfig {
   id?: string;
   /** Client configuration used when this agent runs. */
   client?: ClientOptions;
+  /** Memory backend configuration (`cloud` / `local` / `both`). */
+  memory?: MemoryConfig;
 }
 
 export type Role = "user" | "assistant" | "system";

@@ -273,6 +273,32 @@ JS / Python SDK 是服务仍然暴露的 beta Agents REST API 的薄客户端 �
 `long_term` 上下文片段持久化，同一会话的后续轮次可以语义召回它（重启后依然有效）。
 云端 SDK 的存储是 Postgres + pgvector；原生 SDK 的存储是端侧（on-device）存储。
 
+### 记忆后端：cloud / local / both
+
+每个 SDK 都可以选择记忆上下文存放在哪里：
+
+| 后端 | 存储 | 说明 |
+|---|---|---|
+| `cloud` | agent-cloud（Postgres + pgvector） | 跨设备共享；需要服务在运行 |
+| `local` | **aria memo**（SQLite，`memo.db`） | 端侧、可离线；可用 `aria-memo list --json` 查看 |
+| `both` | 云端 **与** 本地 | 双写；读取合并去重（云端副本优先） |
+
+既可以在 agent / session 构造时配置，也可以单次调用覆盖：
+
+```python
+agent = Agent(name="History tutor", memory_backend="both", memo_db="~/.ariacompute/memo.db")
+session.memorize("user_name", "Ada")                    # -> 写入 both
+session.recall("user_name", backend="local")            # -> 只读 local 副本
+```
+
+```typescript
+const agent = new Agent({ name: "History tutor", memory: "both", memoDb: "~/.ariacompute/memo.db" });
+await session.memorize("user_name", "Ada");                       // -> 写入 both
+await session.recall("user_name", { backend: "local" });          // -> 只读 local 副本
+```
+
+`both` 不伪造数据：单端失败只记录告警并容忍，双端都失败才报错。
+
 ### Python
 
 ```python
@@ -292,6 +318,9 @@ agent = Agent(
     instructions="Answer history questions clearly and concisely.",
     model="gpt-4o-mini",
     tools=[history_fun_fact],
+    # 记忆后端：cloud | local（aria memo）| both
+    memory_backend="both",
+    memo_db="~/.ariacompute/memo.db",
 )
 
 
@@ -310,6 +339,7 @@ async def main() -> None:
     second = await Runner.run(agent, "我叫什么名字？", session=session)
     print(second.final_output)
     print(session.recall("user_name"))  # -> "Ada"
+    print(session.recall("user_name", backend="local"))  # 只读 local（aria memo）副本
 
     # 3) 流式运行
     streamed = await Runner.run_streamed(agent, "讲一个冷知识", session=session)
@@ -339,6 +369,9 @@ const agent = new Agent({
   instructions: "Answer history questions clearly and concisely.",
   model: "gpt-4o-mini",
   tools: [historyFunFact],
+  // 记忆后端：cloud | local（aria memo）| both
+  memory: "both",
+  memoDb: "~/.ariacompute/memo.db",
 });
 
 const session = await Session.create(agent);
@@ -355,6 +388,7 @@ await session.memorize("user_name", "Ada");
 const second = await run(agent, "我叫什么名字？", { session });
 console.log(second.finalOutput);
 console.log(await session.recall("user_name")); // -> "Ada"
+console.log(await session.recall("user_name", { backend: "local" })); // 只读 aria memo
 
 // 3) 流式运行
 const streamed = await runStreamed(agent, "讲一个冷知识", { session });
@@ -383,7 +417,18 @@ impl SdkAgentListener for Printer {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
-    let agent = create_agent("History tutor".into(), "gpt-4o-mini".into())?;
+    // `memory` 选择 cloud | local（aria memo）| both，默认 `local`
+    let agent = create_agent_with(SdkAgentConfig {
+        agent_name: "History tutor".into(),
+        model: "gpt-4o-mini".into(),
+        memory: SdkMemoryConfig {
+            backend: "both".into(),
+            local_db_path: "~/.ariacompute/memo.db".into(),
+            cloud_base_url: "http://localhost:3000".into(),
+            cloud_api_key: String::new(),
+        },
+        ..Default::default()
+    })?;
 
     // 1) 一次性运行
     println!("{}", agent.run("罗马帝国何时灭亡？".into())?);
@@ -395,7 +440,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
     println!("{}", agent.run("我叫什么名字？".into())?);
-    println!("{:?}", session.recall("user_name".into())?); // -> Some("Ada")
+    println!("{:?}", session.recall("user_name".into(), None)?); // -> Some("Ada")
+    // 单次覆盖：只读 aria memo 副本
+    println!("{:?}", session.recall("user_name".into(), Some("local".into()))?);
 
     // 3) 流式运行 —— 事件推送给监听器
     agent.run_stream("讲一个冷知识".into(), Box::new(Printer))?;
@@ -412,7 +459,19 @@ import AriaAgent
 
 do {
     // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
-    let agent = try createAgent(agentName: "History tutor", model: "gpt-4o-mini")
+    // `memory` 选择 cloud | local（aria memo）| both，默认 `local`
+    let agent = try createAgentWith(config: SdkAgentConfig(
+        agentName: "History tutor",
+        instructions: "",
+        model: "gpt-4o-mini",
+        sandboxProvider: "docker",
+        memory: SdkMemoryConfig(
+            backend: "both",
+            localDbPath: "~/.ariacompute/memo.db",
+            cloudBaseUrl: "http://localhost:3000",
+            cloudApiKey: ""
+        )
+    ))
 
     // 1) 一次性运行
     print(try agent.run("罗马帝国何时灭亡？"))
@@ -424,7 +483,9 @@ do {
 
     // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
     print(try agent.run("我叫什么名字？"))
-    print(try session.recall(key: "user_name") ?? "")   // -> "Ada"
+    print(try session.recall(key: "user_name", backend: nil) ?? "")   // -> "Ada"
+    // 单次覆盖：只读 aria memo 副本
+    print(try session.recall(key: "user_name", backend: "local") ?? "")
 
     // 3) 流式运行 —— 事件交给监听器处理
     try agent.runStream("讲一个冷知识", listener: Printer())
@@ -443,7 +504,21 @@ import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
 fun main() {
     // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
-    val agent = createAgent("History tutor", "gpt-4o-mini")
+    // `memory` 选择 cloud | local（aria memo）| both，默认 `local`
+    val agent = createAgentWith(
+        SdkAgentConfig(
+            agentName = "History tutor",
+            instructions = "",
+            model = "gpt-4o-mini",
+            sandboxProvider = "docker",
+            memory = SdkMemoryConfig(
+                backend = "both",
+                localDbPath = "~/.ariacompute/memo.db",
+                cloudBaseUrl = "http://localhost:3000",
+                cloudApiKey = ""
+            )
+        )
+    )
 
     // 1) 一次性运行
     println(agent.run("罗马帝国何时灭亡？"))
@@ -455,7 +530,9 @@ fun main() {
 
     // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
     println(agent.run("我叫什么名字？"))
-    println(session.recall("user_name"))   // -> "Ada"
+    println(session.recall("user_name", null))   // -> "Ada"
+    // 单次覆盖：只读 aria memo 副本
+    println(session.recall("user_name", "local"))
 
     // 3) 流式运行 —— 事件交给监听器处理
     agent.runStream("讲一个冷知识", Printer())

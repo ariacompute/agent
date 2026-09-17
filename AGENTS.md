@@ -6,7 +6,7 @@ language (JS/Python) SDKs.
 
 ## Workspace layout
 
-* `crates/aria-agent-core`, `aria-agent-sandbox`, `aria-agent-memo`,
+* `crates/aria-agent-core`, `aria-agent-sandbox`, `aria-agent-memo` (aria memo),
   `ariacompute-agent`, `aria-agent-cloud`, `aria-agent-ffigen`
 * `bindings/swift` (`Package.swift` SwiftPM + `AriaAgent.podspec` CocoaPods),
   `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
@@ -20,16 +20,21 @@ language (JS/Python) SDKs.
 
 ## Rules
 
-1. **Context storage is tiered.**
+1. **Context storage is tiered, and SDKs can switch backends.**
    * **Cloud**: conversational / long-term context lives in **Postgres +
      pgvector** (`context_fragments`), sharded by `principal_id`. pgvector is a
      hard requirement — boot fails if the `vector` extension is missing
      (`docs/adr/0010-context-storage-pgvector.md`).
-   * **On-device**: `aria-agent-memo` keeps the embedded sled store for the
-     native SDK (offline-first). Dependency direction is memo → core.
+   * **Local**: `aria-agent-memo` is the **aria memo** store (SQLite, the same
+     `memories` schema as the `aria-memo` CLI). The sled implementation was
+     deleted — there is no second on-device format.
+   * **Every SDK selects `cloud` / `local` / `both`** via constructor config
+     with per-call overrides; `both` writes twice and reads merged + deduped
+     (`docs/adr/0011-memory-backend-switch.md`).
    * The shared contract is `aria-agent-core::context` (`ContextStore`,
-     `ContextFragment`, `FragmentKind`, `RecallQuery`, `LocalEmbedder`, ranking
-     helpers). Never bypass it with ad-hoc queries.
+     `ContextFragment`, `FragmentKind`, `RecallQuery`, `LocalEmbedder`,
+     `MemoryBackend`, `CompositeContextStore`, ranking helpers). Never bypass it
+     with ad-hoc queries.
 2. **FFI is stable.** Only change `ariacompute-agent`'s exported surface
    deliberately. After any change run `just ffi` and commit the regenerated
    bindings. See `docs/adr/0002-ffi-boundary.md`. The public SDK ergonomics

@@ -3,7 +3,7 @@
  * from the OpenAI Agents SDK.
  */
 
-import type { AgentConfig, ClientOptions, ToolSpec } from "./types.js";
+import type { AgentConfig, ClientOptions, MemoryConfig, ToolSpec } from "./types.js";
 
 export class Agent {
   readonly name: string;
@@ -14,6 +14,8 @@ export class Agent {
   readonly handoffDescription?: string;
   readonly id?: string;
   readonly client: ClientOptions;
+  /** Memory backend configuration (`cloud` / `local` / `both`). */
+  readonly memory: MemoryConfig;
 
   constructor(config: AgentConfig) {
     if (!config.name || !config.name.trim()) {
@@ -27,6 +29,7 @@ export class Agent {
     this.handoffDescription = config.handoffDescription;
     this.id = config.id;
     this.client = config.client ?? {};
+    this.memory = config.memory ?? {};
   }
 
   /** Static factory, matching `Agent.create({...})` in the Agents SDK. */
@@ -45,6 +48,7 @@ export class Agent {
       handoffDescription: overrides.handoffDescription ?? this.handoffDescription,
       id: overrides.id ?? this.id,
       client: overrides.client ?? this.client,
+      memory: overrides.memory ?? this.memory,
     });
   }
 

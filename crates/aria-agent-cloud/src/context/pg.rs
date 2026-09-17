@@ -250,6 +250,24 @@ impl ContextStore for PgContextStore {
         .map_err(|e| ContextError::Storage(e.to_string()))?;
         row.as_ref().map(row_to_fragment).transpose()
     }
+
+    async fn list_session(
+        &self,
+        session: &str,
+        top_k: usize,
+    ) -> Result<Vec<ContextFragment>, ContextError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SELECT_COLS} FROM context_fragments \
+             WHERE principal_id = $1 AND session_id = $2 ORDER BY created_at LIMIT $3"
+        ))
+        .bind(&self.principal_id)
+        .bind(session)
+        .bind(top_k as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ContextError::Storage(e.to_string()))?;
+        rows.iter().map(row_to_fragment).collect()
+    }
 }
 
 #[cfg(test)]

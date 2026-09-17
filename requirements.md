@@ -45,6 +45,9 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   `result.final_output`, `result.to_input_list()`.
 * Both are thin clients over the beta Agents REST API (no duplicated agent loop);
   tool *schemas* are forwarded, tool *execution* stays in the cloud sandbox.
+* **Memory backend switch**: every SDK accepts `cloud` / `local` / `both`
+  (constructor config + per-call override); `local` is aria memo.
+
 * **Native SDK (UniFFI, Swift / Kotlin)**: stable FFI surface — `SdkAgent`
   (`run`, `run_stream`, `session`, `session_id`), `SdkSession`
   (`memorize`, `recall`), `create_agent`, `create_agent_with`,
@@ -67,7 +70,8 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 * Local hashing-trick `LocalEmbedder` (TF + L2 normalized, zero ML deps);
   ranking blends `0.7 * cosine + 0.3 * keyword`, exact key matches rank first.
 * Cloud: `PgContextStore` (pgvector KNN + keyword candidates, tenant scoped).
-  On-device: `SledContextStore` (embedded sled, offline-first).
+  Local: `MemoContextStore` (aria memo / SQLite, offline-first). `both`:
+  `CompositeContextStore` (double write + merged, deduped reads).
 * Covered by unit tests for normal paths (roundtrip, kind/session filtering,
   embedding population, semantic ranking, tenant isolation) and abnormal paths
   (empty query, missing session → `NotFound`, empty embedding text).

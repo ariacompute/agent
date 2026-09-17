@@ -276,6 +276,11 @@ void*_Nonnull uniffi_aria_agent_ffi_fn_clone_sdkagent(void*_Nonnull ptr, RustCal
 void uniffi_aria_agent_ffi_fn_free_sdkagent(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_MEMORY_BACKEND
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_MEMORY_BACKEND
+RustBuffer uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_RUN
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_RUN
 RustBuffer uniffi_aria_agent_ffi_fn_method_sdkagent_run(void*_Nonnull ptr, RustBuffer input, RustCallStatus *_Nonnull out_status
@@ -308,12 +313,17 @@ void uniffi_aria_agent_ffi_fn_free_sdksession(void*_Nonnull ptr, RustCallStatus 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_MEMORIZE
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_MEMORIZE
-void uniffi_aria_agent_ffi_fn_method_sdksession_memorize(void*_Nonnull ptr, RustBuffer key, RustBuffer value, RustCallStatus *_Nonnull out_status
+void uniffi_aria_agent_ffi_fn_method_sdksession_memorize(void*_Nonnull ptr, RustBuffer key, RustBuffer value, RustBuffer backend, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_MEMORY_BACKEND
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_MEMORY_BACKEND
+RustBuffer uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_RECALL
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_RECALL
-RustBuffer uniffi_aria_agent_ffi_fn_method_sdksession_recall(void*_Nonnull ptr, RustBuffer key, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_aria_agent_ffi_fn_method_sdksession_recall(void*_Nonnull ptr, RustBuffer key, RustBuffer backend, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_SDKAGENTLISTENER
@@ -645,6 +655,12 @@ uint16_t uniffi_aria_agent_ffi_checksum_func_create_agent_with(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_MEMORY_BACKEND
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_MEMORY_BACKEND
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_RUN
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_RUN
 uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_run(void
@@ -672,6 +688,12 @@ uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKSESSION_MEMORIZE
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKSESSION_MEMORIZE
 uint16_t uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKSESSION_MEMORY_BACKEND
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKSESSION_MEMORY_BACKEND
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend(void
     
 );
 #endif

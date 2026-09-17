@@ -149,6 +149,25 @@ see `docs/followups/*` for the downstream cleanups.
 - [x] CI: `publish-npm.yml`, `publish-pypi.yml`; `publish-cargo.yml` order
       updated to sandbox → core → memo → ariacompute-agent.
 
+## Milestone 13 — SDK memory backend switch (cloud / local / both)
+- [x] `aria-agent-core::context`: `MemoryBackend` (cloud | local | both),
+      `CompositeContextStore` (double write + merged/deduped reads),
+      `merge_fragments`, and `ContextStore::list_session`.
+- [x] Deleted the sled implementation: `aria-agent-memo` is now
+      `MemoContextStore` (aria memo / SQLite via rusqlite, same `memories`
+      schema / `memo_type` / embedding BLOB as the `aria-memo` CLI).
+- [x] `ariacompute-agent`: `CloudContextStore` (reqwest → cloud memory REST),
+      `SdkMemoryConfig` on `SdkAgentConfig`, `backend` override on
+      `SdkSession.memorize/recall`, `just ffi` bindings regenerated.
+- [x] JS SDK: `memory` / `memoBin` / `memoDb` config, `LocalMemoryStore`
+      (aria-memo CLI, injectable exec), `CompositeMemoryStore`.
+- [x] Python SDK: `memory_backend` / `memo_db`, `LocalMemoryStore` (stdlib
+      sqlite3, aria memo schema), `CloudMemoryStore`, `CompositeMemoryStore`.
+- [x] Cloud memory endpoints accept unkeyed fragments + `kind`, and
+      `GET …/memory` lists the session when no `text` is given.
+- [x] Docs: `docs/adr/0011-memory-backend-switch.md`, README/README_cn five
+      language examples, AGENTS.md rule 1, requirements.md §3/§5.
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.

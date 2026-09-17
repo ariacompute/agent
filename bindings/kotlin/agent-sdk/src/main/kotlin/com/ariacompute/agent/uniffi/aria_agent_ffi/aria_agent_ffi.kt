@@ -757,6 +757,10 @@ internal open class UniffiVTableCallbackInterfaceSdkAgentListener(
 
 
 
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -781,6 +785,8 @@ internal interface UniffiLib : Library {
     ): Pointer
     fun uniffi_aria_agent_ffi_fn_free_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_aria_agent_ffi_fn_method_sdkagent_run(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(`ptr`: Pointer,`input`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -793,9 +799,11 @@ internal interface UniffiLib : Library {
     ): Pointer
     fun uniffi_aria_agent_ffi_fn_free_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_aria_agent_ffi_fn_method_sdksession_memorize(`ptr`: Pointer,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_sdksession_memorize(`ptr`: Pointer,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,`backend`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_aria_agent_ffi_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,`backend`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(`vtable`: UniffiVTableCallbackInterfaceSdkAgentListener,
     ): Unit
@@ -927,6 +935,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_aria_agent_ffi_checksum_func_create_agent_with(
     ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend(
+    ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream(
@@ -936,6 +946,8 @@ internal interface UniffiLib : Library {
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdksession_recall(
     ): Short
@@ -958,16 +970,19 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 16266.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 7131.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 59195.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 41014.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 42291.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 4189.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend() != 43728.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471.toShort()) {
@@ -982,10 +997,13 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 6609.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 5103.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 50855.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend() != 60477.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 29904.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event() != 35179.toShort()) {
@@ -1263,6 +1281,11 @@ private class JavaLangRefCleanable(
 public interface SdkAgentInterface {
     
     /**
+     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     */
+    fun `memoryBackend`(): kotlin.String
+    
+    /**
      * Run a single turn and return the assistant reply.
      */
     fun `run`(`input`: kotlin.String): kotlin.String
@@ -1372,6 +1395,21 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
             UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_sdkagent(pointer!!, status)
         }
     }
+
+    
+    /**
+     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     */override fun `memoryBackend`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(
+        it, _status)
+}
+    }
+    )
+    }
+    
 
     
     /**
@@ -1574,27 +1612,42 @@ public object FfiConverterTypeSdkAgent: FfiConverter<SdkAgent, Pointer> {
 
 
 /**
- * A session's context handle (long-term / externalized memory). The on-device
- * store is embedded (sled); the cloud uses Postgres + pgvector.
+ * A session's context handle (long-term / externalized memory).
+ *
+ * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
+ * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
+ * override it for a single call.
  */
 public interface SdkSessionInterface {
     
     /**
      * Write a long-term memory under `key`.
+     *
+     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
+     * this call; pass `null` to use the default.
      */
-    fun `memorize`(`key`: kotlin.String, `value`: kotlin.String)
+    fun `memorize`(`key`: kotlin.String, `value`: kotlin.String, `backend`: kotlin.String?)
     
     /**
-     * Read a long-term memory by `key`.
+     * The backend this session defaults to (`cloud` / `local` / `both`).
      */
-    fun `recall`(`key`: kotlin.String): kotlin.String?
+    fun `memoryBackend`(): kotlin.String
+    
+    /**
+     * Read a long-term memory by `key` (same `backend` override as
+     * [`SdkSession::memorize`]).
+     */
+    fun `recall`(`key`: kotlin.String, `backend`: kotlin.String?): kotlin.String?
     
     companion object
 }
 
 /**
- * A session's context handle (long-term / externalized memory). The on-device
- * store is embedded (sled); the cloud uses Postgres + pgvector.
+ * A session's context handle (long-term / externalized memory).
+ *
+ * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
+ * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
+ * override it for a single call.
  */
 open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 
@@ -1680,13 +1733,16 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
     
     /**
      * Write a long-term memory under `key`.
+     *
+     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
+     * this call; pass `null` to use the default.
      */
-    @Throws(SdkException::class)override fun `memorize`(`key`: kotlin.String, `value`: kotlin.String)
+    @Throws(SdkException::class)override fun `memorize`(`key`: kotlin.String, `value`: kotlin.String, `backend`: kotlin.String?)
         = 
     callWithPointer {
     uniffiRustCallWithError(SdkException) { _status ->
     UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_memorize(
-        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`value`),_status)
+        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`value`),FfiConverterOptionalString.lower(`backend`),_status)
 }
     }
     
@@ -1694,14 +1750,30 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 
     
     /**
-     * Read a long-term memory by `key`.
+     * The backend this session defaults to (`cloud` / `local` / `both`).
+     */override fun `memoryBackend`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Read a long-term memory by `key` (same `backend` override as
+     * [`SdkSession::memorize`]).
      */
-    @Throws(SdkException::class)override fun `recall`(`key`: kotlin.String): kotlin.String? {
+    @Throws(SdkException::class)override fun `recall`(`key`: kotlin.String, `backend`: kotlin.String?): kotlin.String? {
             return FfiConverterOptionalString.lift(
     callWithPointer {
     uniffiRustCallWithError(SdkException) { _status ->
     UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_recall(
-        it, FfiConverterString.lower(`key`),_status)
+        it, FfiConverterString.lower(`key`),FfiConverterOptionalString.lower(`backend`),_status)
 }
     }
     )
@@ -1756,7 +1828,8 @@ data class SdkAgentConfig (
     var `agentName`: kotlin.String, 
     var `instructions`: kotlin.String, 
     var `model`: kotlin.String, 
-    var `sandboxProvider`: kotlin.String
+    var `sandboxProvider`: kotlin.String, 
+    var `memory`: SdkMemoryConfig
 ) {
     
     companion object
@@ -1772,6 +1845,7 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterTypeSdkMemoryConfig.read(buf),
         )
     }
 
@@ -1779,7 +1853,8 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.allocationSize(value.`agentName`) +
             FfiConverterString.allocationSize(value.`instructions`) +
             FfiConverterString.allocationSize(value.`model`) +
-            FfiConverterString.allocationSize(value.`sandboxProvider`)
+            FfiConverterString.allocationSize(value.`sandboxProvider`) +
+            FfiConverterTypeSdkMemoryConfig.allocationSize(value.`memory`)
     )
 
     override fun write(value: SdkAgentConfig, buf: ByteBuffer) {
@@ -1787,6 +1862,66 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.write(value.`instructions`, buf)
             FfiConverterString.write(value.`model`, buf)
             FfiConverterString.write(value.`sandboxProvider`, buf)
+            FfiConverterTypeSdkMemoryConfig.write(value.`memory`, buf)
+    }
+}
+
+
+
+/**
+ * Where the agent's memory context lives.
+ *
+ * `backend` is `cloud` | `local` | `both` (unknown values fall back to
+ * `local`, the offline-first default for the native SDK).
+ */
+data class SdkMemoryConfig (
+    /**
+     * `cloud` | `local` | `both`.
+     */
+    var `backend`: kotlin.String, 
+    /**
+     * aria memo database path (empty ⇒ a temporary per-process database).
+     */
+    var `localDbPath`: kotlin.String, 
+    /**
+     * agent-cloud base URL for the `cloud` / `both` backends
+     * (empty ⇒ `ARIA_AGENT_BASE_URL` or `http://localhost:3000`).
+     */
+    var `cloudBaseUrl`: kotlin.String, 
+    /**
+     * API key for the cloud backend (empty ⇒ `ARIA_AGENT_API_KEY`).
+     */
+    var `cloudApiKey`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSdkMemoryConfig: FfiConverterRustBuffer<SdkMemoryConfig> {
+    override fun read(buf: ByteBuffer): SdkMemoryConfig {
+        return SdkMemoryConfig(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SdkMemoryConfig) = (
+            FfiConverterString.allocationSize(value.`backend`) +
+            FfiConverterString.allocationSize(value.`localDbPath`) +
+            FfiConverterString.allocationSize(value.`cloudBaseUrl`) +
+            FfiConverterString.allocationSize(value.`cloudApiKey`)
+    )
+
+    override fun write(value: SdkMemoryConfig, buf: ByteBuffer) {
+            FfiConverterString.write(value.`backend`, buf)
+            FfiConverterString.write(value.`localDbPath`, buf)
+            FfiConverterString.write(value.`cloudBaseUrl`, buf)
+            FfiConverterString.write(value.`cloudApiKey`, buf)
     }
 }
 
@@ -2135,7 +2270,9 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 }
         /**
          * Minimal quickstart entry — `Agent(name, model)`, no session required.
-         * The sandbox defaults to Docker. Streaming is via [`SdkAgent::run_stream`].
+         *
+         * The sandbox defaults to Docker and the memory backend to **local**
+         * (aria memo). Streaming is via [`SdkAgent::run_stream`].
          */
     @Throws(SdkException::class) fun `createAgent`(`agentName`: kotlin.String, `model`: kotlin.String): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(
@@ -2148,8 +2285,9 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
     
 
         /**
-         * Minimal tenant-scoped quickstart entry (per-tenant memo isolation like the
-         * cloud enforces server-side). Empty `tenant_id` behaves like [`create_agent`].
+         * Minimal tenant-scoped quickstart entry: the tenant id selects a separate
+         * aria memo database (local backend). Empty `tenant_id` behaves like
+         * [`create_agent`].
          */
     @Throws(SdkException::class) fun `createAgentForTenant`(`tenantId`: kotlin.String, `agentName`: kotlin.String, `model`: kotlin.String): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(
@@ -2176,7 +2314,7 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 
         /**
          * Advanced entry accepting a full [`SdkAgentConfig`] (instructions, custom
-         * sandbox, …).
+         * sandbox, memory backend, …).
          */
     @Throws(SdkException::class) fun `createAgentWith`(`config`: SdkAgentConfig): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Union
 
+from .memory import MemoryBackend
 from .tool import tool_from_function
 from .types import ClientOptions, ToolSpec
 
@@ -30,6 +31,8 @@ class Agent:
         handoff_description: Optional[str] = None,
         id: Optional[str] = None,
         client: Optional[ClientOptions] = None,
+        memory_backend: Union[str, MemoryBackend, None] = None,
+        memo_db: Optional[str] = None,
     ) -> None:
         if not name or not name.strip():
             raise ValueError("Agent requires a `name`")
@@ -41,6 +44,11 @@ class Agent:
         self.handoff_description = handoff_description
         self.id = id
         self.client = client or ClientOptions()
+        self.memory_backend = (
+            MemoryBackend.parse(memory_backend) if memory_backend is not None
+            else MemoryBackend.CLOUD
+        )
+        self.memo_db = memo_db
 
     @staticmethod
     def _coerce_tool(t: Any) -> ToolSpec:
@@ -61,6 +69,8 @@ class Agent:
             handoff_description=self.handoff_description,
             id=self.id,
             client=self.client,
+            memory_backend=self.memory_backend,
+            memo_db=self.memo_db,
         )
         params.update(overrides)
         return Agent(**params)

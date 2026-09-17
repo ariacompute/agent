@@ -1,9 +1,14 @@
-"""``Session`` — a server-side agent session (``/v1/agents/sessions``)."""
+"""``Session`` — a server-side agent session plus its memory backend."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
+from .memory import (
+    CompositeMemoryStore,
+    MemoryBackend,
+    build_store,
+)
 from .transport import get_json, post_json, resolve_client
 from .types import ClientOptions, HistoryInput
 
@@ -12,7 +17,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 class Session:
-    """Carries the conversation state across runs.
+    """Carries the conversation state (and memory backend) across runs.
 
     ```python
     session = await Session.create(agent)
@@ -25,10 +30,15 @@ class Session:
         id: str,
         client: Optional[ClientOptions] = None,
         history: Optional[list[HistoryInput]] = None,
+        backend: Union[str, MemoryBackend, None] = None,
+        memo_db: Optional[str] = None,
     ) -> None:
         self.id = id
         self.client = client or ClientOptions()
         self.history: list[HistoryInput] = history or []
+        self.backend = MemoryBackend.parse(backend) if backend is not None else MemoryBackend.CLOUD
+        self.memo_db = memo_db
+        self._default = build_store(self.backend, self.id, self.client, self.memo_db)
 
     @classmethod
     def create(cls, agent: "Agent", client: Optional[ClientOptions] = None) -> "Session":
@@ -45,23 +55,48 @@ class Session:
         if agent.instructions:
             body["instructions"] = agent.instructions
         res = post_json(resolved, "/v1/agents/sessions", body)
-        return cls(res["id"], client or agent.client)
+        return cls(
+            res["id"],
+            client or agent.client,
+            backend=agent.memory_backend,
+            memo_db=agent.memo_db,
+        )
 
-    def memorize(self, key: str, value: str) -> None:
-        """Write a keyed long-term memory for this session.
+    def _store(self, backend: Union[str, MemoryBackend, None]) -> object:
+        if backend is None:
+            return self._default
+        parsed = MemoryBackend.parse(backend)
+        if parsed is self.backend:
+            return self._default
+        if parsed is MemoryBackend.BOTH:
+            return CompositeMemoryStore(
+                *self._sides(),
+            )
+        return build_store(parsed, self.id, self.client, self.memo_db)
 
-        The value is persisted in the session's context store (Postgres +
-        pgvector on the cloud, the on-device store for native SDKs) and is
-        recallable by every later turn of the session — even after a restart.
+    def _sides(self) -> tuple:
+        from .memory import CloudMemoryStore, LocalMemoryStore
+
+        return (
+            LocalMemoryStore(self.memo_db),
+            CloudMemoryStore(self.id, self.client),
+        )
+
+    def memorize(
+        self, key: str, value: str, backend: Union[str, MemoryBackend, None] = None
+    ) -> None:
+        """Write a keyed long-term memory.
+
+        ``backend`` (``cloud`` / ``local`` / ``both``) overrides the session
+        default for this call. ``local`` writes to the aria memo (SQLite) store.
         """
-        resolved = resolve_client(self.client)
-        post_json(resolved, f"/v1/agents/sessions/{self.id}/memory", {"key": key, "value": value})
+        self._store(backend).put(key, value)
 
-    def recall(self, key: str) -> Optional[str]:
+    def recall(
+        self, key: str, backend: Union[str, MemoryBackend, None] = None
+    ) -> Optional[str]:
         """Read a keyed long-term memory (missing keys return ``None``)."""
-        resolved = resolve_client(self.client)
-        res = get_json(resolved, f"/v1/agents/sessions/{self.id}/memory/{key}")
-        return res.get("value")
+        return self._store(backend).get(key)
 
     def record(self, user_input: HistoryInput, output: str) -> None:
         """Append the exchange to the client-side history mirror."""

@@ -12,11 +12,12 @@ use sqlx::Row;
 use crate::api::agents::{fetch_agent, new_id, now_ms};
 use crate::api::error_response;
 use crate::types::{
-    AgentSession, CreateSessionRequest, ListResponse, MemoryView, PutMemoryRequest, SessionAgent,
+    AgentSession, CreateSessionRequest, ListResponse, MemoryItem, PutMemoryRequest, SessionAgent,
     SessionDeleted, SessionInputEvent, SessionItem, SessionTurn, Subagent, UpdateSessionRequest,
     ITEM_OBJECT, SESSION_OBJECT, SUBAGENT_OBJECT, TURN_OBJECT,
 };
 use crate::{agent_tools, AppError, AppState, Principal, PrincipalKind};
+use agent_core::context::RecallQuery;
 use agent_core::context::{ContextFragment, ContextStore, FragmentKind};
 
 const SESSION_COLS: &str = "id, principal_id, agent_id, instructions, status, \
@@ -370,51 +371,133 @@ pub async fn stream_session_events(
 
 // --------------------------------------------------------- long-term memory
 
-/// `POST /v1/agents/sessions/{id}/memory` — write a keyed long-term memory.
+/// `POST /v1/agents/sessions/{id}/memory` — write a memory fragment.
 ///
-/// The fragment lands in the session's context store (Postgres + pgvector for
-/// the cloud, the on-device store for native SDKs) and becomes recallable by
-/// every later turn of that session.
+/// `key` is optional: a keyed write is a long-term memory (recallable via
+/// `GET …/memory/{key}`), an unkeyed write is an ordinary context fragment
+/// (message / tool result) that still participates in semantic recall.
 pub async fn put_session_memory(
     State(state): State<AppState>,
     principal: Principal,
     Path(session_id): Path<String>,
     Json(body): Json<PutMemoryRequest>,
-) -> Result<Json<MemoryView>, AppError> {
-    if body.key.trim().is_empty() {
-        return Err(AppError::BadRequest("key is empty".into()));
-    }
+) -> Result<Json<MemoryItem>, AppError> {
     let _row = fetch_session(&state, &principal, &session_id).await?;
+    let kind = match body.kind.as_deref() {
+        None | Some("long_term") => FragmentKind::LongTerm,
+        Some("message") => FragmentKind::Message,
+        Some("tool_result") => FragmentKind::ToolResult,
+        Some("note") => FragmentKind::Note,
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "unknown fragment kind: {other}"
+            )))
+        }
+    };
+    let mut frag = ContextFragment::new(&session_id, kind, body.value.clone());
+    if let Some(key) = body.key.as_deref().filter(|k| !k.trim().is_empty()) {
+        frag = frag.with_key(key);
+    }
     let store = state.context_for(&principal);
     store
-        .memorize(
-            ContextFragment::new(&session_id, FragmentKind::LongTerm, body.value.clone())
-                .with_key(body.key.clone()),
-        )
+        .memorize(frag.clone())
         .await
         .map_err(|e| AppError::BadRequest(format!("memory write failed: {e}")))?;
-    Ok(Json(MemoryView {
-        key: body.key,
-        value: Some(body.value),
+    Ok(Json(MemoryItem {
+        id: frag.id,
+        key: frag.key,
+        kind: kind.as_str().to_string(),
+        content: frag.content,
+        created_at: frag.created_at,
     }))
 }
 
-/// `GET /v1/agents/sessions/{id}/memory/{key}` — read a keyed long-term memory.
+/// `GET /v1/agents/sessions/{id}/memory/{key}` — read a keyed memory.
 pub async fn get_session_memory(
     State(state): State<AppState>,
     principal: Principal,
     Path((session_id, key)): Path<(String, String)>,
-) -> Result<Json<MemoryView>, AppError> {
+) -> Result<Json<MemoryItem>, AppError> {
     let _row = fetch_session(&state, &principal, &session_id).await?;
     let store = state.context_for(&principal);
     let frag = store
         .get_by_key(&session_id, &key)
         .await
         .map_err(|e| AppError::BadRequest(format!("memory read failed: {e}")))?;
-    Ok(Json(MemoryView {
-        key,
-        value: frag.map(|f| f.content),
-    }))
+    match frag {
+        Some(f) => Ok(Json(MemoryItem {
+            id: f.id,
+            key: f.key,
+            kind: f.kind.as_str().to_string(),
+            content: f.content,
+            created_at: f.created_at,
+        })),
+        None => Err(AppError::NotFound),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryQuery {
+    /// Semantic / keyword query. Omitted (or empty) lists the session's memory.
+    text: Option<String>,
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    20
+}
+
+/// `GET /v1/agents/sessions/{id}/memory?text=…&top_k=…` — recall memory.
+///
+/// With `text` the cloud store ranks by pgvector similarity + keyword score;
+/// without it the endpoint lists the session's fragments (newest last).
+pub async fn search_session_memory(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(session_id): Path<String>,
+    Query(params): Query<MemoryQuery>,
+) -> Result<Json<ListResponse<MemoryItem>>, AppError> {
+    let _row = fetch_session(&state, &principal, &session_id).await?;
+    let store = state.context_for(&principal);
+    let items = match params
+        .text
+        .as_deref()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+    {
+        Some(text) => {
+            let frags = store
+                .recall(&RecallQuery {
+                    session: session_id.clone(),
+                    text: text.to_string(),
+                    top_k: params.top_k.clamp(1, 100),
+                    kind: None,
+                })
+                .await
+                .map_err(|e| AppError::BadRequest(format!("memory recall failed: {e}")))?;
+            frags.into_iter().map(to_memory_item).collect()
+        }
+        None => {
+            // No query text: list the session's fragments (oldest first).
+            let frags = store
+                .list_session(&session_id, params.top_k.clamp(1, 100))
+                .await
+                .map_err(|e| AppError::BadRequest(format!("memory list failed: {e}")))?;
+            frags.into_iter().map(to_memory_item).collect()
+        }
+    };
+    Ok(Json(ListResponse::new(items)))
+}
+
+fn to_memory_item(f: ContextFragment) -> MemoryItem {
+    MemoryItem {
+        id: f.id,
+        key: f.key,
+        kind: f.kind.as_str().to_string(),
+        content: f.content,
+        created_at: f.created_at,
+    }
 }
 
 // ------------------------------------------------------------- read-only reads

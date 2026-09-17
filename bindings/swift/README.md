@@ -28,6 +28,32 @@ session.memorize(key: "fact1", value: "the moon is cheese")
 print(session.recall(key: "fact1") ?? "")
 ```
 
+## Memory backend (cloud / local / both)
+
+The native SDK keeps its context in **aria memo** (SQLite) by default, and can
+write to the cloud store too:
+
+```swift
+let agent = try createAgentWith(config: SdkAgentConfig(
+    agentName: "History tutor",
+    instructions: "",
+    model: "gpt-4o-mini",
+    sandboxProvider: "docker",
+    memory: SdkMemoryConfig(
+        backend: "both",                       // cloud | local | both
+        localDbPath: "~/.ariacompute/memo.db", // aria memo
+        cloudBaseUrl: "http://localhost:3000",
+        cloudApiKey: ""
+    )
+))
+let session = agent.session()
+try session.memorize(key: "user_name", value: "Ada", backend: nil)   // both
+print(try session.recall(key: "user_name", backend: "local") ?? "")  // aria memo only
+```
+
+`both` writes local first (offline-safe) then cloud; a single failing side is
+tolerated, and reads prefer the cloud copy with a local fallback.
+
 ## Cloud streaming (OpenAI-compatible)
 
 `POST /v1/agents/sessions/{id}/events/stream` on `aria-agent-cloud` emits

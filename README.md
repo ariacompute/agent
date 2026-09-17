@@ -286,6 +286,33 @@ persists a fact (as a `long_term` context fragment) that later turns of the same
 session recall semantically — even after a restart. For the cloud SDKs that store
 is Postgres + pgvector; for the native SDKs it is the on-device store.
 
+### Memory backends: cloud / local / both
+
+Every SDK can choose where the memory context lives:
+
+| Backend | Storage | Notes |
+|---|---|---|
+| `cloud` | agent-cloud, Postgres + pgvector | shared across devices; needs the service running |
+| `local` | **aria memo** (SQLite, `memo.db`) | on-device, works offline; inspectable with `aria-memo list --json` |
+| `both` | cloud **and** local | writes to both; reads merged + deduped (cloud copy wins) |
+
+Configure it on the agent / session constructor and override per call:
+
+```python
+agent = Agent(name="History tutor", memory_backend="both", memo_db="~/.ariacompute/memo.db")
+session.memorize("user_name", "Ada")                    # -> both backends
+session.recall("user_name", backend="local")            # -> local copy only
+```
+
+```typescript
+const agent = new Agent({ name: "History tutor", memory: "both", memoDb: "~/.ariacompute/memo.db" });
+await session.memorize("user_name", "Ada");                       // -> both backends
+await session.recall("user_name", { backend: "local" });          // -> local copy only
+```
+
+`both` never fabricates data: a single failing side is logged and tolerated, and
+only a total failure raises an error.
+
 ### Python
 
 ```python
@@ -305,6 +332,9 @@ agent = Agent(
     instructions="Answer history questions clearly and concisely.",
     model="gpt-4o-mini",
     tools=[history_fun_fact],
+    # memory backend: cloud | local (aria memo) | both
+    memory_backend="both",
+    memo_db="~/.ariacompute/memo.db",
 )
 
 
@@ -324,6 +354,7 @@ async def main() -> None:
     second = await Runner.run(agent, "What is my name?", session=session)
     print(second.final_output)
     print(session.recall("user_name"))  # -> "Ada"
+    print(session.recall("user_name", backend="local"))  # local (aria memo) copy only
 
     # 3) Streaming run.
     streamed = await Runner.run_streamed(agent, "Tell me something surprising", session=session)
@@ -353,6 +384,9 @@ const agent = new Agent({
   instructions: "Answer history questions clearly and concisely.",
   model: "gpt-4o-mini",
   tools: [historyFunFact],
+  // memory backend: cloud | local (aria memo) | both
+  memory: "both",
+  memoDb: "~/.ariacompute/memo.db",
 });
 
 const session = await Session.create(agent);
@@ -370,6 +404,7 @@ await session.memorize("user_name", "Ada");
 const second = await run(agent, "What is my name?", { session });
 console.log(second.finalOutput);
 console.log(await session.recall("user_name")); // -> "Ada"
+console.log(await session.recall("user_name", { backend: "local" })); // aria memo only
 
 // 3) Streaming run.
 const streamed = await runStreamed(agent, "Tell me something surprising", { session });
@@ -398,7 +433,18 @@ impl SdkAgentListener for Printer {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // No session argument: the runtime assigns one isolated context scope per agent.
-    let agent = create_agent("History tutor".into(), "gpt-4o-mini".into())?;
+    // `memory` selects cloud | local (aria memo) | both; default is `local`.
+    let agent = create_agent_with(SdkAgentConfig {
+        agent_name: "History tutor".into(),
+        model: "gpt-4o-mini".into(),
+        memory: SdkMemoryConfig {
+            backend: "both".into(),
+            local_db_path: "~/.ariacompute/memo.db".into(),
+            cloud_base_url: "http://localhost:3000".into(),
+            cloud_api_key: String::new(),
+        },
+        ..Default::default()
+    })?;
 
     // 1) One-shot run.
     println!("{}", agent.run("When did the Roman Empire fall?".into())?);
@@ -411,7 +457,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2) Continue the same conversation (same agent / session scope) — the reply
     //    can draw on the earlier turn and the remembered fact.
     println!("{}", agent.run("What is my name?".into())?);
-    println!("{:?}", session.recall("user_name".into())?); // -> Some("Ada")
+    println!("{:?}", session.recall("user_name".into(), None)?); // -> Some("Ada")
+    // Per-call override: read the aria memo copy only.
+    println!("{:?}", session.recall("user_name".into(), Some("local".into()))?);
 
     // 3) Streaming run — events are pushed to the listener.
     agent.run_stream("Tell me something surprising".into(), Box::new(Printer))?;
@@ -429,7 +477,19 @@ import AriaAgent
 
 do {
     // No session argument: the runtime assigns one isolated context scope per agent.
-    let agent = try createAgent(agentName: "History tutor", model: "gpt-4o-mini")
+    // `memory` selects cloud | local (aria memo) | both; default is `local`.
+    let agent = try createAgentWith(config: SdkAgentConfig(
+        agentName: "History tutor",
+        instructions: "",
+        model: "gpt-4o-mini",
+        sandboxProvider: "docker",
+        memory: SdkMemoryConfig(
+            backend: "both",
+            localDbPath: "~/.ariacompute/memo.db",
+            cloudBaseUrl: "http://localhost:3000",
+            cloudApiKey: ""
+        )
+    ))
 
     // 1) One-shot run.
     print(try agent.run("When did the Roman Empire fall?"))
@@ -442,7 +502,9 @@ do {
     // 2) Continue the same conversation (same agent / session scope) — the reply
     //    can draw on the earlier turn and the remembered fact.
     print(try agent.run("What is my name?"))
-    print(try session.recall(key: "user_name") ?? "")   // -> "Ada"
+    print(try session.recall(key: "user_name", backend: nil) ?? "")   // -> "Ada"
+    // Per-call override: read the aria memo copy only.
+    print(try session.recall(key: "user_name", backend: "local") ?? "")
 
     // 3) Streaming run — events are delivered to the listener.
     try agent.runStream("Tell me something surprising", listener: Printer())
@@ -461,7 +523,21 @@ import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
 fun main() {
     // No session argument: the runtime assigns one isolated context scope per agent.
-    val agent = createAgent("History tutor", "gpt-4o-mini")
+    // `memory` selects cloud | local (aria memo) | both; default is `local`.
+    val agent = createAgentWith(
+        SdkAgentConfig(
+            agentName = "History tutor",
+            instructions = "",
+            model = "gpt-4o-mini",
+            sandboxProvider = "docker",
+            memory = SdkMemoryConfig(
+                backend = "both",
+                localDbPath = "~/.ariacompute/memo.db",
+                cloudBaseUrl = "http://localhost:3000",
+                cloudApiKey = ""
+            )
+        )
+    )
 
     // 1) One-shot run.
     println(agent.run("When did the Roman Empire fall?"))
@@ -474,7 +550,9 @@ fun main() {
     // 2) Continue the same conversation (same agent / session scope) — the reply
     //    can draw on the earlier turn and the remembered fact.
     println(agent.run("What is my name?"))
-    println(session.recall("user_name"))   // -> "Ada"
+    println(session.recall("user_name", null))   // -> "Ada"
+    // Per-call override: read the aria memo copy only.
+    println(session.recall("user_name", "local"))
 
     // 3) Streaming run — events are delivered to the listener.
     agent.runStream("Tell me something surprising", Printer())

@@ -213,18 +213,27 @@ impl<T: Serialize> ListResponse<T> {
     }
 }
 
-/// A keyed long-term memory entry stored in the session's context store.
+/// One memory fragment stored in the session's context store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryView {
-    pub key: String,
+pub struct MemoryItem {
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+    pub key: Option<String>,
+    /// `message` | `tool_result` | `long_term` | `note`.
+    pub kind: String,
+    pub content: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PutMemoryRequest {
-    pub key: String,
+    /// Omit for an unkeyed context fragment; set for a long-term memory.
+    #[serde(default)]
+    pub key: Option<String>,
     pub value: String,
+    /// `message` | `tool_result` | `long_term` (default) | `note`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// A user input event posted to `POST /v1/agents/sessions/{id}/events`.

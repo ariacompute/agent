@@ -1091,7 +1091,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/v1/agents/sessions/:session_id/memory",
-            post(api::sessions::put_session_memory),
+            post(api::sessions::put_session_memory).get(api::sessions::search_session_memory),
         )
         .route(
             "/v1/agents/sessions/:session_id/memory/:key",

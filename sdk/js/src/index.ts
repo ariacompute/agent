@@ -21,6 +21,14 @@
 export { Agent } from "./agent.js";
 export { tool } from "./tool.js";
 export { Session } from "./session.js";
+export {
+  CloudMemoryStore,
+  CompositeMemoryStore,
+  LocalMemoryStore,
+  decodeLocal,
+  encodeLocal,
+  type MemoryStore,
+} from "./memory.js";
 export { run, runStreamed, decodeEvent } from "./runner.js";
 export {
   resolveClient,
@@ -33,6 +41,9 @@ export {
 export type {
   AgentConfig,
   ClientOptions,
+  MemoryBackend,
+  MemoryConfig,
+  MemoryOptions,
   HistoryInput,
   HistoryItem,
   Role,

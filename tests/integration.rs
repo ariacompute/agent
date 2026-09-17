@@ -1,10 +1,10 @@
 //! Cross-crate integration: the context store is the single context source
-//! (cloud: Postgres + pgvector, on-device: embedded sled), the sandbox is
+//! (cloud: Postgres + pgvector, on-device: aria memo), the sandbox is
 //! pluggable (docker default), and the core run loop wires them together.
 
 use agent_core::context::{ContextFragment, ContextStore, FragmentKind, RecallQuery};
 use agent_core::Agent;
-use agent_memo::SledContextStore;
+use agent_memo::MemoContextStore;
 
 #[tokio::test]
 async fn core_run_injects_and_persists_into_context() {
@@ -27,9 +27,9 @@ async fn core_run_injects_and_persists_into_context() {
 }
 
 #[tokio::test]
-async fn on_device_context_store_is_embedded() {
-    // The on-device store is sled (local/embedded), never Postgres.
-    let store = SledContextStore::memory().unwrap();
+async fn on_device_context_store_is_aria_memo() {
+    // The on-device store is aria memo (SQLite, local/embedded), never Postgres.
+    let store = MemoContextStore::memory().unwrap();
     let frag = ContextFragment::new("s", FragmentKind::LongTerm, "k").with_key("k");
     store.memorize(frag).await.unwrap();
     let got = store.get_by_key("s", "k").await.unwrap();

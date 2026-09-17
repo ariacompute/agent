@@ -190,8 +190,14 @@ class SessionMemoryTest(unittest.TestCase):
         with mock.patch.object(transport, "_request", side_effect=fake_request):
             session.memorize("user_name", "Ada")
             self.assertEqual(session.recall("user_name"), "Ada")
-        self.assertEqual(calls[0], ("POST", "/v1/agents/sessions/sess_1/memory",
-                                    {"key": "user_name", "value": "Ada"}))
+        self.assertEqual(
+            calls[0],
+            (
+                "POST",
+                "/v1/agents/sessions/sess_1/memory",
+                {"key": "user_name", "value": "Ada", "kind": "long_term"},
+            ),
+        )
         self.assertEqual(calls[1][0], "GET")
 
     def test_recall_missing_key_returns_none(self):
