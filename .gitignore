@@ -6,3 +6,7 @@
 # Local environment (secrets) — keep the template committed, not the real file.
 .env
 **/*.pyc
+# JS/TS SDK (sdk/js): dependencies and build output. `bun.lock` stays committed
+# so CI can run `bun install --frozen-if-exists`.
+node_modules/
+sdk/js/dist/

@@ -230,6 +230,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "winapi",
  "zip",
 ]
 

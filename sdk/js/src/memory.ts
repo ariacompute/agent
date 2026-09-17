@@ -41,6 +41,13 @@ export function decodeLocal(key: string, content: string): string {
   return content.startsWith(prefix) ? content.slice(prefix.length) : content;
 }
 
+/**
+ * Default `aria-memo` runner: spawns the CLI and resolves with its stdout.
+ *
+ * The `node:child_process` import is dynamic so bundlers targeting browsers /
+ * edge runtimes never pull it in; the callback params are typed explicitly
+ * because `strict` rejects the implicit `any` they would otherwise get.
+ */
 function defaultExec(bin: string): MemoExec {
   return async (args: string[]) => {
     const { spawn } = await import("node:child_process");
@@ -48,10 +55,19 @@ function defaultExec(bin: string): MemoExec {
       const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
       let out = "";
       let err = "";
-      child.stdout.on("data", (c) => (out += String(c)));
-      child.stderr.on("data", (c) => (err += String(c)));
+      // `stdio: pipe` guarantees both streams exist, but they are typed nullable.
+      const stdout = child.stdout;
+      const stderr = child.stderr;
+      stdout?.setEncoding("utf8");
+      stderr?.setEncoding("utf8");
+      stdout?.on("data", (chunk: string) => {
+        out += chunk;
+      });
+      stderr?.on("data", (chunk: string) => {
+        err += chunk;
+      });
       child.on("error", reject);
-      child.on("close", (code) => {
+      child.on("close", (code: number | null) => {
         if (code === 0) {
           resolve(out);
         } else {

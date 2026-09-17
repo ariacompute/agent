@@ -72,3 +72,13 @@ rama-tls-rustls = "=0.3.0-alpha.4"
 rama-udp = "=0.3.0-alpha.4"
 rama-unix = "=0.3.0-alpha.4"
 rama-utils = "=0.3.0-alpha.4"
+
+# Windows-only build fix for the codex dependency above: `codex-utils-pty`'s
+# conpty code mixes `winapi::ctypes::c_void` with `std::ffi::c_void`, and the
+# two are the same type **only** when winapi's `std` feature is on (winapi
+# 0.3.9 defines its own `pub enum c_void {}` otherwise). Nothing else in our
+# graph enables that feature, so a Windows build fails with three E0308s.
+# Resolver v2 ignores features from platform-specific deps on other targets, so
+# gating this to Windows leaves the Linux/macOS resolution untouched.
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["std"] }

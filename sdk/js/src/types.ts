@@ -6,6 +6,9 @@
  * `runStreamed`, `tool`, `Session`, `result.finalOutput`, `result.history`.
  */
 
+// Type-only: `agent.ts` imports these types, so a value import would cycle.
+import type { Agent } from "./agent.js";
+
 /// Where the memory context lives: agent-cloud, aria memo (local), or both.
 export type MemoryBackend = "cloud" | "local" | "both";
 

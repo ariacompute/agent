@@ -105,3 +105,9 @@ language (JS/Python) SDKs.
   `publish-cargo.yml` (crates.io: sandbox → core → memo → ariacompute-agent),
   `publish-maven.yml` (Maven Central), `publish-npm.yml`, `publish-pypi.yml`;
   Swift via CocoaPods `bindings/swift/AriaAgent.podspec`.
+
+Windows build (release matrix `windows-x86_64`): `aria-agent-cloud` pulls
+`codex-utils-pty`, whose conpty code mixes `winapi::ctypes::c_void` with
+`std::ffi::c_void`. Those are the same type **only** with winapi's `std`
+feature, so the crate declares a Windows-only `winapi = { features = ["std"] }`
+dependency — do not remove it, or the Windows build fails with three E0308s.
