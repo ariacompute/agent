@@ -1,0 +1,66 @@
+name: Publish PyPI (ariacompute-agent)
+
+# Publish the Python SDK so consumers can run:
+#   pip install ariacompute-agent
+#
+# The package mirrors the OpenAI Agents SDK shape (Agent / Runner / function_tool
+# / Session) on top of the aria-agent-cloud beta Agents API.
+#
+# Secrets required:
+#   PYPI_API_TOKEN — PyPI API token scoped to the `ariacompute-agent` project.
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (default: tag with v stripped)"
+        required: false
+
+jobs:
+  publish:
+    name: PyPI ariacompute-agent
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve version
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ] && [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          [ -n "$VERSION" ] || VERSION="0.0.0"
+          python3 - "$VERSION" <<'PY'
+          import os, pathlib, re, sys
+
+          version = sys.argv[1]
+          path = pathlib.Path("sdk/python/pyproject.toml")
+          text = path.read_text()
+          text, n = re.subn(r'(\nversion = )"[^"]+"', rf'\g<1>"{version}"', text, count=1)
+          if n != 1:
+              sys.exit("pyproject version not found")
+          path.write_text(text)
+          print(f"pinned version={version}")
+          PY
+      - name: Test
+        working-directory: sdk/python
+        run: python3 -m unittest discover -s tests
+      - name: Build
+        working-directory: sdk/python
+        run: |
+          python3 -m pip install --upgrade build
+          python3 -m build
+      - name: Publish
+        working-directory: sdk/python
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          python3 -m pip install --upgrade twine
+          python3 -m twine upload dist/*

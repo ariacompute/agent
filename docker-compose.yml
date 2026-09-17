@@ -1,8 +1,9 @@
 # Agent Cloud — docker-compose deployment.
 #
 # Services:
-#   postgres  Postgres (metadata: agents / runs). Schema is created on boot by
-#             the cloud service (ensure_schema), so no init scripts are needed.
+#   postgres  Postgres + pgvector (metadata: agents / runs; context:
+#             context_fragments). Schema is created on boot by the cloud service
+#             (ensure_schema), so no init scripts are needed.
 #   cloud     The `aria-agent` axum service. Waits for a healthy Postgres. Mounts
 #             the host Docker socket so the Docker sandbox can spawn tool-exec
 #             containers via the Engine API (no `docker` CLI inside the image).
@@ -23,7 +24,10 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector is a hard requirement: the context store (`context_fragments`)
+    # stores embeddings in a `vector(256)` column and refuses to start if the
+    # `vector` extension is unavailable.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -63,8 +67,6 @@ services:
     # line out (and the `DOCKER_GID` build arg is then unused).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - reefdata:/app/.reef
-      - memodata:/app/.memo
     # Direct access to the cloud API (debug / when nginx is not needed).
     ports:
       - "${CLOUD_PORT:-3000}:3000"
@@ -94,5 +96,3 @@ services:
 
 volumes:
   pgdata:
-  reefdata:
-  memodata:

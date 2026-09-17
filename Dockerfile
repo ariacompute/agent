@@ -5,12 +5,13 @@
 #
 # Builds the `aria-agent` binary from the `aria-agent-cloud` crate and ships it
 # as a lean runtime image. The cloud service needs:
-#   * Postgres      (metadata: agents / runs)        -> DATABASE_URL
+#   * Postgres+pgvector (metadata: agents / runs AND context: context_fragments)
+#                                                    -> DATABASE_URL
 #   * OpenAI API    (model calls via agent-core)      -> OPENAI_API_KEY
-#   * local sled    (reef records/feedback/harness)   -> REEF_DIR (volume)
 #
-# NOTE: `agent-memo` (conversational context) is intentionally in-memory in the
-# current `main.rs`; only the reef stores under REEF_DIR are persisted.
+# NOTE: conversational context lives in Postgres (`context_fragments`, pgvector),
+# so the database image must provide the `vector` extension
+# (`pgvector/pgvector:pg16`). The on-device SDK keeps its own embedded store.
 # ----------------------------------------------------------------------------
 
 # ---- Build stage ----
@@ -57,14 +58,9 @@ WORKDIR /app
 
 COPY --from=builder /usr/local/bin/aria-agent /usr/local/bin/aria-agent
 
-# Persisted reef stores (records / feedback / git-versioned harness).
-ENV REEF_DIR=/app/.reef
-# Memo backend: `memory` (ephemeral) or `memo` (persistent sled under MEMO_DIR).
-ENV AGENT_MEMO_BACKEND=memory
-ENV MEMO_DIR=/app/.memo
+# Context memory is Postgres-backed (`context_fragments`, pgvector) — no local
+# volume is mounted any more.
 ENV RUST_LOG=info
-
-VOLUME ["/app/.reef", "/app/.memo"]
 
 USER aria
 

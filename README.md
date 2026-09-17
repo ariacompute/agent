@@ -1,24 +1,28 @@
 # agent
 
 A layered agent platform built on OpenAI's [`codex`](https://github.com/openai/codex)
-harness, exposing agents as (a) a **Rust + Cloud API** and (b)
-**native SDKs for Swift / Kotlin**.
+harness, exposing agents as (a) a **Rust + Cloud API** speaking the **OpenAI beta
+Agents** resource surface, (b) **JS / Python SDKs** mirroring the OpenAI Agents
+SDK, and (c) **native SDKs for Swift / Kotlin**.
 
 ## Modules
 
 | Module | What it is |
 |--------|------------|
 | **codex submodule** | `openai/codex` at `codex/` (harness, sandboxing, memories). |
-| **aria-agent-memo** | Unified **context memory** (memo). Local/embedded store, **not Postgres**. |
+| **aria-agent-memo** | On-device / embedded **context store** (sled) implementing `aria-agent-core::context`. |
 | **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube. |
 | **aria-agent-core** | Unified agent runtime: `recall → model → memorize`, tools in a sandbox. |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent` / `SdkSession` / `create_agent`. |
-| **aria-agent-cloud** | axum service, Postgres metadata only, OpenAI Agents API. `/v1/agents`, `/v1/sessions/s1/runs`, SSE `/v1/sessions/s1/runs/stream`. |
+| **aria-agent-cloud** | axum service: Postgres + pgvector (metadata **and** context), OpenAI beta Agents API. `/v1/agents`, `/v1/agents/sessions`, SSE `/v1/agents/sessions/{id}/events/stream`. |
 | **bindings** | `bindings/swift` (SwiftPM) and `bindings/kotlin` (Android). |
+| **sdk/js** | npm `@ariacompute/agent` — mirrors `@openai/agents` (`Agent`, `run`, `runStreamed`, `tool`, `Session`). |
+| **sdk/python** | pip `ariacompute-agent` — mirrors `openai-agents` (`Agent`, `Runner`, `function_tool`, `Session`). |
 
-> **Storage boundary:** memo is the *only* context store and never uses
-> Postgres. Postgres is used *only* by `aria-agent-cloud` for `agents`/`runs`
-> metadata.
+> **Storage boundary:** the **cloud** stores conversational / long-term context in
+> Postgres + pgvector (`context_fragments`, per-principal) — pgvector is required
+> and boot fails without it. The **on-device** SDK keeps its embedded sled store.
+> See `docs/adr/0010-context-storage-pgvector.md`.
 
 ## codex submodule
 
@@ -133,13 +137,11 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres credentials + database (metadata store). |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres (**pgvector**) credentials + database: metadata *and* context memory. |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | Connection string. The host `postgres` is the compose service name. |
 | `OPENAI_API_KEY` | _(empty)_ | OpenAI key for model calls. Leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
-| `AGENT_MEMO_BACKEND` | `memory` | Memo backend: `memory` (ephemeral) or `memo` (persistent sled DB). |
-| `MEMO_DIR` | `/app/.memo` | Directory for the persistent memo store (used when `AGENT_MEMO_BACKEND=memo`). |
-| `REEF_DIR` | `/app/.reef` | Reef stores (records / feedback / git-versioned harness). |
+| `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
 | `CLOUD_PORT` | `3000` | Host port published for **direct** access to the cloud service (the container always listens on 3000). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
@@ -173,22 +175,16 @@ init scripts are needed. The API is then reachable through **either** endpoint:
 A `GET /healthz` endpoint (served by nginx itself) can be used for liveness
 checks.
 
-### 3. Memo backend
+### 3. Context storage (PostgreSQL + pgvector)
 
-The conversational context store (`agent-memo`) is selected with
-`AGENT_MEMO_BACKEND`:
+Conversational / long-term context lives in Postgres (`context_fragments`,
+`vector(256)` with an HNSW cosine index), sharded per principal. The compose
+Postgres image is `pgvector/pgvector:pg16`; the service runs
+`CREATE EXTENSION IF NOT EXISTS vector` at boot and **refuses to start** if the
+extension is unavailable (no silent keyword-only fallback).
 
-- `memory` (default) — in-memory sled; context is lost on restart.
-- `memo` — persistent sled DB under `MEMO_DIR`. The compose `memodata` volume
-  keeps it across restarts.
-
-```bash
-# Persistent conversational memory
-AGENT_MEMO_BACKEND=memo docker compose up --build
-```
-
-> Reef data (records / feedback / harness) is always persisted to the `reefdata`
-> volume regardless of the memo backend.
+The on-device SDK keeps its own embedded sled store
+(`aria-agent-memo`) and is not affected by this requirement.
 
 ### 4. Sandbox via the Docker socket
 
@@ -253,336 +249,275 @@ warning, so the service always boots.
 
 | Volume | Backed by | Purpose |
 |--------|-----------|---------|
-| `pgdata` | Postgres | `agents` / `runs` metadata. |
-| `reefdata` | `/app/.reef` | Reef stores (always persisted). |
-| `memodata` | `/app/.memo` | Persistent memo (only used when `AGENT_MEMO_BACKEND=memo`). |
+| `pgdata` | Postgres (pgvector) | `agents` / `runs` metadata **and** `context_fragments` (context memory). |
 
 ## SDK examples
 
-There are two ways to use an Aria Agent:
+Every example below uses an **official SDK** — none of them hand-roll HTTP. All
+SDKs mirror the OpenAI Agents SDK shape: define an `Agent`, then run it.
 
-- **Cloud API (HTTP)** — a language-agnostic REST endpoint. Call it from
-  Python, Rust, TypeScript, or any HTTP client. Streaming is SSE emitting
-  **OpenAI Responses API events** (`response.created`,
-  `response.output_text.delta`, `response.function_call_arguments.delta`, …),
-  terminated by `response.completed` — see
-  [OpenAI Agents API compatibility](#openai-agents-api-compatibility).
-- **Native SDK (in-process)** — the UniFFI bindings embed the runtime directly
-  in Swift / Kotlin apps (no server, no network).
+| Language | Install | Package / module |
+|---|---|---|
+| Python | `pip install ariacompute-agent` | `ariacompute_agent` (mirrors `openai-agents`) |
+| TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent` (mirrors `@openai/agents`) |
+| Rust | `cargo add ariacompute-agent` | `aria_agent_ffi` (in-process, native) |
+| Swift | SwiftPM / CocoaPods `AriaAgent` | `bindings/swift` (in-process, native) |
+| Kotlin | `com.ariacompute:agent` | `bindings/kotlin` (in-process, native) |
 
-All cloud examples assume a running service (see Quick start) and, when
-`AGENT_CLOUD_API_KEY` is set, an `Authorization: Bearer <key>` (or
-`ApiKey <key>`) header.
+The JS / Python SDKs are thin clients over the beta Agents REST API that the
+service still exposes — see
+[OpenAI Agents API compatibility](#openai-agents-api-compatibility) for the wire
+contract. The Rust / Swift / Kotlin SDKs embed the runtime **in-process** and keep
+their context in the on-device store (no server, no network).
 
-In the run request bodies you may use the agent's human-friendly name `agent`
-instead of `agent_id` (the run is resolved per principal). The **session** is the
-path `{id}` segment of `/v1/sessions/{id}/runs` — it scopes the conversation in
-the cloud's memo store, so there is no `session` field in the body. The endpoint
-always streams; call `/v1/sessions/{id}/runs` (without `/stream`) for a single
-blocking reply.
+Cloud SDKs need a running service (see Quick start). Configure
+`ARIA_AGENT_BASE_URL` (default `http://localhost:3000`) and, when
+`AGENT_CLOUD_API_KEY` is set, `ARIA_AGENT_API_KEY`.
 
-### Python (cloud API)
+Every example follows the same three steps:
+
+1. **one-shot run** — `run(agent, input)` / `Runner.run(agent, input)`,
+2. **continue the same conversation** by reusing the session (after writing a
+   long-term memory with `memorize`),
+3. **streaming run** — `runStreamed` / `Runner.run_streamed`.
+
+Long-term memory lives in the agent's own context store: `memorize(key, value)`
+persists a fact (as a `long_term` context fragment) that later turns of the same
+session recall semantically — even after a restart. For the cloud SDKs that store
+is Postgres + pgvector; for the native SDKs it is the on-device store.
+
+### Python
 
 ```python
-import os, json, requests
+import asyncio
 
-BASE = os.environ.get("ARIA_AGENT_BASE", "http://localhost:3000")
-API_KEY = os.environ.get("AGENT_CLOUD_API_KEY")
-headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
+from ariacompute_agent import Agent, Runner, Session, function_tool
 
-agent = requests.post(f"{BASE}/v1/agents", json={"name": "my-agent"}, headers=headers).json()
-agent_name = agent["name"]
 
-# one-shot run
-run = requests.post(
-    f"{BASE}/v1/sessions/s1/runs",
-    json={"agent": agent_name, "input": "hello"},
-    headers=headers,
-).json()
-print(run["output"])
+@function_tool
+def history_fun_fact() -> str:
+    """Return a short history fact."""
+    return "Sharks are older than trees."
 
-# streaming run — OpenAI Responses API events
-with requests.post(
-    f"{BASE}/v1/sessions/s1/runs/stream",
-    json={"agent": agent_name, "input": "tell me a joke"},
-    headers=headers,
-    stream=True,
-) as r:
-    for raw in r.iter_lines():
-        if not raw:
-            continue
-        line = raw.decode() if isinstance(raw, bytes) else raw
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        event = json.loads(payload)
-        if event["type"] == "response.output_text.delta":
-            print(event["delta"], end="", flush=True)
-        elif event["type"] == "response.completed":
-            # terminal event
-            print("\nreceipt:", event["response"]["metadata"]["reef_record_id"])
-            break
+
+agent = Agent(
+    name="History tutor",
+    instructions="Answer history questions clearly and concisely.",
+    model="gpt-4o-mini",
+    tools=[history_fun_fact],
+)
+
+
+async def main() -> None:
+    session = Session.create(agent)
+
+    # 1) One-shot run.
+    first = await Runner.run(agent, "When did the Roman Empire fall?", session=session)
+    print(first.final_output)
+
+    # Long-term memory lives in the session's context store (Postgres +
+    # pgvector): `memorize` persists a fact that every later turn can recall.
+    session.memorize("user_name", "Ada")
+
+    # 2) Continue the same conversation by reusing the session — the reply can
+    #    draw on both the earlier turns and the remembered fact.
+    second = await Runner.run(agent, "What is my name?", session=session)
+    print(second.final_output)
+    print(session.recall("user_name"))  # -> "Ada"
+
+    # 3) Streaming run.
+    streamed = await Runner.run_streamed(agent, "Tell me something surprising", session=session)
+    async for event in streamed.events:
+        if event["type"] == "agent.turn.output_text.delta":
+            print(event["delta"], end="")
+    final = await streamed.completed
+    print(final.final_output)
+
+
+asyncio.run(main())
 ```
 
-### Rust (cloud API)
+### TypeScript
 
-Add `reqwest` (with the `json` and `stream` features), `tokio`, `serde`, `serde_json`, and `anyhow`:
+```typescript
+import { Agent, run, runStreamed, tool, Session } from "@ariacompute/agent";
+
+const historyFunFact = tool({
+  name: "history_fun_fact",
+  description: "Return a short history fact.",
+  parameters: { type: "object", properties: {} },
+});
+
+const agent = new Agent({
+  name: "History tutor",
+  instructions: "Answer history questions clearly and concisely.",
+  model: "gpt-4o-mini",
+  tools: [historyFunFact],
+});
+
+const session = await Session.create(agent);
+
+// 1) One-shot run.
+const first = await run(agent, "When did the Roman Empire fall?", { session });
+console.log(first.finalOutput);
+
+// Long-term memory lives in the session's context store (Postgres + pgvector):
+// `memorize` persists a fact that every later turn can recall.
+await session.memorize("user_name", "Ada");
+
+// 2) Continue the same conversation by reusing the session — the reply can draw
+//    on both the earlier turns and the remembered fact.
+const second = await run(agent, "What is my name?", { session });
+console.log(second.finalOutput);
+console.log(await session.recall("user_name")); // -> "Ada"
+
+// 3) Streaming run.
+const streamed = await runStreamed(agent, "Tell me something surprising", { session });
+for await (const event of streamed.events) {
+  if (event.type === "agent.turn.output_text.delta") {
+    process.stdout.write(event.delta);
+  }
+}
+console.log((await streamed.completed).finalOutput);
+```
+
+### Rust (in-process)
 
 ```rust
-use reqwest::Client;
-use serde::Deserialize;
+use aria_agent_ffi::{create_agent, SdkAgentListener, SdkStreamEvent};
 
-#[derive(Deserialize)] struct Agent { name: String }
-#[derive(Deserialize)] struct Run  { output: String }
+struct Printer;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let base = std::env::var("ARIA_AGENT_BASE")
-        .unwrap_or_else(|_| "http://localhost:3000".into());
-    let client = Client::new();
-    let mut headers = reqwest::header::HeaderMap::new();
-    if let Ok(key) = std::env::var("AGENT_CLOUD_API_KEY") {
-        headers.insert(reqwest::header::AUTHORIZATION, format!("Bearer {key}").parse()?);
-    }
-
-    let agent: Agent = client.post(format!("{base}/v1/agents"))
-        .headers(headers.clone())
-        .json(&serde_json::json!({"name": "my-agent"}))
-        .send().await?.json().await?;
-
-    let run: Run = client.post(format!("{base}/v1/sessions/s1/runs"))
-        .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "input": "hello"}))
-        .send().await?.json().await?;
-
-    println!("{}", run.output);
-
-    // streaming run — OpenAI Responses API events
-    let mut res = client.post(format!("{base}/v1/sessions/s1/runs/stream"))
-        .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "input": "tell me a joke"}))
-        .send().await?;
-    let mut buf = String::new();
-    while let Some(chunk) = res.chunk().await? {
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = buf.find('\n') {
-            let line = buf[..idx].trim().to_string();
-            buf.drain(..=idx);
-            let Some(payload) = line.strip_prefix("data:") else { continue };
-            let event: serde_json::Value = serde_json::from_str(payload.trim())?;
-            if event["type"] == "response.output_text.delta" {
-                print!("{}", event["delta"].as_str().unwrap_or_default());
-            } else if event["type"] == "response.completed" {
-                return Ok(()); // terminal event
-            }
+impl SdkAgentListener for Printer {
+    fn on_event(&self, event: SdkStreamEvent) {
+        if let SdkStreamEvent::Token { text } = event {
+            print!("{text}");
         }
     }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // No session argument: the runtime assigns one isolated context scope per agent.
+    let agent = create_agent("History tutor".into(), "gpt-4o-mini".into())?;
+
+    // 1) One-shot run.
+    println!("{}", agent.run("When did the Roman Empire fall?".into())?);
+
+    // Long-term memory lives in the on-device store: `memorize` persists a fact
+    // as a `long_term` fragment that later turns of this agent recall.
+    let session = agent.session();
+    session.memorize("user_name".into(), "Ada".into())?;
+
+    // 2) Continue the same conversation (same agent / session scope) — the reply
+    //    can draw on the earlier turn and the remembered fact.
+    println!("{}", agent.run("What is my name?".into())?);
+    println!("{:?}", session.recall("user_name".into())?); // -> Some("Ada")
+
+    // 3) Streaming run — events are pushed to the listener.
+    agent.run_stream("Tell me something surprising".into(), Box::new(Printer))?;
     Ok(())
 }
 ```
 
-> In Rust you can also depend on `agent-core` / `ariacompute-agent` directly to
-> run the runtime in-process instead of over HTTP.
-
-### TypeScript (cloud API)
-
-```typescript
-const base = process.env.ARIA_AGENT_BASE ?? "http://localhost:3000";
-const apiKey = process.env.AGENT_CLOUD_API_KEY;
-const headers: Record<string, string> = {
-  "Content-Type": "application/json",
-  ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-};
-
-// create + one-shot run
-const agent = await fetch(`${base}/v1/agents`, {
-  method: "POST", headers, body: JSON.stringify({ name: "my-agent" }),
-}).then((r) => r.json<{ name: string }>());
-
-const run = await fetch(`${base}/v1/sessions/s1/runs`, {
-  method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, input: "hello" }),
-}).then((r) => r.json<{ output: string }>());
-console.log(run.output);
-
-// streaming run — OpenAI Responses API events
-const res = await fetch(`${base}/v1/sessions/s1/runs/stream`, {
-  method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, input: "tell me a joke" }),
-});
-const reader = res.body!.getReader();
-const decoder = new TextDecoder();
-let buf = "";
-outer: for (;;) {
-  const { value, done } = await reader.read();
-  if (done) break;
-  buf += decoder.decode(value, { stream: true });
-  let idx;
-  while ((idx = buf.indexOf("\n")) >= 0) {
-    const line = buf.slice(0, idx).trim();
-    buf = buf.slice(idx + 1);
-    if (!line.startsWith("data:")) continue;
-    const event = JSON.parse(line.slice(5).trim());
-    if (event.type === "response.output_text.delta") {
-      process.stdout.write(event.delta);
-    } else if (event.type === "response.completed") {
-      // terminal event
-      console.log("\nreceipt:", event.response.metadata.reef_record_id);
-      break outer;
-    }
-  }
-}
-```
-
-### Swift
+### Swift (in-process)
 
 Embed `libaria-agent_ffi` and the generated `AriaAgent` module (see
-`bindings/swift/README.md`) to run the agent **in-process**, or consume the
-cloud stream over HTTP:
+`bindings/swift/README.md`).
 
 ```swift
 import AriaAgent
 
-// Native SDK — the runtime embedded in-process (no server, no network).
-// No session needed: the runtime assigns one isolated memo scope per agent.
-let agent = createAgent(agentName: "Assistant", model: "gpt-4o-mini")
-let reply = agent.run("hello")
-let session = agent.session()
-session.memorize(key: "fact1", value: "the moon is cheese")
-print(session.recall(key: "fact1") ?? "")
+do {
+    // No session argument: the runtime assigns one isolated context scope per agent.
+    let agent = try createAgent(agentName: "History tutor", model: "gpt-4o-mini")
 
-// Cloud streaming (OpenAI-compatible): consume /v1/sessions/s1/runs/stream response.* events
-let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
-var request = URLRequest(url: URL(string: "\(base)/v1/sessions/s1/runs/stream")!)
-request.httpMethod = "POST"
-request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-request.httpBody = try? JSONSerialization.data(withJSONObject: [
-    "agent": "Agent Demo", "input": "tell me a joke"
-])
+    // 1) One-shot run.
+    print(try agent.run("When did the Roman Empire fall?"))
 
-let (stream, response) = try await URLSession.shared.bytes(for: request)
-// The Reef receipt is also returned as the x-reef-agent-record-id header.
-let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
+    // Long-term memory lives in the on-device store: `memorize` persists a fact
+    // as a `long_term` fragment that later turns of this agent recall.
+    let session = agent.session()
+    try session.memorize(key: "user_name", value: "Ada")
 
-outer: for try await line in stream.lines {
-    guard line.hasPrefix("data:") else { continue }
-    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-    guard let data = payload.data(using: .utf8),
-          let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
-    switch event.type {
-    case "response.output_text.delta":
-        print(event.delta ?? "", terminator: "")
-    case "response.completed":
-        // terminal event
-        print("\nreceipt:", event.response?.metadata?.reefRecordId ?? receipt ?? "")
-        break outer
-    default:
-        break   // response.created / response.in_progress / output_item.* …
-    }
+    // 2) Continue the same conversation (same agent / session scope) — the reply
+    //    can draw on the earlier turn and the remembered fact.
+    print(try agent.run("What is my name?"))
+    print(try session.recall(key: "user_name") ?? "")   // -> "Ada"
+
+    // 3) Streaming run — events are delivered to the listener.
+    try agent.runStream("Tell me something surprising", listener: Printer())
+} catch {
+    print(error)
 }
 ```
 
-### Kotlin
+### Kotlin (in-process)
 
 Add the `com.ariacompute:agent` artifact and the `libaria-agent_ffi` native
-library (see `bindings/kotlin/agent-sdk/README.md`) to run the agent
-**in-process**, or consume the cloud stream over HTTP:
+library (see `bindings/kotlin/agent-sdk/README.md`).
 
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
-// Native SDK — the runtime embedded in-process (no server, no network).
-// No session needed: the runtime assigns one isolated memo scope per agent.
 fun main() {
-    val agent = createAgent("Assistant", "gpt-4o-mini")
-    val reply = agent.run("hello")
+    // No session argument: the runtime assigns one isolated context scope per agent.
+    val agent = createAgent("History tutor", "gpt-4o-mini")
+
+    // 1) One-shot run.
+    println(agent.run("When did the Roman Empire fall?"))
+
+    // Long-term memory lives in the on-device store: `memorize` persists a fact
+    // as a `long_term` fragment that later turns of this agent recall.
     val session = agent.session()
-    session.memorize("fact1", "the moon is cheese")
-    println(session.recall("fact1"))
-}
+    session.memorize("user_name", "Ada")
 
-// Cloud streaming (OpenAI-compatible): consume /v1/sessions/s1/runs/stream response.* events
-val json = Json { ignoreUnknownKeys = true }
-val client = OkHttpClient()
-val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
+    // 2) Continue the same conversation (same agent / session scope) — the reply
+    //    can draw on the earlier turn and the remembered fact.
+    println(agent.run("What is my name?"))
+    println(session.recall("user_name"))   // -> "Ada"
 
-val request = Request.Builder()
-    .url("$base/v1/sessions/s1/runs/stream")
-    .header("Accept", "text/event-stream")
-    .post("""{"agent":"Agent Demo","input":"tell me a joke"}"""
-        .toRequestBody())
-    .build()
-
-client.newCall(request).execute().use { resp ->
-    // The Reef receipt is also returned as the x-reef-agent-record-id header.
-    val receipt = resp.header("x-reef-agent-record-id")
-    resp.body!!.byteStream().bufferedReader().useLines { lines ->
-        run loop@{
-            for (line in lines) {
-                if (!line.startsWith("data:")) continue
-                val event = json.parseToJsonElement(line.removePrefix("data:").trim()).jsonObject
-                when (event["type"]?.jsonPrimitive?.content) {
-                    "response.output_text.delta" ->
-                        print(event["delta"]?.jsonPrimitive?.content.orEmpty())
-                    "response.completed" -> {
-                        // terminal event
-                        println(
-                            "\nreceipt: " + (event["response"]?.jsonObject
-                                ?.get("metadata")?.jsonObject
-                                ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
-                        )
-                        return@loop
-                    }
-                }
-            }
-        }
-    }
+    // 3) Streaming run — events are delivered to the listener.
+    agent.runStream("Tell me something surprising", Printer())
 }
 ```
 
 ## OpenAI Agents API compatibility
 
-`POST /v1/sessions/s1/runs/stream` speaks the **OpenAI Responses API streaming protocol**,
-so OpenAI SDKs and the OpenAI Agents SDK can consume it unchanged. Every SSE
-`data:` frame is a Responses event with a `type` and a monotonic
-`sequence_number`:
+`POST /v1/agents/sessions/{id}/events/stream` speaks the **OpenAI beta Agents
+streaming protocol**, so an OpenAI client can consume it unchanged. Every SSE
+`data:` frame is an `agent.*` event with `event_id`, `session_id`, `turn_id` and a
+monotonic `sequence_number`:
 
 | Event | Payload |
 |---|---|
-| `response.created` | `response.id`, `response.metadata` (`agent_id`, `session`, `reef_record_id`) |
-| `response.in_progress` | phase boundary; extra `phase` (`recall` / `model` / `tool_exec` / `loop_guard`) + `label` |
-| `response.output_item.added` | `item` — `message` (assistant) or `function_call` |
-| `response.function_call_arguments.delta` | `item_id`, `delta` (JSON argument chunk) |
-| `response.output_item.done` | completed `item`; a `function_call` also carries the executed `result` |
-| `response.output_text.delta` | `item_id`, `content_index`, `delta` |
-| `response.output_text.done` | `item_id`, `content_index`, `text` |
-| `response.completed` | `response.status = "completed"`, `response.metadata.reef_record_id` |
-| `response.failed` | `response.error` |
+| `agent.turn.created` | `turn{id,status,session_id,agent_id}` |
+| `agent.turn.in_progress` | phase boundary; extra `phase` (`recall` / `model` / `tool_exec` / `loop_guard`) + `label` |
+| `agent.turn.item.added` | `item` — `message` (assistant, `role`) or `function_call` (`name`, `arguments`) |
+| `agent.turn.item.done` | completed `item`; a `function_call` also carries the executed `result` |
+| `agent.turn.output_text.delta` | `item_id`, `delta` |
+| `agent.turn.output_text.done` | `item_id`, `text` |
+| `agent.turn.completed` | terminal: `turn{status:"completed", output}` |
+| `agent.turn.failed` | terminal: `turn{status:"failed"}`, `error` |
 
-`response.completed` is the terminal event: when a client sees it the run is
-finished — there is no trailing `data: [DONE]` sentinel, so stop on
-`response.completed` (or `response.failed`). Every run also returns the Reef
-receipt id as the `x-reef-agent-record-id` response header — the same value
-exposed as `response.metadata.reef_record_id`.
+`agent.turn.completed` (or `agent.turn.failed`) is the terminal event: when a
+client sees it the run is finished — there is no trailing `data: [DONE]`
+sentinel.
 
-Extra fields our orchestration needs but the Responses schema does not model
-(the agentic `phase`, the tool `result`, the Reef receipt id) are carried
-**inside** these OpenAI-shaped frames, so strict OpenAI clients simply ignore
-them. No private `aria.*` frames are emitted.
+Extra fields our orchestration needs but the beta schema does not model (the
+agentic `phase`, the tool `result`) are carried **inside** these frames, so
+strict OpenAI clients simply ignore them. No private `aria.*` frames are emitted.
+
+The supported way to consume this protocol is one of the SDKs above — they decode
+these frames for you (`result.finalOutput` / `result.final_output`):
 
 ```python
-# Consume it with the official OpenAI SDK (no Aria-specific parsing needed).
-from openai import OpenAI
-client = OpenAI(base_url=f"{BASE}/v1", api_key=API_KEY or "unused")
-for event in client.responses.create(
-    model="gpt-4o-mini",
-    input="tell me a joke",
-    extra_body={"agent": "Agent Demo"},
-    stream=True,
-):
-    if event.type == "response.output_text.delta":
-        print(event.delta, end="", flush=True)
+from ariacompute_agent import Agent, Runner
+
+agent = Agent(name="Agent Demo")
+streamed = await Runner.run_streamed(agent, "tell me a joke")
+async for event in streamed.events:
+    if event["type"] == "agent.turn.output_text.delta":
+        print(event["delta"], end="", flush=True)
 ```
 
 ### Default agent

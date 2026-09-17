@@ -24,7 +24,6 @@ version = "0.1.0"
 dependencies = [
  "aria-agent-core",
  "aria-agent-memo",
- "aria-agent-reef",
  "aria-agent-sandbox",
  "tokio",
  "uuid",
@@ -191,8 +190,6 @@ name = "aria-agent-cloud"
 version = "0.1.0"
 dependencies = [
  "aria-agent-core",
- "aria-agent-memo",
- "aria-agent-reef",
  "aria-agent-sandbox",
  "async-stream",
  "async-trait",
@@ -240,7 +237,6 @@ dependencies = [
 name = "aria-agent-core"
 version = "0.1.0"
 dependencies = [
- "aria-agent-memo",
  "aria-agent-sandbox",
  "async-openai",
  "async-stream",
@@ -267,30 +263,13 @@ dependencies = [
 name = "aria-agent-memo"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "sled",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "aria-agent-reef"
-version = "0.1.0"
-dependencies = [
  "aria-agent-core",
- "aria-agent-memo",
- "async-stream",
  "async-trait",
- "futures",
  "serde",
  "serde_json",
  "sled",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "uuid",
 ]
 

@@ -1,0 +1,38 @@
+{
+  "name": "@ariacompute/agent",
+  "version": "0.1.0",
+  "description": "Aria agent SDK — mirrors the OpenAI Agents SDK shape (Agent / run / runStreamed / tool / Session) on top of the aria-agent-cloud beta Agents API.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "agent",
+    "agents-sdk",
+    "aria",
+    "ariacompute",
+    "openai"
+  ],
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

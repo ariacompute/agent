@@ -8,11 +8,11 @@
 | 模块 | 说明 |
 |------|------|
 | **codex submodule** | `openai/codex`，位于 `codex/`（harness、sandboxing、memories）。 |
-| **aria-agent-memo** | 统一的**上下文记忆（memo）**。本地/嵌入式存储，**不使用 Postgres**。 |
+| **aria-agent-memo** | 端侧/嵌入式**上下文存储**（sled），实现 `aria-agent-core::context` 契约。 |
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube。 |
 | **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`，工具在 sandbox 中执行。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
-| **aria-agent-cloud** | axum 服务，Postgres 仅存元数据，调用 OpenAI Agents API。`/v1/agents`、`/v1/sessions/s1/runs`、SSE `/v1/sessions/s1/runs/stream`。 |
+| **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
 | **bindings** | `bindings/swift`（SwiftPM）与 `bindings/kotlin`（Android）。 |
 
 > **存储边界：** memo 是**唯一的**上下文存储，从不使用 Postgres；Postgres
@@ -30,6 +30,17 @@ git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
 `codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（branch `main`）
 所做的改动。在检出后，于 **`codex/` 子模块内部**应用该补丁：
 
+推荐使用上面的 SDK 消费该协议 —— 帧解析由 SDK 完成（对应
+`result.final_output` / `result.finalOutput`）：
+
+```python
+from ariacompute_agent import Agent, Runner
+
+agent = Agent(name="Agent Demo")
+streamed = await Runner.run_streamed(agent, "tell me a joke")
+async for event in streamed.events:
+    if event["type"] == "agent.turn.output_text.delta":
+        print(event["delta"], end="", flush=True)
 ```bash
 # 1. 克隆子模块（浅克隆）
 git submodule update --init --depth 1 codex
@@ -131,9 +142,7 @@ cp .env.example .env
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
 | `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，用于模型调用；仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
-| `AGENT_MEMO_BACKEND` | `memory` | memo 后端：`memory`（内存）或 `memo`（持久化 sled DB）。 |
-| `MEMO_DIR` | `/app/.memo` | 持久化 memo 目录（仅 `AGENT_MEMO_BACKEND=memo` 时使用）。 |
-| `REEF_DIR` | `/app/.reef` | Reef 存储（records / feedback / git 版本化 harness）。 |
+| `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
 | `CLOUD_PORT` | `3000` | 对 `cloud` 服务**直连**暴露的主机端口（容器内始终监听 3000）。 |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | sandbox 使用的 Docker Engine API 端点（DooD）。可改为远程 / DinD 守护进程。 |
@@ -164,21 +173,15 @@ docker compose up --build
 
 `nginx` 自身提供 `GET /healthz` 健康检查端点（直接由 nginx 返回 `ok`）。
 
-### 3. Memo 后端
+### 3. 上下文存储（PostgreSQL + pgvector）
 
-对话上下文存储（`agent-memo`）由 `AGENT_MEMO_BACKEND` 切换：
+对话/长期上下文保存在 Postgres 的 `context_fragments` 表（`vector(256)` +
+HNSW 余弦索引），按 `principal_id` 分片。compose 使用
+`pgvector/pgvector:pg16` 镜像；服务启动时会执行
+`CREATE EXTENSION IF NOT EXISTS vector` 并校验，缺少扩展时**直接启动失败**
+（不做关键词降级）。
 
-- `memory`（默认）—— 内存 sled，重启即丢。
-- `memo` —— 持久化 sled DB，目录为 `MEMO_DIR`；compose 的 `memodata` 卷使其在
-  重启后保留。
-
-```bash
-# 持久化对话记忆
-AGENT_MEMO_BACKEND=memo docker compose up --build
-```
-
-> Reef 数据（records / feedback / harness）无论 memo 后端如何，始终持久化到
-> `reefdata` 卷。
+端侧 SDK 继续使用自己的嵌入式 sled 存储（`aria-agent-memo`），不受此约束。
 
 ### 4. 通过 Docker socket 的 sandbox
 
@@ -237,330 +240,263 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | 卷 | 对应路径 | 用途 |
 |----|----------|------|
 | `pgdata` | Postgres | `agents` / `runs` 元数据。 |
-| `reefdata` | `/app/.reef` | Reef 存储（始终持久化）。 |
-| `memodata` | `/app/.memo` | 持久化 memo（仅 `AGENT_MEMO_BACKEND=memo` 时使用）。 |
+| （无额外卷） | — | 上下文与元数据都在 Postgres 中，无需本地卷。 |
 
 ## SDK 示例
 
-使用 Aria Agent 有两种方式：
+以下示例**全部使用官方 SDK**，不再手写 HTTP。所有 SDK 都镜像 OpenAI Agents SDK
+的用法：定义 `Agent`，然后运行。
 
-- **云端 API（HTTP）** —— 语言无关的 REST 端点，可在 Python、Rust、
-  TypeScript 或任意 HTTP 客户端中调用。流式返回为 SSE，输出 **OpenAI
-  Responses API 事件**（`response.created`、`response.output_text.delta`、
-  `response.function_call_arguments.delta` 等），以 `response.completed` 结束
-  —— 详见
-  [OpenAI Agents API 兼容性](#openai-agents-api-兼容性)。
-- **原生 SDK（进程内）** —— 通过 UniFFI 绑定把运行时直接嵌入 Swift / Kotlin
-  应用（无服务端、无网络）。
+| 语言 | 安装 | 包 / 模块 |
+|---|---|---|
+| Python | `pip install ariacompute-agent` | `ariacompute_agent`（镜像 `openai-agents`） |
+| TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent`（镜像 `@openai/agents`） |
+| Rust | `cargo add ariacompute-agent` | `aria_agent_ffi`（进程内 / 原生） |
+| Swift | SwiftPM / CocoaPods `AriaAgent` | `bindings/swift`（进程内 / 原生） |
+| Kotlin | `com.ariacompute:agent` | `bindings/kotlin`（进程内 / 原生） |
 
-所有云端示例均假设服务已启动（见「快速开始」）；若设置了
-`AGENT_CLOUD_API_KEY`，需携带 `Authorization: Bearer <key>`（或 `ApiKey <key>`）
-请求头。
+JS / Python SDK 是服务仍然暴露的 beta Agents REST API 的薄客户端 —— 协议细节见
+[OpenAI Agents API 兼容性](#openai-agents-api-兼容性)；Rust / Swift / Kotlin SDK
+把运行时**嵌入进程内**，上下文保存在端侧存储（无服务端、无网络）。
 
-在运行（run）请求体中，可用更易读的智能体名字 `agent` 代替 `agent_id`（会按当前
-principal 解析该智能体）。**会话（session）** 是端点路径中的 `{id}` 段（即
-`/v1/sessions/{id}/runs`）—— 它在云端的 memo 存储中划定本次对话的上下文范围，因此
-请求体里不再有 `session` 字段。该端点始终以流式返回；若只要一次性阻塞回复，调用
-`/v1/sessions/{id}/runs`（不带 `/stream`）即可。
+云端 SDK 需要服务已启动（见「快速开始」），并通过 `ARIA_AGENT_BASE_URL`
+（默认 `http://localhost:3000`）与 `ARIA_AGENT_API_KEY`（当设置了
+`AGENT_CLOUD_API_KEY` 时）配置连接。
 
-### Python（云端 API）
+每个示例都遵循相同的三步流程：
+
+1. **一次性运行（one-shot run）** —— `run(agent, input)` / `Runner.run(agent, input)`；
+2. **复用同一会话继续对话**（先用 `memorize` 写入一条长期记忆）；
+3. **流式运行（streaming run）** —— `runStreamed` / `Runner.run_streamed`。
+
+长期记忆保存在 agent 自己的上下文存储中：`memorize(key, value)` 会把一条事实以
+`long_term` 上下文片段持久化，同一会话的后续轮次可以语义召回它（重启后依然有效）。
+云端 SDK 的存储是 Postgres + pgvector；原生 SDK 的存储是端侧（on-device）存储。
+
+### Python
 
 ```python
-import os, json, requests
+import asyncio
 
-BASE = os.environ.get("ARIA_AGENT_BASE", "http://localhost:3000")
-API_KEY = os.environ.get("AGENT_CLOUD_API_KEY")
-headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
+from ariacompute_agent import Agent, Runner, Session, function_tool
 
-agent = requests.post(f"{BASE}/v1/agents", json={"name": "my-agent"}, headers=headers).json()
-agent_name = agent["name"]
 
-# 一次性运行
-run = requests.post(
-    f"{BASE}/v1/sessions/s1/runs",
-    json={"agent": agent_name, "input": "hello"},
-    headers=headers,
-).json()
-print(run["output"])
+@function_tool
+def history_fun_fact() -> str:
+    """Return a short history fact."""
+    return "Sharks are older than trees."
 
-# 流式运行 —— OpenAI Responses API 事件
-with requests.post(
-    f"{BASE}/v1/sessions/s1/runs/stream",
-    json={"agent": agent_name, "input": "tell me a joke"},
-    headers=headers,
-    stream=True,
-) as r:
-    for raw in r.iter_lines():
-        if not raw:
-            continue
-        line = raw.decode() if isinstance(raw, bytes) else raw
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        event = json.loads(payload)
-        if event["type"] == "response.output_text.delta":
-            print(event["delta"], end="", flush=True)
-        elif event["type"] == "response.completed":
-            # 终止事件
-            print("\n收执 ID：", event["response"]["metadata"]["reef_record_id"])
-            break
+
+agent = Agent(
+    name="History tutor",
+    instructions="Answer history questions clearly and concisely.",
+    model="gpt-4o-mini",
+    tools=[history_fun_fact],
+)
+
+
+async def main() -> None:
+    session = Session.create(agent)
+
+    # 1) 一次性运行
+    first = await Runner.run(agent, "罗马帝国何时灭亡？", session=session)
+    print(first.final_output)
+
+    # 长期记忆保存在该会话的上下文存储（Postgres + pgvector）：
+    # `memorize` 持久化一条事实，后续每一轮都能召回。
+    session.memorize("user_name", "Ada")
+
+    # 2) 复用同一会话继续对话 —— 回复可以同时引用前面的轮次与这条记忆
+    second = await Runner.run(agent, "我叫什么名字？", session=session)
+    print(second.final_output)
+    print(session.recall("user_name"))  # -> "Ada"
+
+    # 3) 流式运行
+    streamed = await Runner.run_streamed(agent, "讲一个冷知识", session=session)
+    async for event in streamed.events:
+        if event["type"] == "agent.turn.output_text.delta":
+            print(event["delta"], end="")
+    final = await streamed.completed
+    print(final.final_output)
+
+
+asyncio.run(main())
 ```
 
-### Rust（云端 API）
+### TypeScript
 
-添加 `reqwest`（开启 `json` 与 `stream` 特性）、`tokio`、`serde`、`serde_json` 与 `anyhow`：
+```typescript
+import { Agent, run, runStreamed, tool, Session } from "@ariacompute/agent";
+
+const historyFunFact = tool({
+  name: "history_fun_fact",
+  description: "Return a short history fact.",
+  parameters: { type: "object", properties: {} },
+});
+
+const agent = new Agent({
+  name: "History tutor",
+  instructions: "Answer history questions clearly and concisely.",
+  model: "gpt-4o-mini",
+  tools: [historyFunFact],
+});
+
+const session = await Session.create(agent);
+
+// 1) 一次性运行
+const first = await run(agent, "罗马帝国何时灭亡？", { session });
+console.log(first.finalOutput);
+
+// 长期记忆保存在该会话的上下文存储（Postgres + pgvector）：
+// `memorize` 持久化一条事实，后续每一轮都能召回。
+await session.memorize("user_name", "Ada");
+
+// 2) 复用同一会话继续对话 —— 回复可以同时引用前面的轮次与这条记忆
+const second = await run(agent, "我叫什么名字？", { session });
+console.log(second.finalOutput);
+console.log(await session.recall("user_name")); // -> "Ada"
+
+// 3) 流式运行
+const streamed = await runStreamed(agent, "讲一个冷知识", { session });
+for await (const event of streamed.events) {
+  if (event.type === "agent.turn.output_text.delta") {
+    process.stdout.write(event.delta);
+  }
+}
+console.log((await streamed.completed).finalOutput);
+```
+
+### Rust（进程内）
 
 ```rust
-use reqwest::Client;
-use serde::Deserialize;
+use aria_agent_ffi::{create_agent, SdkAgentListener, SdkStreamEvent};
 
-#[derive(Deserialize)] struct Agent { name: String }
-#[derive(Deserialize)] struct Run  { output: String }
+struct Printer;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let base = std::env::var("ARIA_AGENT_BASE")
-        .unwrap_or_else(|_| "http://localhost:3000".into());
-    let client = Client::new();
-    let mut headers = reqwest::header::HeaderMap::new();
-    if let Ok(key) = std::env::var("AGENT_CLOUD_API_KEY") {
-        headers.insert(reqwest::header::AUTHORIZATION, format!("Bearer {key}").parse()?);
-    }
-
-    let agent: Agent = client.post(format!("{base}/v1/agents"))
-        .headers(headers.clone())
-        .json(&serde_json::json!({"name": "my-agent"}))
-        .send().await?.json().await?;
-
-    let run: Run = client.post(format!("{base}/v1/sessions/s1/runs"))
-        .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "input": "hello"}))
-        .send().await?.json().await?;
-
-    println!("{}", run.output);
-
-    // 流式运行 —— OpenAI Responses API 事件
-    let mut res = client.post(format!("{base}/v1/sessions/s1/runs/stream"))
-        .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "input": "tell me a joke"}))
-        .send().await?;
-    let mut buf = String::new();
-    while let Some(chunk) = res.chunk().await? {
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = buf.find('\n') {
-            let line = buf[..idx].trim().to_string();
-            buf.drain(..=idx);
-            let Some(payload) = line.strip_prefix("data:") else { continue };
-            let event: serde_json::Value = serde_json::from_str(payload.trim())?;
-            if event["type"] == "response.output_text.delta" {
-                print!("{}", event["delta"].as_str().unwrap_or_default());
-            } else if event["type"] == "response.completed" {
-                return Ok(()); // 终止事件
-            }
+impl SdkAgentListener for Printer {
+    fn on_event(&self, event: SdkStreamEvent) {
+        if let SdkStreamEvent::Token { text } = event {
+            print!("{text}");
         }
     }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
+    let agent = create_agent("History tutor".into(), "gpt-4o-mini".into())?;
+
+    // 1) 一次性运行
+    println!("{}", agent.run("罗马帝国何时灭亡？".into())?);
+
+    // 长期记忆保存在端侧存储：`memorize` 把一条事实以 `long_term` 片段持久化，
+    // 该 agent 的后续轮次可以召回它。
+    let session = agent.session();
+    session.memorize("user_name".into(), "Ada".into())?;
+
+    // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
+    println!("{}", agent.run("我叫什么名字？".into())?);
+    println!("{:?}", session.recall("user_name".into())?); // -> Some("Ada")
+
+    // 3) 流式运行 —— 事件推送给监听器
+    agent.run_stream("讲一个冷知识".into(), Box::new(Printer))?;
     Ok(())
 }
 ```
 
-> 在 Rust 中也可以直接依赖 `agent-core` / `ariacompute-agent`，在进程内运行
-> 运行时，而无需经过 HTTP。
+### Swift（进程内）
 
-### TypeScript（云端 API）
-
-```typescript
-const base = process.env.ARIA_AGENT_BASE ?? "http://localhost:3000";
-const apiKey = process.env.AGENT_CLOUD_API_KEY;
-const headers: Record<string, string> = {
-  "Content-Type": "application/json",
-  ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-};
-
-// 创建 + 一次性运行
-const agent = await fetch(`${base}/v1/agents`, {
-  method: "POST", headers, body: JSON.stringify({ name: "my-agent" }),
-}).then((r) => r.json<{ name: string }>());
-
-const run = await fetch(`${base}/v1/sessions/s1/runs`, {
-  method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, input: "hello" }),
-}).then((r) => r.json<{ output: string }>());
-console.log(run.output);
-
-// 流式运行 —— OpenAI Responses API 事件
-const res = await fetch(`${base}/v1/sessions/s1/runs/stream`, {
-  method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, input: "tell me a joke" }),
-});
-const reader = res.body!.getReader();
-const decoder = new TextDecoder();
-let buf = "";
-outer: for (;;) {
-  const { value, done } = await reader.read();
-  if (done) break;
-  buf += decoder.decode(value, { stream: true });
-  let idx;
-  while ((idx = buf.indexOf("\n")) >= 0) {
-    const line = buf.slice(0, idx).trim();
-    buf = buf.slice(idx + 1);
-    if (!line.startsWith("data:")) continue;
-    const event = JSON.parse(line.slice(5).trim());
-    if (event.type === "response.output_text.delta") {
-      process.stdout.write(event.delta);
-    } else if (event.type === "response.completed") {
-      // 终止事件
-      console.log("\n收执 ID：", event.response.metadata.reef_record_id);
-      break outer;
-    }
-  }
-}
-```
-
-### Swift
-
-嵌入 `libaria-agent_ffi` 与生成的 `AriaAgent` 模块（详见
-`bindings/swift/README.md`）可在**进程内**运行智能体，也可以通过 HTTP 消费云端流：
+嵌入 `libaria-agent_ffi` 与生成的 `AriaAgent` 模块（见 `bindings/swift/README.md`）。
 
 ```swift
 import AriaAgent
 
-// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）。
-// 无需 session：运行时为每个智能体分配独立的记忆作用域。
-let agent = createAgent(agentName: "Assistant", model: "gpt-4o-mini")
-let reply = agent.run("hello")
-let session = agent.session()
-session.memorize(key: "fact1", value: "the moon is cheese")
-print(session.recall(key: "fact1") ?? "")
+do {
+    // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
+    let agent = try createAgent(agentName: "History tutor", model: "gpt-4o-mini")
 
-// 云端流式（兼容 OpenAI）：消费 /v1/sessions/s1/runs/stream 的 response.* 事件
-let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
-var request = URLRequest(url: URL(string: "\(base)/v1/sessions/s1/runs/stream")!)
-request.httpMethod = "POST"
-request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-request.httpBody = try? JSONSerialization.data(withJSONObject: [
-    "agent": "Agent Demo", "input": "tell me a joke"
-])
+    // 1) 一次性运行
+    print(try agent.run("罗马帝国何时灭亡？"))
 
-let (stream, response) = try await URLSession.shared.bytes(for: request)
-// Reef 收执 ID 同时通过 x-reef-agent-record-id 响应头返回。
-let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
+    // 长期记忆保存在端侧存储：`memorize` 把一条事实以 `long_term` 片段持久化，
+    // 该 agent 的后续轮次可以召回它。
+    let session = agent.session()
+    try session.memorize(key: "user_name", value: "Ada")
 
-outer: for try await line in stream.lines {
-    guard line.hasPrefix("data:") else { continue }
-    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-    guard let data = payload.data(using: .utf8),
-          let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
-    switch event.type {
-    case "response.output_text.delta":
-        print(event.delta ?? "", terminator: "")
-    case "response.completed":
-        // 终止事件
-        print("\n收执 ID：", event.response?.metadata?.reefRecordId ?? receipt ?? "")
-        break outer
-    default:
-        break   // response.created / response.in_progress / output_item.* …
-    }
+    // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
+    print(try agent.run("我叫什么名字？"))
+    print(try session.recall(key: "user_name") ?? "")   // -> "Ada"
+
+    // 3) 流式运行 —— 事件交给监听器处理
+    try agent.runStream("讲一个冷知识", listener: Printer())
+} catch {
+    print(error)
 }
 ```
 
-### Kotlin
+### Kotlin（进程内）
 
-引入 `com.ariacompute:agent` 构件与 `libaria-agent_ffi` 原生库（详见
-`bindings/kotlin/agent-sdk/README.md`）可在**进程内**运行智能体，也可以通过 HTTP
-消费云端流：
+添加 `com.ariacompute:agent` 依赖与 `libaria-agent_ffi` 原生库（见
+`bindings/kotlin/agent-sdk/README.md`）。
 
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
-// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）。
-// 无需 session：运行时为每个智能体分配独立的记忆作用域。
 fun main() {
-    val agent = createAgent("Assistant", "gpt-4o-mini")
-    val reply = agent.run("hello")
+    // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
+    val agent = createAgent("History tutor", "gpt-4o-mini")
+
+    // 1) 一次性运行
+    println(agent.run("罗马帝国何时灭亡？"))
+
+    // 长期记忆保存在端侧存储：`memorize` 把一条事实以 `long_term` 片段持久化，
+    // 该 agent 的后续轮次可以召回它。
     val session = agent.session()
-    session.memorize("fact1", "the moon is cheese")
-    println(session.recall("fact1"))
-}
+    session.memorize("user_name", "Ada")
 
-// 云端流式（兼容 OpenAI）：消费 /v1/sessions/s1/runs/stream 的 response.* 事件
-val json = Json { ignoreUnknownKeys = true }
-val client = OkHttpClient()
-val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
+    // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
+    println(agent.run("我叫什么名字？"))
+    println(session.recall("user_name"))   // -> "Ada"
 
-val request = Request.Builder()
-    .url("$base/v1/sessions/s1/runs/stream")
-    .header("Accept", "text/event-stream")
-    .post("""{"agent":"Agent Demo","input":"tell me a joke"}"""
-        .toRequestBody())
-    .build()
-
-client.newCall(request).execute().use { resp ->
-    // Reef 收执 ID 同时通过 x-reef-agent-record-id 响应头返回。
-    val receipt = resp.header("x-reef-agent-record-id")
-    resp.body!!.byteStream().bufferedReader().useLines { lines ->
-        run loop@{
-            for (line in lines) {
-                if (!line.startsWith("data:")) continue
-                val event = json.parseToJsonElement(line.removePrefix("data:").trim()).jsonObject
-                when (event["type"]?.jsonPrimitive?.content) {
-                    "response.output_text.delta" ->
-                        print(event["delta"]?.jsonPrimitive?.content.orEmpty())
-                    "response.completed" -> {
-                        // 终止事件
-                        println(
-                            "\n收执 ID： " + (event["response"]?.jsonObject
-                                ?.get("metadata")?.jsonObject
-                                ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
-                        )
-                        return@loop
-                    }
-                }
-            }
-        }
-    }
+    // 3) 流式运行 —— 事件交给监听器处理
+    agent.runStream("讲一个冷知识", Printer())
 }
 ```
 
 ## OpenAI Agents API 兼容性
 
-`POST /v1/sessions/s1/runs/stream` 采用 **OpenAI Responses API 流式协议**，因此 OpenAI SDK
-与 OpenAI Agents SDK 可以零改造直接消费。每个 SSE `data:` 帧都是一个带 `type`
-和单调递增 `sequence_number` 的 Responses 事件：
+`POST /v1/agents/sessions/{id}/events/stream` 采用 **OpenAI beta Agents 流式协议**，
+因此 OpenAI 客户端可以零改造直接消费。每个 SSE `data:` 帧都是 `agent.*` 事件，
+带 `event_id`、`session_id`、`turn_id` 与单调递增的 `sequence_number`：
 
 | 事件 | 载荷 |
 |---|---|
-| `response.created` | `response.id`、`response.metadata`（`agent_id`、`session`、`reef_record_id`） |
-| `response.in_progress` | 阶段边界；额外带 `phase`（`recall` / `model` / `tool_exec` / `loop_guard`）与 `label` |
-| `response.output_item.added` | `item` —— `message`（assistant）或 `function_call` |
-| `response.function_call_arguments.delta` | `item_id`、`delta`（参数 JSON 分片） |
-| `response.output_item.done` | 完成的 `item`；`function_call` 还附带执行结果 `result` |
-| `response.output_text.delta` | `item_id`、`content_index`、`delta` |
-| `response.output_text.done` | `item_id`、`content_index`、`text` |
-| `response.completed` | `response.status = "completed"`、`response.metadata.reef_record_id` |
-| `response.failed` | `response.error` |
+| `agent.turn.created` | `turn{id,status,session_id,agent_id}` |
+| `agent.turn.in_progress` | 阶段边界；额外带 `phase`（`recall` / `model` / `tool_exec` / `loop_guard`）与 `label` |
+| `agent.turn.item.added` | `item` —— `message`（assistant，`role`）或 `function_call`（`name`、`arguments`） |
+| `agent.turn.item.done` | 完成的 `item`；`function_call` 还附带执行结果 `result` |
+| `agent.turn.output_text.delta` | `item_id`、`delta` |
+| `agent.turn.output_text.done` | `item_id`、`text` |
+| `agent.turn.completed` | 终止事件：`turn{status:"completed", output}` |
+| `agent.turn.failed` | 终止事件：`turn{status:"failed"}`、`error` |
 
-`response.completed` 即为终止事件：客户端收到它便意味着运行结束（没有额外的 `data: [DONE]`
-尾帧）——直接在 `response.completed`（或 `response.failed`）处停止解析即可。每次运行还会通过响应头
-`x-reef-agent-record-id` 返回 Reef 收执 ID，取值与
-`response.metadata.reef_record_id` 完全一致。
+`agent.turn.completed`（或 `agent.turn.failed`）即为终止事件：客户端收到它便
+意味着运行结束（没有额外的 `data: [DONE]` 尾帧）。
 
-编排所需、但 Responses 协议未建模的字段（agentic `phase`、工具 `result`、Reef
-收执 ID）都被放在这些 **OpenAI 形状帧的内部**作为额外字段，严格的 OpenAI
-客户端会自动忽略，不会产生私有 `aria.*` 帧。
+编排所需、但 beta 协议未建模的字段（agentic `phase`、工具 `result`）都被放在
+这些帧**内部**作为额外字段，严格的 OpenAI 客户端会自动忽略，不会产生私有
+`aria.*` 帧。
+
+推荐使用上面的 SDK 消费该协议 —— 帧解析由 SDK 完成（对应
+`result.final_output` / `result.finalOutput`）：
 
 ```python
-# 用官方 OpenAI SDK 消费（无需任何 Aria 专属解析）
-from openai import OpenAI
-client = OpenAI(base_url=f"{BASE}/v1", api_key=API_KEY or "unused")
-for event in client.responses.create(
-    model="gpt-4o-mini",
-    input="tell me a joke",
-    extra_body={"agent": "Agent Demo"},
-    stream=True,
-):
-    if event.type == "response.output_text.delta":
-        print(event.delta, end="", flush=True)
+from ariacompute_agent import Agent, Runner
+
+agent = Agent(name="Agent Demo")
+streamed = await Runner.run_streamed(agent, "tell me a joke")
+async for event in streamed.events:
+    if event["type"] == "agent.turn.output_text.delta":
+        print(event["delta"], end="", flush=True)
 ```
 
 ### 默认智能体

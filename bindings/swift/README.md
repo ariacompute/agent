@@ -30,31 +30,31 @@ print(session.recall(key: "fact1") ?? "")
 
 ## Cloud streaming (OpenAI-compatible)
 
-`POST /v1/sessions/:id/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
-SSE events, so a Swift client parses `response.*` frames with no Aria-specific
-logic. Each `data:` frame is one event; `response.completed` is the terminal
-one.
+`POST /v1/agents/sessions/{id}/events/stream` on `aria-agent-cloud` emits
+**OpenAI beta Agents** SSE events, so a Swift client parses `agent.*` frames
+with no Aria-specific logic. Each `data:` frame is one event;
+`agent.turn.completed` is the terminal one.
 
 ```swift
 import Foundation
 
 struct CloudEvent: Decodable {
     let type: String
-    let delta: String?          // response.output_text.delta
-    let response: CloudResponse?
+    let delta: String?          // agent.turn.output_text.delta
+    let turn: CloudTurn?
 }
-struct CloudResponse: Decodable {
-    struct Metadata: Decodable { let reefRecordId: String?
-        enum CodingKeys: String, CodingKey { case reefRecordId = "reef_record_id" } }
-    let metadata: Metadata?
+struct CloudTurn: Decodable {
+    let id: String?
+    let status: String?
+    let output: String?
 }
 
 let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
 
-// The session id is an opaque memo scope; `s1` is a fixed example. (An SDK
-// agent also exposes `agent.sessionId()`; the cloud can mint one via
-// `POST /v1/sessions`, which returns `{ "id": <uuid> }`.)
-var request = URLRequest(url: URL(string: "\(base)/v1/sessions/s1/runs/stream")!)
+// The session id scopes the conversation; mint one with
+// `POST /v1/agents/sessions` (body `{ "agent": "Agent Demo" }`), which returns
+// `{ "id": "sess_…" }`. An SDK agent also exposes `agent.sessionId()`.
+var request = URLRequest(url: URL(string: "\(base)/v1/agents/sessions/sess_1/events/stream")!)
 request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -62,9 +62,7 @@ request.httpBody = try? JSONSerialization.data(withJSONObject: [
     "agent": "Agent Demo", "input": "tell me a joke"
 ])
 
-let (stream, response) = try await URLSession.shared.bytes(for: request)
-// The Reef receipt is also returned as the x-reef-agent-record-id header.
-let receipt = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-reef-agent-record-id")
+let (stream, _) = try await URLSession.shared.bytes(for: request)
 
 outer: for try await line in stream.lines {
     guard line.hasPrefix("data:") else { continue }
@@ -72,14 +70,13 @@ outer: for try await line in stream.lines {
     guard let data = payload.data(using: .utf8),
           let event = try? JSONDecoder().decode(CloudEvent.self, from: data) else { continue }
     switch event.type {
-    case "response.output_text.delta":
+    case "agent.turn.output_text.delta":
         print(event.delta ?? "", terminator: "")
-    case "response.completed":
+    case "agent.turn.completed":
         // terminal event — the stream ends here
-        print("\nreceipt:", event.response?.metadata?.reefRecordId ?? receipt ?? "")
         break outer
     default:
-        break   // response.created / response.in_progress / output_item.* …
+        break   // agent.turn.created / agent.turn.in_progress / agent.turn.item.* …
     }
 }
 ```

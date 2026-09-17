@@ -3,7 +3,7 @@ name = "aria-agent-memo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Unified context-memory (memo) store for the agent platform. Local/embedded storage, NOT Postgres."
+description = "On-device / embedded context store for the agent platform (sled). Implements aria-agent-core's ContextStore contract; the cloud uses Postgres + pgvector instead."
 
 [lib]
 name = "agent_memo"
@@ -16,3 +16,4 @@ thiserror.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 sled = "0.34"
+aria-agent-core.workspace = true

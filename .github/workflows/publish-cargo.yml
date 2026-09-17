@@ -5,11 +5,14 @@ name: Publish crates.io (ariacompute-agent)
 #   cargo add ariacompute-agent
 #   use aria_agent_ffi::Agent;
 #
-# Published packages are the public SDK surface: aria-agent-memo,
-# aria-agent-sandbox, aria-agent-core, and ariacompute-agent. The CLI binary
-# crate `aria-agent-cloud` is not published (GitHub Release assets instead), and
-# `aria-agent-ffigen` is `publish = false` (it only generates the Swift/Kotlin
-# bindings).
+# Published packages are the public SDK surface: aria-agent-sandbox,
+# aria-agent-core, aria-agent-memo (on-device store) and ariacompute-agent.
+# The CLI binary crate `aria-agent-cloud` is not published (GitHub Release
+# assets instead), and `aria-agent-ffigen` is `publish = false` (it only
+# generates the Swift/Kotlin bindings).
+#
+# Dependency direction: core -> sandbox, memo -> core. Publishing therefore
+# goes sandbox -> core -> memo -> ariacompute-agent.
 #
 # Path+version workspace deps cannot be packaged until each dependency
 # exists on the registry, so crates are published in topological order
@@ -72,7 +75,7 @@ jobs:
           if n != 1:
               sys.exit(f"workspace.package version not found (n={n})")
           # Published path+version workspace deps (topological leaves first).
-          names = ["aria-agent-memo", "aria-agent-sandbox", "aria-agent-core"]
+          names = ["aria-agent-sandbox", "aria-agent-core", "aria-agent-memo"]
           count = 0
           for name in names:
               pat = re.compile(
@@ -89,7 +92,7 @@ jobs:
           open(path, "w").write(text)
           print(f"Injected version={version} into workspace.package + {count} deps")
           PY
-          grep -nE '^(version = |aria-agent-(memo|sandbox|core) = )' Cargo.toml
+          grep -nE '^(version = |aria-agent-(sandbox|core|memo) = )' Cargo.toml
       - name: Check crates.io token
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -100,7 +103,7 @@ jobs:
           fi
       - name: Build publish closure
         run: |
-          cargo check -p aria-agent-memo -p aria-agent-sandbox -p aria-agent-core -p ariacompute-agent
+          cargo check -p aria-agent-sandbox -p aria-agent-core -p aria-agent-memo -p ariacompute-agent
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -158,7 +161,7 @@ jobs:
           }
 
           # Topological order: dependents need the previous crate on crates.io.
-          publish_pkg aria-agent-memo
           publish_pkg aria-agent-sandbox
           publish_pkg aria-agent-core
+          publish_pkg aria-agent-memo
           publish_pkg ariacompute-agent

@@ -967,7 +967,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 39777.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 42291.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471.toShort()) {
@@ -979,7 +979,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 20313.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 6609.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838.toShort()) {
@@ -1281,8 +1281,8 @@ public interface SdkAgentInterface {
     fun `session`(): SdkSession
     
     /**
-     * The auto-assigned session id (memo scope). Useful when relaying a run to
-     * the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+     * The auto-assigned session id (context scope). Useful when relaying a run
+     * to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
      */
     fun `sessionId`(): kotlin.String
     
@@ -1424,8 +1424,8 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
 
     
     /**
-     * The auto-assigned session id (memo scope). Useful when relaying a run to
-     * the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+     * The auto-assigned session id (context scope). Useful when relaying a run
+     * to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
      */override fun `sessionId`(): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
@@ -1574,7 +1574,8 @@ public object FfiConverterTypeSdkAgent: FfiConverter<SdkAgent, Pointer> {
 
 
 /**
- * A session's memo handle (long-term / externalized memory).
+ * A session's context handle (long-term / externalized memory). The on-device
+ * store is embedded (sled); the cloud uses Postgres + pgvector.
  */
 public interface SdkSessionInterface {
     
@@ -1592,7 +1593,8 @@ public interface SdkSessionInterface {
 }
 
 /**
- * A session's memo handle (long-term / externalized memory).
+ * A session's context handle (long-term / externalized memory). The on-device
+ * store is embedded (sled); the cloud uses Postgres + pgvector.
  */
 open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 
@@ -1746,10 +1748,13 @@ public object FfiConverterTypeSdkSession: FfiConverter<SdkSession, Pointer> {
 
 /**
  * SDK-side agent configuration (advanced path). `session` is intentionally
- * absent: the runtime assigns one isolated memo scope per agent instance.
+ * absent: the runtime assigns one isolated context scope per agent instance.
+ *
+ * Mirrors the OpenAI Agents SDK agent definition: name + instructions + model.
  */
 data class SdkAgentConfig (
     var `agentName`: kotlin.String, 
+    var `instructions`: kotlin.String, 
     var `model`: kotlin.String, 
     var `sandboxProvider`: kotlin.String
 ) {
@@ -1766,17 +1771,20 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: SdkAgentConfig) = (
             FfiConverterString.allocationSize(value.`agentName`) +
+            FfiConverterString.allocationSize(value.`instructions`) +
             FfiConverterString.allocationSize(value.`model`) +
             FfiConverterString.allocationSize(value.`sandboxProvider`)
     )
 
     override fun write(value: SdkAgentConfig, buf: ByteBuffer) {
             FfiConverterString.write(value.`agentName`, buf)
+            FfiConverterString.write(value.`instructions`, buf)
             FfiConverterString.write(value.`model`, buf)
             FfiConverterString.write(value.`sandboxProvider`, buf)
     }
@@ -2167,7 +2175,8 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
     
 
         /**
-         * Advanced entry accepting a full [`SdkAgentConfig`] (custom sandbox, etc.).
+         * Advanced entry accepting a full [`SdkAgentConfig`] (instructions, custom
+         * sandbox, …).
          */
     @Throws(SdkException::class) fun `createAgentWith`(`config`: SdkAgentConfig): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(

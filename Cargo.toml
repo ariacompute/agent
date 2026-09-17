@@ -6,7 +6,6 @@ members = [
     "crates/aria-agent-core",
     "crates/ariacompute-agent",
     "crates/aria-agent-cloud",
-    "crates/aria-agent-reef",
     "crates/aria-agent-ffigen",
     "tests",
 ]
@@ -36,7 +35,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aria-agent-memo = { path = "crates/aria-agent-memo" }
 aria-agent-sandbox = { path = "crates/aria-agent-sandbox" }
 aria-agent-core = { path = "crates/aria-agent-core" }
-aria-agent-reef = { path = "crates/aria-agent-reef" }
 
 [profile.release]
 opt-level = 2

@@ -1,19 +1,21 @@
 //! `agent-cloud` — the Agents Cloud API.
 //!
 //! * axum HTTP server.
-//! * Postgres is used **only** for structured metadata (`agents`, `runs`).
-//! * Conversational context is injected from `agent-memo` (local/embedded
-//!   store) — never persisted in Postgres.
+//! * Postgres holds structured metadata (`agents`, `runs`) **and** the
+//!   conversational / long-term context (`context_fragments`) — the latter
+//!   through pgvector for semantic recall (see `context::pg`).
+//! * The on-device SDK keeps its own embedded store (`agent-memo`); the cloud
+//!   never uses it.
 //! * Model calls go to the OpenAI Responses/Chat API via `agent-core`'s
 //!   `OpenAiModel` (enabled by the `openai` feature).
-//! * Self-improvement (Reef-style) is layered on top: every turn is recorded
-//!   (receipt `x-reef-agent-record-id`), feedback is bound via `/reef/report`,
-//!   and `/reef/evolve` runs the local engine to propose a better harness,
-//!   keeps the winner, versions it in Git (`.reef/`), and hot-swaps the shared
-//!   `ActiveHarness` so live traffic picks it up without a restart.
+//! * Context memory is Postgres + pgvector (`context_fragments`), sharded per
+//!   principal.
 
+mod api;
 mod cli_config;
+mod context;
 mod event_envelope;
+mod types;
 mod upgrade;
 
 /// Deep codex integration (ADR-0005 §Decision): the codex-backed sandbox backend.
@@ -181,27 +183,17 @@ mod codex_sandbox {
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::{
-    ActiveHarness, Agent, AgentConfig, AgentEvent, CoreError, ModelClient, OpenAiModel, Tool,
-};
-use agent_memo::{MemoStore, SledMemoStore};
-use agent_reef::engine::EvolutionEngine;
-use agent_reef::feedback::{Feedback, FeedbackStore, SledFeedbackStore};
-use agent_reef::git;
-use agent_reef::harness;
-use agent_reef::record::{Record, RecordStore, SledRecordStore};
-use agent_reef::ReefError;
+use agent_core::{Agent, AgentConfig, CoreError, ModelClient, OpenAiModel, Tool};
 use agent_sandbox::{Sandbox, SandboxProvider};
 use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use axum::extract::Request;
 use axum::extract::{Path, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::sse::Event;
 use axum::response::{sse::Sse, IntoResponse, Response};
@@ -211,20 +203,20 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::Executor;
 use sqlx::Row;
 use uuid::Uuid;
 
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
-const REEF_RECORD_HEADER: &str = "x-reef-agent-record-id";
 
 /// Identity of an API caller (tenant / user). Also doubles as an axum extractor:
 /// [`require_auth`] resolves the presented key to a `Principal` and inserts it
 /// into the request extensions; handlers pull it back out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Principal {
-    /// Tenant/user id. Also the sled path shard key (validated safe).
+    /// Tenant/user id — the shard key for context (`context_fragments`), agents
+    /// and runs.
     id: String,
     kind: PrincipalKind,
     scopes: ApiKeyScopes,
@@ -369,143 +361,6 @@ impl KeyCache {
     }
 }
 
-/// A store that can be opened persistently under a path or in-memory.
-trait TenantStore: Send + Sync + 'static {
-    fn open(path: &std::path::Path) -> Result<Arc<Self>, String>;
-    fn memory() -> Result<Arc<Self>, String>;
-}
-
-impl TenantStore for SledMemoStore {
-    fn open(path: &std::path::Path) -> Result<Arc<Self>, String> {
-        SledMemoStore::open(path).map_err(|e| e.to_string())
-    }
-    fn memory() -> Result<Arc<Self>, String> {
-        SledMemoStore::memory().map_err(|e| e.to_string())
-    }
-}
-
-impl TenantStore for SledRecordStore {
-    fn open(path: &std::path::Path) -> Result<Arc<Self>, String> {
-        SledRecordStore::open(path).map_err(|e| e.to_string())
-    }
-    fn memory() -> Result<Arc<Self>, String> {
-        SledRecordStore::memory().map_err(|e| e.to_string())
-    }
-}
-
-impl TenantStore for SledFeedbackStore {
-    fn open(path: &std::path::Path) -> Result<Arc<Self>, String> {
-        SledFeedbackStore::open(path).map_err(|e| e.to_string())
-    }
-    fn memory() -> Result<Arc<Self>, String> {
-        SledFeedbackStore::memory().map_err(|e| e.to_string())
-    }
-}
-
-/// Lazily opens + caches one store per principal under `root/<pid>` (persistent)
-/// or a fresh in-memory db (memory mode).
-struct TenantStoreRegistry<S: TenantStore> {
-    mode: StoreMode,
-    cache: Mutex<HashMap<String, Arc<S>>>,
-}
-
-#[derive(Clone)]
-enum StoreMode {
-    Persistent(PathBuf),
-    Memory,
-}
-
-impl<S: TenantStore> Clone for TenantStoreRegistry<S> {
-    fn clone(&self) -> Self {
-        Self {
-            mode: self.mode.clone(),
-            cache: Mutex::new(self.cache.lock().unwrap().clone()),
-        }
-    }
-}
-
-impl<S: TenantStore> TenantStoreRegistry<S> {
-    fn for_principal(&self, pid: &str) -> Arc<S> {
-        validate_pid(pid);
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(s) = cache.get(pid) {
-            return s.clone();
-        }
-        let store = match &self.mode {
-            StoreMode::Persistent(root) => {
-                let dir = root.join(pid);
-                let _ = std::fs::create_dir_all(&dir);
-                S::open(&dir).expect("open tenant store")
-            }
-            StoreMode::Memory => S::memory().expect("memory tenant store"),
-        };
-        cache.insert(pid.to_string(), store.clone());
-        store
-    }
-}
-
-/// Lazily opens + caches one [`ActiveHarness`] per principal. Each tenant starts
-/// from the baseline (or its last winning harness persisted under
-/// `reef_dir/tenants/<pid>`) and self-improves independently; a winning evolution
-/// hot-swaps only that tenant's served harness. A best-effort, isolated git repo
-/// under that dir versions each tenant's harness without colliding with the
-/// admin/fleet repo at `reef_dir`.
-struct TenantHarnessRegistry {
-    root: PathBuf,
-    /// Shared across clones of `AppState` so every handle sees the same harnesses.
-    cache: Arc<Mutex<HashMap<String, Arc<ActiveHarness>>>>,
-}
-
-impl Clone for TenantHarnessRegistry {
-    fn clone(&self) -> Self {
-        TenantHarnessRegistry {
-            root: self.root.clone(),
-            cache: self.cache.clone(),
-        }
-    }
-}
-
-impl TenantHarnessRegistry {
-    fn new(root: PathBuf) -> Self {
-        TenantHarnessRegistry {
-            root,
-            cache: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-    fn for_principal(&self, pid: &str) -> Arc<ActiveHarness> {
-        validate_pid(pid);
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(h) = cache.get(pid) {
-            return h.clone();
-        }
-        let dir = self.root.join("tenants").join(pid);
-        let _ = std::fs::create_dir_all(&dir);
-        // Best-effort isolated git repo for per-tenant harness versioning.
-        if let Err(e) = git::init_repo(&dir) {
-            tracing::warn!("reef: tenant {pid} harness git init skipped: {e}");
-        }
-        let harness = match harness::load(&dir) {
-            Ok(h) => ActiveHarness::new(h),
-            Err(_) => ActiveHarness::baseline("agent"),
-        };
-        let harness = Arc::new(harness);
-        cache.insert(pid.to_string(), harness.clone());
-        harness
-    }
-}
-
-/// Reject principal ids that could break out of the sled root directory.
-fn validate_pid(pid: &str) {
-    if pid.is_empty()
-        || pid.len() > 64
-        || !pid
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        panic!("invalid principal id: {pid:?}");
-    }
-}
-
 #[async_trait]
 impl<S> FromRequestParts<S> for Principal
 where
@@ -524,147 +379,32 @@ where
 #[derive(Clone)]
 struct AppState {
     pool: sqlx::PgPool,
-    /// Admin/bootstrap principal's stores (legacy root paths).
-    admin_memo: Arc<dyn MemoStore>,
-    admin_records: Arc<dyn RecordStore>,
-    admin_feedback: Arc<dyn FeedbackStore>,
-    /// Admin/bootstrap principal's served harness (legacy root path).
-    admin_harness: Arc<ActiveHarness>,
-    /// Per-tenant store registries (lazily opened under subdirs).
-    tenant_memo: TenantStoreRegistry<SledMemoStore>,
-    tenant_records: TenantStoreRegistry<SledRecordStore>,
-    tenant_feedback: TenantStoreRegistry<SledFeedbackStore>,
-    /// Per-tenant hot-swappable harnesses (independent self-improvement).
-    tenant_harness: TenantHarnessRegistry,
     /// In-memory cache for API-key resolution (with revocation TTL).
     key_cache: KeyCache,
     /// Model factory (real OpenAI in prod, stub in tests).
     make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync>,
-    /// `.reef/` artifact directory (Git-versioned harness files).
-    reef_dir: PathBuf,
 }
 
 impl AppState {
-    /// Memo store scoped to a principal (admin → legacy root store).
-    fn memo_for(&self, p: &Principal) -> Arc<dyn MemoStore> {
-        if p.kind == PrincipalKind::Admin {
-            self.admin_memo.clone()
-        } else {
-            self.tenant_memo.for_principal(&p.id)
-        }
+    /// Context store scoped to a principal.
+    ///
+    /// Conversational / long-term context lives in Postgres (`context_fragments`),
+    /// sharded by `principal_id` — every query in `context::pg` filters on it.
+    fn context_for(&self, p: &Principal) -> Arc<context::PgContextStore> {
+        context::PgContextStore::new(self.pool.clone(), p.id.clone())
     }
-    /// Record store scoped to a principal.
-    fn records_for(&self, p: &Principal) -> Arc<dyn RecordStore> {
-        if p.kind == PrincipalKind::Admin {
-            self.admin_records.clone()
-        } else {
-            self.tenant_records.for_principal(&p.id)
-        }
-    }
-    /// Feedback store scoped to a principal.
-    fn feedback_for(&self, p: &Principal) -> Arc<dyn FeedbackStore> {
-        if p.kind == PrincipalKind::Admin {
-            self.admin_feedback.clone()
-        } else {
-            self.tenant_feedback.for_principal(&p.id)
-        }
-    }
-    /// Harness scoped to a principal (admin → legacy root harness).
-    fn harness_for(&self, p: &Principal) -> Arc<ActiveHarness> {
-        if p.kind == PrincipalKind::Admin {
-            self.admin_harness.clone()
-        } else {
-            self.tenant_harness.for_principal(&p.id)
-        }
-    }
-    /// Evolution engine bound to a principal's records/feedback + harness.
-    /// Admin writes into the shared `reef_dir`; tenants get an isolated subdir.
-    fn engine_for(&self, p: &Principal) -> Arc<EvolutionEngine> {
-        let harness_dir = if p.kind == PrincipalKind::Admin {
-            self.reef_dir.clone()
-        } else {
-            self.reef_dir.join("tenants").join(&p.id)
-        };
-        Arc::new(EvolutionEngine::new(
-            (self.make_model)(),
-            self.records_for(p),
-            self.feedback_for(p),
-            harness_dir,
-            self.harness_for(p),
-            3,
-        ))
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct AgentRecord {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct CreateAgentBody {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct RunBody {
-    /// Resolve the agent by id (original behavior)…
-    #[serde(default)]
-    agent_id: Option<String>,
-    /// …or by its human-friendly name (marketing / quick-start friendly).
-    #[serde(default)]
-    agent: Option<String>,
-    input: String,
-    /// Accepted for client compatibility; `/v1/sessions/:id/runs/stream` always streams, so
-    /// this is currently ignored.
-    #[serde(default)]
-    #[allow(dead_code)]
-    stream: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct RunRecord {
-    id: String,
-    agent_id: String,
-    session: String,
-    output: String,
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
-}
-
-#[derive(Deserialize)]
-struct ReefReportBody {
-    /// Receipt ids of the recorded turns this feedback concerns.
-    references: Vec<String>,
-    score: f64,
-    feedback: Option<String>,
 }
 
 #[derive(Debug)]
 enum AppError {
     Db(sqlx::Error),
     Core(CoreError),
-    Reef(ReefError),
-    BadReport(String),
+    BadRequest(String),
     NotFound,
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            AppError::Db(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")),
-            AppError::Core(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("core: {e}")),
-            AppError::Reef(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("reef: {e}")),
-            AppError::BadReport(e) => (StatusCode::BAD_REQUEST, format!("bad_report: {e}")),
-            AppError::NotFound => (StatusCode::NOT_FOUND, "not found".into()),
-        };
-        (status, Json(ErrorBody { error: msg })).into_response()
-    }
-}
+// `IntoResponse for AppError` lives in `api::error_response` (OpenAI-shaped
+// error bodies) — see `crates/aria-agent-cloud/src/api/mod.rs`.
 
 /// The frozen agentic toolset handed to every cloud run.
 ///
@@ -816,17 +556,23 @@ fn generate_key() -> (String, String, String) {
     (key, prefix, hash)
 }
 
-/// Build an [`Agent`] for the given run body (resolves the agent name from the
-/// Postgres metadata store, wires the OpenAI model + memo, and **shares** the
-/// process-wide `ActiveHarness` so a self-improvement win is picked up live).
+/// Build an [`Agent`] for the given run body: resolves the agent name from the
+/// Postgres metadata store, wires the OpenAI model and the principal-scoped
+/// Postgres context store.
 async fn build_agent(
     state: &AppState,
     name: &str,
+    instructions: &str,
     session: &str,
     principal: &Principal,
 ) -> Result<Agent, AppError> {
-    let cfg = agent_config(name, session);
-    let memo = state.memo_for(principal);
+    let cfg = agent_config(name, instructions, session);
+    let context = state.context_for(principal);
+    tracing::debug!(
+        principal = %context.principal_id(),
+        session = %session,
+        "context: postgres + pgvector store"
+    );
     // Select the sandbox backend. `codex` is provided by this runtime
     // (publish = false); the published `agent-sandbox` returns `NotConfigured`
     // for it, so we construct `CodexSandbox` directly and inject it.
@@ -843,286 +589,17 @@ async fn build_agent(
                 .map_err(|e| AppError::Core(CoreError::Config(e.to_string())))?,
         ),
     };
-    Agent::with_sandbox(
-        cfg,
-        (state.make_model)(),
-        memo,
-        state.harness_for(principal),
-        sandbox,
-    )
-    .map_err(AppError::Core)
+    Agent::with_sandbox(cfg, (state.make_model)(), context, sandbox).map_err(AppError::Core)
 }
 
-async fn create_agent(
-    State(state): State<AppState>,
-    principal: Principal,
-    Json(body): Json<CreateAgentBody>,
-) -> Result<Json<AgentRecord>, AppError> {
-    let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO agents (id, name, principal_id) VALUES ($1, $2, $3)")
-        .bind(&id)
-        .bind(&body.name)
-        .bind(&principal.id)
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::Db)?;
-    Ok(Json(AgentRecord {
-        id,
-        name: body.name,
-    }))
-}
-
-async fn get_agent(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-) -> Result<Json<AgentRecord>, AppError> {
-    // Admins see every agent; tenants only their own.
-    let row = if principal.kind == PrincipalKind::Admin {
-        sqlx::query("SELECT id, name FROM agents WHERE id = $1")
-            .bind(&id)
-            .fetch_optional(&state.pool)
-            .await
-    } else {
-        sqlx::query("SELECT id, name FROM agents WHERE id = $1 AND principal_id = $2")
-            .bind(&id)
-            .bind(&principal.id)
-            .fetch_optional(&state.pool)
-            .await
-    }
-    .map_err(AppError::Db)?
-    .ok_or(AppError::NotFound)?;
-    Ok(Json(AgentRecord {
-        id: row.get("id"),
-        name: row.get("name"),
-    }))
-}
-
-/// List agents visible to the caller: admins see every agent, tenants only
-/// their own. Backs the playground's agent picker.
-async fn list_agents(
-    State(state): State<AppState>,
-    principal: Principal,
-) -> Result<Json<Vec<AgentRecord>>, AppError> {
-    let rows = if principal.kind == PrincipalKind::Admin {
-        sqlx::query("SELECT id, name FROM agents ORDER BY created_at, name")
-            .fetch_all(&state.pool)
-            .await
-    } else {
-        sqlx::query("SELECT id, name FROM agents WHERE principal_id = $1 ORDER BY created_at, name")
-            .bind(&principal.id)
-            .fetch_all(&state.pool)
-            .await
-    }
-    .map_err(AppError::Db)?;
-    let out = rows
-        .iter()
-        .map(|r| AgentRecord {
-            id: r.get("id"),
-            name: r.get("name"),
-        })
-        .collect();
-    Ok(Json(out))
-}
-
-/// Create a new agent session. The session id is the memo scoping key (a uuid);
-/// no database row is created — memo stores lazily per session string, matching
-/// the prior `RunBody.session` semantics. Returns `{ "id": <uuid> }`.
-async fn create_session(
-    State(_state): State<AppState>,
-    _principal: Principal,
-) -> Json<SessionCreated> {
-    Json(SessionCreated {
-        id: Uuid::new_v4().to_string(),
-    })
-}
-
-#[derive(Serialize)]
-struct SessionCreated {
-    id: String,
-}
-
-/// Run one agentic turn and return the assistant reply (blocking, non-streaming).
-async fn session_run(
-    State(state): State<AppState>,
-    Path(session): Path<String>,
-    principal: Principal,
-    Json(body): Json<RunBody>,
-) -> Response {
-    let (agent_id, name) = match resolve_agent(&state, &body, &principal).await {
-        Ok(v) => v,
-        Err(e) => return e.into_response(),
-    };
-    let agent = match build_agent(&state, &name, &session, &principal).await {
-        Ok(a) => a,
-        Err(e) => return e.into_response(),
-    };
-    let output = match agent.run(&body.input).await {
-        Ok(o) => o,
-        Err(e) => return AppError::Core(e).into_response(),
-    };
-
-    // Record the turn (learning log) and surface the receipt id as a header.
-    // Both are scoped to the calling principal's stores.
-    let records = state.records_for(&principal);
-    let rec = Record::new(
-        &agent_id,
-        &session,
-        None,
-        &state.harness_for(&principal).get().system_text(),
-        &body.input,
-        &output,
-        DEFAULT_MODEL,
-    );
-    if let Err(e) = records.record_turn(rec.clone()).await {
-        tracing::warn!("reef: failed to record turn: {e}");
-    }
-
-    // Metadata only — never the conversational context. Attribute to principal.
-    let run_id = Uuid::new_v4().to_string();
-    if let Err(e) = sqlx::query(
-        "INSERT INTO runs (id, agent_id, session, input, output, principal_id) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(&run_id)
-    .bind(&agent_id)
-    .bind(&session)
-    .bind(&body.input)
-    .bind(&output)
-    .bind(&principal.id)
-    .execute(&state.pool)
-    .await
-    {
-        tracing::warn!("reef: failed to persist run metadata: {e}");
-    }
-
-    let mut resp = Json(RunRecord {
-        id: run_id,
-        agent_id,
-        session,
-        output,
-    })
-    .into_response();
-    resp.headers_mut().insert(
-        HeaderName::from_static(REEF_RECORD_HEADER),
-        HeaderValue::from_str(&rec.id).unwrap_or(HeaderValue::from_static("")),
-    );
-    resp
-}
-
-/// Stream one agentic turn as **OpenAI Responses API** events.
+/// Wrap a translated frame stream into an SSE response.
 ///
-/// The core stream ([`Agent::run_event_stream`]) is translated frame by frame by
-/// [`event_envelope::EventEnvelope`]: the run opens with `response.created`,
-/// streams `response.content_part.added` / `response.output_text.delta` /
-/// `response.function_call_arguments.delta` / `response.output_item.*`, and closes
-/// with `response.completed`, which is the stream's terminal event. The Reef
-/// receipt id is echoed both as the `x-reef-agent-record-id` header and in
-/// `response.*.metadata.reef_record_id`. There is no trailing `[DONE]` frame —
-/// `response.completed` (or `response.failed`) is the only end-of-stream signal.
-async fn session_run_stream(
-    State(state): State<AppState>,
-    Path(session): Path<String>,
-    principal: Principal,
-    Json(body): Json<RunBody>,
-) -> Response {
-    // Resolve the agent (by id or name) + session before streaming.
-    let (agent_id, name) = match resolve_agent(&state, &body, &principal).await {
-        Ok(v) => v,
-        Err(e) => return e.into_response(),
-    };
-    let agent = match build_agent(&state, &name, &session, &principal).await {
-        Ok(a) => a,
-        Err(e) => return e.into_response(),
-    };
-
-    let sys = state.harness_for(&principal).get().system_text();
-    let run_id = Uuid::new_v4().to_string();
-    let rec_id = Uuid::new_v4().to_string();
-    let records = state.records_for(&principal);
-    // Placeholder record so the receipt id is known before streaming begins.
-    if let Err(e) = records
-        .record_turn(Record::new(
-            &agent_id,
-            &session,
-            None,
-            &sys,
-            &body.input,
-            "",
-            DEFAULT_MODEL,
-        ))
-        .await
-    {
-        tracing::warn!("reef: failed to record turn placeholder: {e}");
-    }
-
-    let tools = agent_tools();
-    let event_stream = match agent.run_event_stream(&body.input, &tools).await {
-        Ok(s) => s,
-        Err(e) => return AppError::Core(e).into_response(),
-    };
-
-    // Finalize the record at the end of the stream (overwrite placeholder with
-    // the real output, keeping the same receipt id).
-    let agent_id = agent_id.clone();
-    let session = session.clone();
-    let input = body.input.clone();
-    let rec_id_inner = rec_id.clone();
-    let run_id_inner = run_id.clone();
-    let wrapped = async_stream::stream! {
-        let mut envelope =
-            event_envelope::EventEnvelope::new(&run_id_inner, &agent_id, &session, &rec_id_inner);
-        yield envelope.created();
-
-        let mut collected = String::new();
-        let mut s = event_stream;
-        while let Some(item) = s.next().await {
-            match item {
-                Ok(ev) => {
-                    match &ev {
-                        AgentEvent::Token { text } => collected.push_str(text),
-                        // `Done` carries the full reply; prefer it so tool-only
-                        // turns still persist the final answer.
-                        AgentEvent::Done { text } if !text.is_empty() => collected = text.clone(),
-                        _ => {}
-                    }
-                    for frame in envelope.push(&ev) {
-                        yield frame;
-                    }
-                }
-                Err(e) => {
-                    yield envelope.failed(&e.to_string());
-                    return;
-                }
-            }
-        }
-
-        // The event stream is exhausted. `ensure_closed` guarantees the last
-        // frame is a terminal one even if the core stream never produced a
-        // `Done`, because there is no `[DONE]` sentinel to fall back on.
-        for frame in envelope.ensure_closed() {
-            yield frame;
-        }
-
-        let mut final_rec =
-            Record::new(&agent_id, &session, None, &sys, &input, &collected, DEFAULT_MODEL);
-        final_rec.id = rec_id_inner.clone();
-        let _ = records.record_turn(final_rec).await;
-    };
-
-    build_sse_stream(wrapped, &rec_id)
-}
-
-/// Wrap a translated frame stream into an SSE response carrying the Reef receipt
-/// id. Every streaming endpoint shares this single wire path: the frame stream is
+/// Every streaming endpoint shares this single wire path: the frame stream is
 /// produced by [`event_envelope::EventEnvelope`], and this helper only performs
-/// SSE encoding + header injection. No `[DONE]` sentinel is appended — the
-/// terminal `response.completed` / `response.failed` frame is the end-of-stream
+/// SSE encoding. No `[DONE]` sentinel is appended — the terminal
+/// `agent.turn.completed` / `agent.turn.failed` frame is the end-of-stream
 /// marker.
-fn build_sse_stream(
-    frames: impl futures::Stream<Item = Value> + Send + 'static,
-    rec_id: &str,
-) -> Response {
+fn build_sse_stream(frames: impl futures::Stream<Item = Value> + Send + 'static) -> Response {
     let sse = frames.map(|frame| {
         Ok::<Event, Infallible>(
             Event::default()
@@ -1130,69 +607,14 @@ fn build_sse_stream(
                 .unwrap_or_else(|_| Event::default().data("[encode-error]")),
         )
     });
-    let mut resp = Sse::new(Box::pin(sse)).into_response();
-    resp.headers_mut().insert(
-        HeaderName::from_static(REEF_RECORD_HEADER),
-        HeaderValue::from_str(rec_id).unwrap_or(HeaderValue::from_static("")),
-    );
-    resp
+    Sse::new(Box::pin(sse)).into_response()
 }
 
-/// Resolve the agent id + display name from a run body. Supports lookup by
-/// `agent_id` (original behavior) or by `agent` (human-friendly name), scoped to
-/// the calling principal (admins see all agents; tenants only their own).
-async fn resolve_agent(
-    state: &AppState,
-    body: &RunBody,
-    principal: &Principal,
-) -> Result<(String, String), AppError> {
-    let (id, name) = match (&body.agent_id, &body.agent) {
-        // By id: look up the name (original behavior).
-        (Some(id), _) => {
-            let row = lookup_agent_row(state, "id", id, principal).await?;
-            (id.clone(), row.get("name"))
-        }
-        // By name: look up the id; the display name is the requested string.
-        (None, Some(name)) => {
-            let row = lookup_agent_row(state, "name", name, principal).await?;
-            (row.get::<String, _>("id"), name.clone())
-        }
-        // Neither provided.
-        (None, None) => {
-            return Err(AppError::BadReport(
-                "either `agent_id` or `agent` is required".into(),
-            ))
-        }
-    };
-    Ok((id, name))
-}
-
-/// `SELECT id, name FROM agents WHERE <col> = $1 [AND principal_id = $2]`.
-async fn lookup_agent_row(
-    state: &AppState,
-    col: &str,
-    val: &str,
-    principal: &Principal,
-) -> Result<PgRow, AppError> {
-    let q = if principal.kind == PrincipalKind::Admin {
-        format!("SELECT id, name FROM agents WHERE {col} = $1")
-    } else {
-        format!("SELECT id, name FROM agents WHERE {col} = $1 AND principal_id = $2")
-    };
-    let mut q = sqlx::query(&q).bind(val);
-    if principal.kind != PrincipalKind::Admin {
-        q = q.bind(&principal.id);
-    }
-    q.fetch_optional(&state.pool)
-        .await
-        .map_err(AppError::Db)?
-        .ok_or(AppError::NotFound)
-}
-
-fn agent_config(name: &str, session: &str) -> AgentConfig {
+fn agent_config(name: &str, instructions: &str, session: &str) -> AgentConfig {
     AgentConfig {
         session: session.to_string(),
         agent_name: name.to_string(),
+        instructions: instructions.to_string(),
         // Tool execution is delegated to the codex sandbox backend (ADR-0005):
         // `SandboxProvider::Codex` is resolved by this runtime to
         // `codex_sandbox::CodexSandbox`, which runs commands through codex's
@@ -1201,60 +623,6 @@ fn agent_config(name: &str, session: &str) -> AgentConfig {
         sandbox_provider: "codex".into(),
         model: DEFAULT_MODEL.into(),
     }
-}
-
-// --- Reef self-improvement endpoints ---
-
-/// Bind feedback to recorded turns. References must point at existing records.
-async fn reef_report(
-    State(state): State<AppState>,
-    principal: Principal,
-    Json(body): Json<ReefReportBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let records = state.records_for(&principal);
-    let feedback = state.feedback_for(&principal);
-    for r in &body.references {
-        if records.get(r).await.is_err() {
-            return Err(AppError::BadReport(format!("unknown record: {r}")));
-        }
-    }
-    let fb = Feedback::new(body.references, body.score, body.feedback);
-    feedback.report(fb).await.map_err(AppError::Reef)?;
-    Ok(Json(json!({ "ok": true })))
-}
-
-/// Run one evolution pass: propose → select → keep winner → version → hot-swap.
-async fn reef_evolve(
-    State(state): State<AppState>,
-    principal: Principal,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let engine = state.engine_for(&principal);
-    match engine.evolve().await {
-        Ok(out) => Ok(Json(json!({
-            "version": out.version,
-            "adopted": out.adopted,
-            "candidate_system": out.candidate_system,
-        }))),
-        Err(ReefError::NoEligible) => Ok(Json(json!({
-            "version": 0,
-            "adopted": false,
-            "reason": "no_eligible",
-        }))),
-        Err(e) => Err(AppError::Reef(e)),
-    }
-}
-
-/// List committed harness versions (plus the implicit `baseline`).
-/// Scoped to the caller: admins see the fleet repo, tenants their own subdir.
-async fn reef_versions(State(state): State<AppState>, principal: Principal) -> Json<Vec<String>> {
-    let dir = if principal.kind == PrincipalKind::Admin {
-        state.reef_dir.clone()
-    } else {
-        state.reef_dir.join("tenants").join(&principal.id)
-    };
-    let mut v = git::list_versions(&dir).unwrap_or_default();
-    v.push("baseline".to_string());
-    Json(v)
 }
 
 // --- Self-serve API key management (admin only) ---
@@ -1287,6 +655,20 @@ struct CreatedApiKey {
     key_prefix: String,
     principal_id: String,
     scopes: Vec<String>,
+}
+
+/// Reject principal ids that are not safe to use as a shard key (context /
+/// agents / runs are filtered by `principal_id`, so a malformed id must never
+/// reach a query).
+fn validate_pid(pid: &str) {
+    if pid.is_empty()
+        || pid.len() > 64
+        || !pid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        panic!("invalid principal id: {pid:?}");
+    }
 }
 
 /// Create a new API key for a principal. Admin scope required.
@@ -1428,12 +810,65 @@ async fn ensure_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     .await?;
     pool.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash)")
         .await?;
+    // Context memory (Postgres + pgvector). `ensure_pgvector` fails the boot
+    // when the `vector` extension is missing — no silent keyword-only fallback.
+    context::ensure_pgvector(pool)
+        .await
+        .map_err(sqlx::Error::Protocol)?;
+    context::pg::ensure_schema(pool).await?;
     // Attribute runs to the calling principal (audit only).
     pool.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS principal_id TEXT")
         .await?;
     // Attribute agents to the owning principal (tenant isolation).
     pool.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS principal_id TEXT")
         .await?;
+    // --- beta Agents: agent columns + sessions / turns / items ---
+    for stmt in [
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS model TEXT",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS reasoning_effort TEXT",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS reasoning_summary TEXT",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS multi_agent_enabled BOOLEAN NOT NULL DEFAULT false",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_concurrent_subagents INTEGER",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS service_tier TEXT DEFAULT 'auto'",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS text_format TEXT",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS text_verbosity TEXT",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS tools TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+        "CREATE TABLE IF NOT EXISTS agent_sessions (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            agent_id TEXT NOT NULL, \
+            instructions TEXT, \
+            status TEXT NOT NULL DEFAULT 'idle', \
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_principal ON agent_sessions (principal_id, created_at)",
+        "CREATE TABLE IF NOT EXISTS session_turns (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            session_id TEXT NOT NULL, \
+            agent_id TEXT NOT NULL, \
+            status TEXT NOT NULL, \
+            output TEXT, \
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+            completed_at TIMESTAMPTZ)",
+        "CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns (principal_id, session_id)",
+        "CREATE TABLE IF NOT EXISTS session_items (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            session_id TEXT NOT NULL, \
+            turn_id TEXT NOT NULL, \
+            item_type TEXT NOT NULL, \
+            role TEXT, \
+            status TEXT NOT NULL, \
+            content TEXT NOT NULL, \
+            seq INTEGER NOT NULL DEFAULT 0, \
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS idx_session_items_session ON session_items (principal_id, session_id)",
+    ] {
+        pool.execute(stmt).await?;
+    }
     // Seed the default playground agent so the Agent playground works out of
     // the box. Both statements are idempotent: the UPDATE renames the legacy
     // seed (`playground-demo`) in place and is skipped once `agent-demo`
@@ -1609,6 +1044,117 @@ fn resolve_port(explicit: Option<u16>) -> u16 {
         .unwrap_or(3000)
 }
 
+/// The HTTP surface: the OpenAI beta Agents resource plus self-serve API
+/// keys.
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        // --- beta Agents resource (OpenAI-compatible) ---
+        .route(
+            "/v1/agents",
+            post(api::agents::create_agent).get(api::agents::list_agents),
+        )
+        .route(
+            "/v1/agents/:agent_id",
+            get(api::agents::get_agent)
+                .post(api::agents::update_agent)
+                .delete(api::agents::delete_agent),
+        )
+        .route(
+            "/v1/agents/sessions",
+            post(api::sessions::create_session).get(api::sessions::list_sessions),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id",
+            get(api::sessions::get_session)
+                .post(api::sessions::update_session)
+                .delete(api::sessions::delete_session),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/events",
+            post(api::sessions::create_session_events),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/events/stream",
+            post(api::sessions::stream_session_events),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/items",
+            get(api::sessions::list_session_items),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/turns",
+            get(api::sessions::list_session_turns),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/turns/:turn_id",
+            get(api::sessions::get_session_turn),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/memory",
+            post(api::sessions::put_session_memory),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/memory/:key",
+            get(api::sessions::get_session_memory),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/subagents",
+            get(api::sessions::list_subagents),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/subagents/:subagent_id",
+            get(api::sessions::get_subagent),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/subagents/:subagent_id/items",
+            get(api::sessions::list_subagent_items),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/subagents/:subagent_id/turns",
+            get(api::sessions::list_subagent_turns),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id",
+            get(api::sessions::get_subagent_turn),
+        )
+        // --- recognised but unimplemented (501) ---
+        .route(
+            "/v1/vaults",
+            get(api::stubs::vaults).post(api::stubs::vaults),
+        )
+        .route("/v1/vaults/:vault_id", get(api::stubs::vaults))
+        .route(
+            "/v1/vaults/:vault_id/credentials",
+            get(api::stubs::vault_credentials),
+        )
+        .route(
+            "/v1/agents/environments",
+            get(api::stubs::environments).post(api::stubs::environments),
+        )
+        .route(
+            "/v1/agents/environments/:environment_id",
+            get(api::stubs::environments),
+        )
+        .route(
+            "/v1/agents/environments/:environment_id/files",
+            get(api::stubs::environment_files).post(api::stubs::environment_files),
+        )
+        .route(
+            "/v1/agents/environments/templates",
+            get(api::stubs::environment_templates),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/artifacts",
+            get(api::stubs::session_artifacts),
+        )
+        .route("/v1/api-keys", post(create_api_key).get(list_api_keys))
+        .route("/v1/api-keys/:id", delete(revoke_api_key))
+        .with_state(state.clone())
+        // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
+        // `from_fn_with_state` threads `AppState` into the middleware closure.
+        .layer(from_fn_with_state(state, require_auth))
+}
+
 async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -1637,106 +1183,27 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     ensure_schema(&pool).await?;
 
-    // Local/embedded memo store — the ONLY holder of conversational context.
-    //
-    // Backend is selected via `AGENT_MEMO_BACKEND`:
-    //   * `memory` (default) — ephemeral, in-memory sled (lost on restart).
-    //   * `memo`           — persistent sled DB under `MEMO_DIR`, survives restarts.
-    // The admin/bootstrap principal's memo uses the legacy root path so existing
-    // single-key deployments keep their data; per-tenant memos live under
-    // `MEMO_DIR/<principal_id>`.
-    let memo_backend = std::env::var("AGENT_MEMO_BACKEND").unwrap_or_else(|_| "memory".into());
-    let admin_memo: Arc<dyn MemoStore>;
-    let memo_mode: StoreMode;
-    match memo_backend.as_str() {
-        "memo" => {
-            let memo_dir =
-                PathBuf::from(std::env::var("MEMO_DIR").unwrap_or_else(|_| "/app/.memo".into()));
-            std::fs::create_dir_all(&memo_dir).map_err(|e| e.to_string())?;
-            tracing::info!("memo: persistent backend at {}", memo_dir.display());
-            admin_memo = SledMemoStore::open(&memo_dir).map_err(|e| e.to_string())?;
-            memo_mode = StoreMode::Persistent(memo_dir);
-        }
-        _ => {
-            tracing::info!("memo: in-memory backend (ephemeral)");
-            admin_memo = SledMemoStore::memory().map_err(|e| e.to_string())?;
-            memo_mode = StoreMode::Memory;
-        }
-    }
+    // Context memory is Postgres-backed (`context_fragments`, pgvector) and
+    // sharded per principal — no local/embedded store is opened here.
+    tracing::info!("context: postgres + pgvector (per-principal scoping)");
 
-    // --- Reef wiring ---
-    let reef_dir = PathBuf::from(std::env::var("REEF_DIR").unwrap_or_else(|_| ".reef".into()));
-    std::fs::create_dir_all(&reef_dir).ok();
-    // Initialize (idempotent) a git repo for harness versioning; best-effort.
-    if let Err(e) = git::init_repo(&reef_dir) {
-        tracing::warn!("reef: git init skipped: {e}");
-    }
-    // Load the last winning harness for the admin/fleet, or fall back to baseline.
-    let admin_harness: Arc<ActiveHarness> = Arc::new(match harness::load(&reef_dir) {
-        Ok(h) => {
-            tracing::info!(
-                "reef: loaded harness v{} from {}",
-                git::current_version(&reef_dir).unwrap_or(0),
-                reef_dir.display()
-            );
-            ActiveHarness::new(h)
-        }
-        Err(_) => ActiveHarness::baseline("agent"),
-    });
     // In-memory API-key resolution cache (TTL-gated; revoked keys are purged).
     let key_cache_ttl = std::env::var("API_KEY_CACHE_TTL_SEC")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(60);
     let key_cache = KeyCache::new(Duration::from_secs(key_cache_ttl));
-    // Admin/bootstrap principal's reef stores use the legacy root paths.
-    let admin_records: Arc<dyn RecordStore> =
-        SledRecordStore::open(&reef_dir.join("records")).map_err(|e| e.to_string())?;
-    let admin_feedback: Arc<dyn FeedbackStore> =
-        SledFeedbackStore::open(&reef_dir.join("feedback")).map_err(|e| e.to_string())?;
     // Real model for production; tests inject a stub via `make_model`.
     let make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync> =
         Arc::new(|| Box::new(OpenAiModel::new(DEFAULT_MODEL)));
 
     let state = AppState {
         pool,
-        admin_memo,
-        admin_records,
-        admin_feedback,
-        tenant_memo: TenantStoreRegistry {
-            mode: memo_mode,
-            cache: Mutex::new(HashMap::new()),
-        },
-        tenant_records: TenantStoreRegistry {
-            mode: StoreMode::Persistent(reef_dir.join("records")),
-            cache: Mutex::new(HashMap::new()),
-        },
-        tenant_feedback: TenantStoreRegistry {
-            mode: StoreMode::Persistent(reef_dir.join("feedback")),
-            cache: Mutex::new(HashMap::new()),
-        },
-        admin_harness,
-        tenant_harness: TenantHarnessRegistry::new(reef_dir.clone()),
         key_cache,
         make_model,
-        reef_dir,
     };
 
-    let app = Router::new()
-        .route("/v1/agents", post(create_agent).get(list_agents))
-        .route("/v1/agents/:id", get(get_agent))
-        .route("/v1/sessions", post(create_session))
-        .route("/v1/sessions/:id/runs", post(session_run))
-        .route("/v1/sessions/:id/runs/stream", post(session_run_stream))
-        .route("/reef/report", post(reef_report))
-        .route("/reef/evolve", post(reef_evolve))
-        .route("/reef/versions", get(reef_versions))
-        .route("/v1/api-keys", post(create_api_key).get(list_api_keys))
-        .route("/v1/api-keys/:id", delete(revoke_api_key))
-        .with_state(state.clone())
-        // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
-        // `from_fn_with_state` threads `AppState` into the middleware closure.
-        .layer(from_fn_with_state(state, require_auth));
+    let app = build_router(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("agent-cloud listening on http://{addr}");
@@ -1749,19 +1216,10 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use agent_core::StubModel;
-    use agent_memo::{ContextFragment, FragmentKind, RecallQuery};
 
-    /// Build an `AppState` with in-memory tenant stores + StubModel engine. The
-    /// pg pool is lazy (never queried by the reef handlers), so no real Postgres
-    /// is required for these tests.
+    /// Build an `AppState` with a lazy pg pool + StubModel engine, so the
+    /// non-DB unit tests need no real Postgres.
     fn test_state() -> AppState {
-        let reef_dir = std::env::temp_dir().join(format!("reef_cloud_{}", Uuid::new_v4()));
-        let _ = std::fs::remove_dir_all(&reef_dir);
-        std::fs::create_dir_all(&reef_dir).unwrap();
-        let admin_harness = Arc::new(ActiveHarness::baseline("agent"));
-        let admin_records: Arc<dyn RecordStore> = SledRecordStore::memory().unwrap();
-        let admin_feedback: Arc<dyn FeedbackStore> = SledFeedbackStore::memory().unwrap();
-        let admin_memo: Arc<dyn MemoStore> = SledMemoStore::memory().unwrap();
         let make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync> =
             Arc::new(|| Box::new(StubModel::new("agent")));
         let pool = PgPoolOptions::new()
@@ -1770,126 +1228,16 @@ mod tests {
         let key_cache = KeyCache::new(Duration::from_secs(60));
         AppState {
             pool,
-            admin_memo,
-            admin_records,
-            admin_feedback,
-            admin_harness,
-            tenant_memo: TenantStoreRegistry {
-                mode: StoreMode::Memory,
-                cache: Mutex::new(HashMap::new()),
-            },
-            tenant_records: TenantStoreRegistry {
-                mode: StoreMode::Memory,
-                cache: Mutex::new(HashMap::new()),
-            },
-            tenant_feedback: TenantStoreRegistry {
-                mode: StoreMode::Memory,
-                cache: Mutex::new(HashMap::new()),
-            },
-            tenant_harness: TenantHarnessRegistry::new(reef_dir.clone()),
             key_cache,
             make_model,
-            reef_dir,
         }
     }
 
     #[tokio::test]
-    async fn reef_report_rejects_unknown_record() {
-        let state = test_state();
-        let res = reef_report(
-            State(state),
-            Principal::admin(),
-            Json(ReefReportBody {
-                references: vec!["ghost".into()],
-                score: -1.0,
-                feedback: None,
-            }),
-        )
-        .await;
-        assert!(res.is_err(), "reporting on a missing record must error");
-    }
-
-    #[tokio::test]
-    async fn reef_report_binds_feedback_to_record() {
-        let state = test_state();
-        let rec = Record::new("a", "s", None, "You are agent.", "in", "out", "stub");
-        state.admin_records.record_turn(rec.clone()).await.unwrap();
-        let res = reef_report(
-            State(state.clone()),
-            Principal::admin(),
-            Json(ReefReportBody {
-                references: vec![rec.id.clone()],
-                score: -1.0,
-                feedback: Some("wrong answer".into()),
-            }),
-        )
-        .await;
-        assert!(res.is_ok());
-        // Feedback now visible in the store.
-        let listed = state.admin_feedback.list().await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].references, vec![rec.id]);
-    }
-
-    #[tokio::test]
-    async fn reef_evolve_wins_and_hot_swaps_without_pg() {
-        let state = test_state();
-        let rec = Record::new("a", "s", None, "You are agent.", "in", "out", "stub");
-        state.admin_records.record_turn(rec.clone()).await.unwrap();
-        state
-            .admin_feedback
-            .report(Feedback::new(
-                vec![rec.id.clone()],
-                -1.0,
-                Some("wrong".into()),
-            ))
-            .await
-            .unwrap();
-
-        let before = state.admin_harness.get().system_text();
-        let out = reef_evolve(State(state.clone()), Principal::admin())
-            .await
-            .unwrap();
-        assert_eq!(out.0["adopted"], json!(true));
-        let after = state.admin_harness.get().system_text();
-        assert_ne!(before, after);
-        assert!(after.contains("reef_improvement"));
-    }
-
-    #[tokio::test]
-    async fn reef_evolve_no_eligible_keeps_active() {
-        let state = test_state();
-        let out = reef_evolve(State(state.clone()), Principal::admin())
-            .await
-            .unwrap();
-        assert_eq!(out.0["adopted"], json!(false));
-        assert_eq!(out.0["reason"], json!("no_eligible"));
-        // Active harness untouched.
-        assert!(state.admin_harness.get().is_baseline("agent"));
-    }
-
-    #[tokio::test]
-    async fn reef_versions_includes_baseline() {
-        let state = test_state();
-        let vers = reef_versions(State(state), Principal::admin()).await;
-        assert!(vers.contains(&"baseline".to_string()));
-    }
-
-    #[tokio::test]
-    async fn run_agent_records_turn_and_returns_receipt_header() {
-        // We can't easily assert the header from a handler return, but we can
-        // verify the record is persisted for a known record id by simulating
-        // the same path the handler uses. This exercises RecordStore wiring.
-        let state = test_state();
-        let rec = Record::new("a", "s", None, "You are agent.", "hi", "hello", "stub");
-        let id = rec.id.clone();
-        state.admin_records.record_turn(rec).await.unwrap();
-        let got = state.admin_records.get(&id).await.unwrap();
-        assert_eq!(got.output, "hello");
-    }
-
-    #[tokio::test]
-    async fn tenant_memo_isolation() {
+    async fn context_store_is_scoped_per_principal() {
+        // Context lives in Postgres, sharded by `principal_id`: each principal
+        // resolves to its own store instance. Real isolation is asserted by the
+        // DB-gated tests in `context::pg`.
         let state = test_state();
         let a = Principal {
             id: "tenantA".into(),
@@ -1901,28 +1249,8 @@ mod tests {
             kind: PrincipalKind::User,
             scopes: ApiKeyScopes::read_write(),
         };
-        state
-            .memo_for(&a)
-            .memorize(ContextFragment::new(
-                "s",
-                FragmentKind::Message,
-                "secret from A",
-            ))
-            .await
-            .unwrap();
-        // Tenant B must not see A's context.
-        let from_b = state
-            .memo_for(&b)
-            .recall(&RecallQuery::new("s", "secret"))
-            .await
-            .unwrap();
-        assert!(from_b.is_empty(), "tenant B must not see A's context");
-        let from_a = state
-            .memo_for(&a)
-            .recall(&RecallQuery::new("s", "secret"))
-            .await
-            .unwrap();
-        assert_eq!(from_a.len(), 1);
+        assert_eq!(state.context_for(&a).principal_id(), "tenantA");
+        assert_eq!(state.context_for(&b).principal_id(), "tenantB");
     }
 
     #[tokio::test]
@@ -1946,65 +1274,6 @@ mod tests {
     fn hash_key_is_deterministic() {
         assert_eq!(hash_key("aria-test"), hash_key("aria-test"));
         assert_ne!(hash_key("aria-a"), hash_key("aria-b"));
-    }
-
-    #[tokio::test]
-    async fn tenant_harness_isolation() {
-        // Evolving one tenant's harness must not affect another tenant's.
-        let state = test_state();
-        let a = Principal {
-            id: "tenantA".into(),
-            kind: PrincipalKind::User,
-            scopes: ApiKeyScopes::read_write(),
-        };
-        let b = Principal {
-            id: "tenantB".into(),
-            kind: PrincipalKind::User,
-            scopes: ApiKeyScopes::read_write(),
-        };
-        let ha = state.harness_for(&a);
-        let hb = state.harness_for(&b);
-        let before_a = ha.get().system_text();
-        let before_b = hb.get().system_text();
-        assert_eq!(before_a, before_b, "both start at baseline");
-
-        // Seed B's learning logs + feedback, then evolve B only.
-        let rec = Record::new("a", "s", None, "You are agent.", "in", "out", "stub");
-        state
-            .records_for(&b)
-            .record_turn(rec.clone())
-            .await
-            .unwrap();
-        state
-            .feedback_for(&b)
-            .report(Feedback::new(
-                vec![rec.id.clone()],
-                -1.0,
-                Some("wrong".into()),
-            ))
-            .await
-            .unwrap();
-        let out = reef_evolve(State(state.clone()), b.clone()).await.unwrap();
-        assert_eq!(out.0["adopted"], json!(true));
-
-        // B's harness changed; A's is untouched.
-        let after_a = ha.get().system_text();
-        let after_b = hb.get().system_text();
-        assert_eq!(after_a, before_a, "tenant A harness must be isolated");
-        assert_ne!(after_b, before_b, "tenant B harness should evolve");
-        assert!(after_b.contains("reef_improvement"));
-    }
-
-    #[tokio::test]
-    async fn reef_versions_scoped_to_tenant() {
-        let state = test_state();
-        let a = Principal {
-            id: "tenantA".into(),
-            kind: PrincipalKind::User,
-            scopes: ApiKeyScopes::read_write(),
-        };
-        let v = reef_versions(State(state.clone()), a).await;
-        assert!(v.contains(&"baseline".to_string()));
     }
 
     #[test]
@@ -2035,6 +1304,13 @@ mod tests {
         cache.put("h", "tenantA", ApiKeyScopes::all(), PrincipalKind::Admin);
         // TTL already elapsed (0s) → entry evicted and not returned.
         assert!(cache.get("h").is_none());
+    }
+
+    #[tokio::test]
+    async fn router_registers_without_path_conflicts() {
+        // Guards against axum/matchit panics from overlapping paths such as
+        // `/v1/agents/:agent_id` vs `/v1/agents/sessions`.
+        let _app = build_router(test_state());
     }
 
     #[test]

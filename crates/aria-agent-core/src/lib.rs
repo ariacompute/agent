@@ -1,29 +1,35 @@
 //! `agent-core` — the unified agent runtime.
 //!
-//! It wraps the codex harness-style agent loop and guarantees the **memo
-//! contract**: every [`Agent::run`] first [`recall`](agent_memo::MemoStore::recall)s
-//! context from memo (now vector/semantic recall — see `agent_memo::embed`), then
-//! after producing a reply [`memorize`](agent_memo::MemoStore::memorize)s
+//! It wraps the codex harness-style agent loop and guarantees the **context
+//! contract**: every [`Agent::run`] first [`recall`](context::ContextStore::recall)s
+//! context from the store (vector/semantic recall — see [`context::embed`]), then
+//! after producing a reply [`memorize`](context::ContextStore::memorize)s
 //! both the user turn and the assistant reply. Tool execution is isolated in a
 //! [`Sandbox`](agent_sandbox::Sandbox).
+//!
+//! The store itself is an implementation detail: the cloud uses Postgres +
+//! pgvector, the on-device SDK uses the embedded store. The contract lives in
+//! [`context`].
 //!
 //! The LLM is accessed through [`ModelClient`]; a deterministic [`StubModel`]
 //! is the default so the runtime is runnable without an API key. Enable the
 //! `openai` feature to use the real OpenAI Responses/Chat API.
 
-use agent_memo::{ContextFragment, FragmentKind, MemoStore, RecallQuery, SledMemoStore};
+pub mod context;
+
 use agent_sandbox::{default_sandbox, Sandbox, SandboxProvider};
 use async_trait::async_trait;
+use context::{ContextFragment, ContextStore, FragmentKind, RecallQuery};
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
-    #[error("memo error: {0}")]
-    Memo(#[from] agent_memo::MemoError),
+    #[error("context error: {0}")]
+    Context(#[from] context::ContextError),
     #[error("sandbox error: {0}")]
     Sandbox(#[from] agent_sandbox::SandboxError),
     #[error("model error: {0}")]
@@ -500,6 +506,9 @@ pub struct AgentConfig {
     pub agent_name: String,
     pub sandbox_provider: String,
     pub model: String,
+    /// Extra instructions appended to the static system prompt.
+    #[serde(default)]
+    pub instructions: String,
 }
 
 impl Default for AgentConfig {
@@ -507,6 +516,7 @@ impl Default for AgentConfig {
         Self {
             session: "default".to_string(),
             agent_name: "agent".to_string(),
+            instructions: String::new(),
             // Default to the self-contained Docker sandbox. The codex backend
             // (ADR-0005 §Decision) is provided by the `aria-agent-cloud` runtime
             // and injected via `Agent::with_sandbox`; tests use `with_sandbox`
@@ -517,120 +527,40 @@ impl Default for AgentConfig {
     }
 }
 
-/// A single named skill — a reusable capability the agent may draw on.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Skill {
-    pub name: String,
-    pub body: String,
-}
-
-/// A single named rule — a constraint the agent must obey.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Rule {
-    pub name: String,
-    pub body: String,
-}
-
-/// The evolvable harness of an agent: system prompt plus its skills and rules.
-/// This is the unit Reef-style self-improvement evolves, versions in Git, and
-/// hot-serves back to the running agent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Harness {
-    pub system_prompt: String,
-    pub skills: Vec<Skill>,
-    pub rules: Vec<Rule>,
-}
-
-impl Harness {
-    /// Baseline harness equivalent to the legacy hardcoded system prompt.
-    pub fn baseline(agent_name: &str) -> Self {
-        Self {
-            system_prompt: format!("You are {}.", agent_name),
-            skills: Vec::new(),
-            rules: Vec::new(),
-        }
-    }
-
-    /// True when this harness is byte-for-byte the generated baseline.
-    pub fn is_baseline(&self, agent_name: &str) -> bool {
-        *self == Harness::baseline(agent_name)
-    }
-
-    /// Compose the system prompt sent to the model from the harness parts.
-    pub fn system_text(&self) -> String {
-        let mut s = self.system_prompt.clone();
-        if !self.skills.is_empty() {
-            s.push_str("\n\n## Skills");
-            for sk in &self.skills {
-                s.push_str(&format!("\n- {}: {}", sk.name, sk.body));
-            }
-        }
-        if !self.rules.is_empty() {
-            s.push_str("\n\n## Rules");
-            for r in &self.rules {
-                s.push_str(&format!("\n- {}: {}", r.name, r.body));
-            }
-        }
-        s
-    }
-}
-
-/// Hot-swappable handle to the currently-served harness.
+/// The unified agent. Holds the model client, context store and sandbox.
 ///
-/// Read-heavy, write-rare: [`get`](ActiveHarness::get) only clones an `Arc`
-/// (O(1), no async, no serialization), while [`set`](ActiveHarness::set)
-/// atomically replaces the served harness so subsequent turns pick it up
-/// without restarting the process.
-pub struct ActiveHarness {
-    current: Arc<RwLock<Arc<Harness>>>,
-}
-
-impl ActiveHarness {
-    pub fn new(initial: Harness) -> Self {
-        Self {
-            current: Arc::new(RwLock::new(Arc::new(initial))),
-        }
-    }
-
-    /// Baseline harness equivalent to the legacy system prompt.
-    pub fn baseline(agent_name: &str) -> Self {
-        Self::new(Harness::baseline(agent_name))
-    }
-
-    /// Clone the inner `Arc` (O(1)); no serialization, no async.
-    pub fn get(&self) -> Arc<Harness> {
-        self.current
-            .read()
-            .expect("active harness lock poisoned")
-            .clone()
-    }
-
-    /// Atomically replace the served harness with a new version.
-    pub fn set(&self, h: Harness) {
-        let mut g = self.current.write().expect("active harness lock poisoned");
-        *g = Arc::new(h);
-    }
-}
-
-/// The unified agent. Holds the model client, memo store, sandbox, and a
-/// shared handle to the currently-served [`ActiveHarness`] (which may be
-/// hot-swapped by a self-improvement loop).
+/// The system prompt is static: the agent name plus optional `instructions`.
 pub struct Agent {
     config: AgentConfig,
     model: Arc<dyn ModelClient>,
-    memo: Arc<dyn MemoStore>,
+    context: Arc<dyn ContextStore>,
     sandbox: Arc<dyn Sandbox>,
-    harness: Arc<ActiveHarness>,
 }
 
 impl Agent {
-    /// Build with an explicit model client (e.g. [`StubModel`] or [`OpenAiModel`])
-    /// and a shared, hot-swappable harness handle.
-    pub fn with_harness(
+    /// Build with an explicit sandbox backend (e.g. a local test sandbox or a
+    /// codex-backed [`Sandbox`](agent_sandbox::Sandbox)). Useful when the
+    /// provider string alone does not describe the execution environment.
+    pub fn with_sandbox(
         config: AgentConfig,
         model: Box<dyn ModelClient>,
-        memo: Arc<dyn MemoStore>,
-        harness: Arc<ActiveHarness>,
+        context: Arc<dyn ContextStore>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
+            config,
+            model: Arc::from(model),
+            context,
+            sandbox,
+        })
+    }
+
+    /// Build with an explicit model client (e.g. [`StubModel`] or [`OpenAiModel`]);
+    /// the sandbox is resolved from `config.sandbox_provider`.
+    pub fn with_model(
+        config: AgentConfig,
+        model: Box<dyn ModelClient>,
+        context: Arc<dyn ContextStore>,
     ) -> Result<Self, CoreError> {
         let provider = SandboxProvider::parse(&config.sandbox_provider).ok_or_else(|| {
             CoreError::Config(format!("unknown sandbox: {}", config.sandbox_provider))
@@ -642,47 +572,11 @@ impl Agent {
             agent_sandbox::from_provider(provider)
                 .map_err(|e| CoreError::Config(format!("sandbox {}: {}", provider.as_str(), e)))?,
         );
-        Ok(Self {
-            config,
-            model: Arc::from(model),
-            memo,
-            sandbox,
-            harness,
-        })
-    }
-
-    /// Build with an explicit sandbox backend (e.g. a local test sandbox or a
-    /// codex-backed [`Sandbox`](agent_sandbox::Sandbox)). Useful when the
-    /// provider string alone does not describe the execution environment.
-    pub fn with_sandbox(
-        config: AgentConfig,
-        model: Box<dyn ModelClient>,
-        memo: Arc<dyn MemoStore>,
-        harness: Arc<ActiveHarness>,
-        sandbox: Arc<dyn Sandbox>,
-    ) -> Result<Self, CoreError> {
-        Ok(Self {
-            config,
-            model: Arc::from(model),
-            memo,
-            sandbox,
-            harness,
-        })
-    }
-
-    /// Build with an explicit model client (e.g. [`StubModel`] or [`OpenAiModel`]).
-    /// A baseline harness is generated from the config's agent name.
-    pub fn with_model(
-        config: AgentConfig,
-        model: Box<dyn ModelClient>,
-        memo: Arc<dyn MemoStore>,
-    ) -> Result<Self, CoreError> {
-        let harness = Arc::new(ActiveHarness::baseline(&config.agent_name));
-        Self::with_harness(config, model, memo, harness)
+        Self::with_sandbox(config, model, context, sandbox)
     }
 
     /// Build using the default model (stub unless `openai` feature is on).
-    pub fn new(config: AgentConfig, memo: Arc<dyn MemoStore>) -> Result<Self, CoreError> {
+    pub fn new(config: AgentConfig, context: Arc<dyn ContextStore>) -> Result<Self, CoreError> {
         let model: Box<dyn ModelClient> = {
             #[cfg(feature = "openai")]
             {
@@ -694,28 +588,34 @@ impl Agent {
                 Box::new(StubModel::new(&config.agent_name))
             }
         };
-        Self::with_model(config, model, memo)
+        Self::with_model(config, model, context)
     }
 
     pub fn session(&self) -> &str {
         &self.config.session
     }
 
-    /// Shared harness handle — hot-swappable by a self-improvement loop.
-    pub fn harness(&self) -> Arc<ActiveHarness> {
-        self.harness.clone()
+    /// The static system prompt sent to the model (agent name + optional
+    /// session/agent instructions).
+    pub fn system_text(&self) -> String {
+        let base = format!("You are {}.", self.config.agent_name);
+        if self.config.instructions.trim().is_empty() {
+            base
+        } else {
+            format!("{}\n\n{}", base, self.config.instructions.trim())
+        }
     }
 
-    /// Shared memo store (used by the SDK to expose `Session`).
-    pub fn memo(&self) -> Arc<dyn MemoStore> {
-        self.memo.clone()
+    /// Shared context store (used by the SDK to expose `Session`).
+    pub fn context(&self) -> Arc<dyn ContextStore> {
+        self.context.clone()
     }
 
-    /// Run one turn. Injects memo context, calls the model, persists both turns.
+    /// Run one turn. Injects recalled context, calls the model, persists both turns.
     pub async fn run(&self, input: &str) -> Result<String, CoreError> {
         // 1) recall context from memo (the ONLY context source)
         let fragments = self
-            .memo
+            .context
             .recall(&RecallQuery::new(&self.config.session, input))
             .await?;
         let context = fragments
@@ -725,7 +625,7 @@ impl Agent {
             .join("\n");
 
         // 2) persist the user turn
-        self.memo
+        self.context
             .memorize(ContextFragment::new(
                 &self.config.session,
                 FragmentKind::Message,
@@ -734,7 +634,7 @@ impl Agent {
             .await?;
 
         // 3) call the model
-        let system = self.harness.get().system_text();
+        let system = self.system_text();
         let req = ModelRequest {
             system,
             context,
@@ -743,7 +643,7 @@ impl Agent {
         let resp = self.model.complete(&req).await?;
 
         // 4) persist the assistant reply
-        self.memo
+        self.context
             .memorize(ContextFragment::new(
                 &self.config.session,
                 FragmentKind::Message,
@@ -764,7 +664,7 @@ impl Agent {
             "exit={} stdout={} stderr={}",
             out.exit_code, out.stdout, out.stderr
         );
-        self.memo
+        self.context
             .memorize(ContextFragment::new(
                 &self.config.session,
                 FragmentKind::ToolResult,
@@ -784,7 +684,7 @@ impl Agent {
     ) -> Result<BoxStream<'static, Result<String, CoreError>>, CoreError> {
         // 1) recall context from memo (the ONLY context source)
         let fragments = self
-            .memo
+            .context
             .recall(&RecallQuery::new(&self.config.session, input))
             .await?;
         let context = fragments
@@ -794,7 +694,7 @@ impl Agent {
             .join("\n");
 
         // 2) persist the user turn
-        self.memo
+        self.context
             .memorize(ContextFragment::new(
                 &self.config.session,
                 FragmentKind::Message,
@@ -803,7 +703,7 @@ impl Agent {
             .await?;
 
         // 3) call the model (streaming). The returned stream is owned / 'static.
-        let system = self.harness.get().system_text();
+        let system = self.system_text();
         let req = ModelRequest {
             system,
             context,
@@ -812,7 +712,7 @@ impl Agent {
         let upstream = self.model.stream(&req).await?;
 
         // 4) wrap so we can collect + persist the assistant reply at the end.
-        let memo = self.memo.clone();
+        let memo = self.context.clone();
         let session = self.config.session.clone();
         let wrapped = async_stream::stream! {
             let mut collected = String::new();
@@ -845,7 +745,7 @@ impl Agent {
     /// of strings); the result is persisted to memo as a `ToolResult` fragment
     /// so subsequent turns can recall it.
     pub async fn exec_tool_call(&self, call: &ToolCall) -> Result<ToolResult, CoreError> {
-        sandbox_exec(&self.sandbox, &self.memo, &self.config.session, call).await
+        sandbox_exec(&self.sandbox, &self.context, &self.config.session, call).await
     }
 
     /// Run an agentic turn as an event stream: recall memo context → call the
@@ -863,10 +763,10 @@ impl Agent {
         input: &str,
         tools: &[Tool],
     ) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
-        let memo = self.memo.clone();
+        let memo = self.context.clone();
         let model = self.model.clone();
         let sandbox = self.sandbox.clone();
-        let harness = self.harness.clone();
+        let system = self.system_text();
         let session = self.config.session.clone();
         let tools: Vec<Tool> = tools.to_vec();
         let input = input.to_string();
@@ -903,7 +803,7 @@ impl Agent {
                 }
 
                 yield Ok(AgentEvent::Step { phase: "model".into(), label: None });
-                let system = harness.get().system_text();
+                let system = system.clone();
                 let context = if tool_log.is_empty() {
                     initial_context.clone()
                 } else {
@@ -981,11 +881,12 @@ impl Agent {
     }
 }
 
-/// Execute a tool call in the sandbox and persist the result to memo. Shared by
-/// the agentic loop so it can be awaited without borrowing the [`Agent`].
+/// Execute a tool call in the sandbox and persist the result as a context
+/// fragment. Shared by the agentic loop so it can be awaited without borrowing
+/// the [`Agent`].
 async fn sandbox_exec(
     sandbox: &Arc<dyn Sandbox>,
-    memo: &Arc<dyn MemoStore>,
+    context: &Arc<dyn ContextStore>,
     session: &str,
     call: &ToolCall,
 ) -> Result<ToolResult, CoreError> {
@@ -1015,12 +916,13 @@ async fn sandbox_exec(
         "exit={} stdout={} stderr={}",
         out.exit_code, out.stdout, out.stderr
     );
-    memo.memorize(ContextFragment::new(
-        session,
-        FragmentKind::ToolResult,
-        content.clone(),
-    ))
-    .await?;
+    context
+        .memorize(ContextFragment::new(
+            session,
+            FragmentKind::ToolResult,
+            content.clone(),
+        ))
+        .await?;
     Ok(ToolResult {
         call_id: call.id.clone(),
         content,
@@ -1028,9 +930,9 @@ async fn sandbox_exec(
     })
 }
 
-/// Convenience: a memory-backed memo store for quick local use.
-pub fn in_memory_memo() -> Arc<dyn MemoStore> {
-    SledMemoStore::memory().expect("sled temp store")
+/// Convenience: an in-process context store for quick local use.
+pub fn in_memory_context() -> Arc<dyn ContextStore> {
+    context::MemoryContextStore::new()
 }
 
 /// Re-export the default sandbox constructor for callers that don't need config.
@@ -1044,7 +946,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_injects_memo_and_persists() {
-        let memo = in_memory_memo();
+        let memo = in_memory_context();
         let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
         let agent = Agent::with_model(AgentConfig::default(), model, memo.clone()).unwrap();
         let r1 = agent.run("hello").await.unwrap();
@@ -1060,7 +962,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_tool_runs_in_sandbox() {
-        let memo = in_memory_memo();
+        let memo = in_memory_context();
         let agent = Agent::new(AgentConfig::default(), memo).unwrap();
         // Works only if `docker` is available; otherwise it errors gracefully.
         match agent.exec_tool(&["echo".into(), "hi".into()]).await {
@@ -1071,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_stream_emits_tokens_and_persists() {
-        let memo = in_memory_memo();
+        let memo = in_memory_context();
         let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
         let agent = Agent::with_model(AgentConfig::default(), model, memo.clone()).unwrap();
         let stream = agent.run_stream("hello").await.unwrap();
@@ -1091,7 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_second_turn_injects_prior_context() {
-        let memo = in_memory_memo();
+        let memo = in_memory_context();
         let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
         let agent = Agent::with_model(AgentConfig::default(), model, memo.clone()).unwrap();
         let _ = agent.run("remember the secret code 1234").await.unwrap();
@@ -1107,76 +1009,19 @@ mod tests {
             ..AgentConfig::default()
         };
         let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
-        let res = Agent::with_model(cfg, model, in_memory_memo());
+        let res = Agent::with_model(cfg, model, in_memory_context());
         assert!(matches!(res, Err(CoreError::Config(_))));
     }
 
     #[test]
-    fn core_error_converts_from_memo() {
-        let e: CoreError = agent_memo::MemoError::NotFound("x".into()).into();
-        assert!(matches!(e, CoreError::Memo(_)));
+    fn core_error_converts_from_context() {
+        let e: CoreError = context::ContextError::NotFound("x".into()).into();
+        assert!(matches!(e, CoreError::Context(_)));
     }
 
-    // --- Harness / ActiveHarness unit tests ---
+    // --- System prompt unit tests ---
 
-    #[test]
-    fn harness_baseline_equals_legacy_system() {
-        let h = Harness::baseline("helper");
-        assert_eq!(h.system_text(), "You are helper.");
-        assert!(h.skills.is_empty());
-        assert!(h.rules.is_empty());
-    }
-
-    #[test]
-    fn harness_system_text_assembles_skills_and_rules() {
-        let h = Harness {
-            system_prompt: "You are a bot.".into(),
-            skills: vec![Skill {
-                name: "summarize".into(),
-                body: "condense text".into(),
-            }],
-            rules: vec![Rule {
-                name: "no_pii".into(),
-                body: "never echo secrets".into(),
-            }],
-        };
-        let s = h.system_text();
-        assert!(s.contains("You are a bot."));
-        assert!(s.contains("## Skills"));
-        assert!(s.contains("summarize: condense text"));
-        assert!(s.contains("## Rules"));
-        assert!(s.contains("no_pii: never echo secrets"));
-    }
-
-    #[test]
-    fn harness_serialization_roundtrip() {
-        let h = Harness {
-            system_prompt: "sys".into(),
-            skills: vec![Skill {
-                name: "s".into(),
-                body: "b".into(),
-            }],
-            rules: vec![],
-        };
-        let json = serde_json::to_string(&h).unwrap();
-        let back: Harness = serde_json::from_str(&json).unwrap();
-        assert_eq!(h, back);
-    }
-
-    #[test]
-    fn active_harness_hot_swap_is_atomic() {
-        let ah = ActiveHarness::baseline("agent");
-        assert!(ah.get().is_baseline("agent"));
-        // Cloning the Arc is O(1) and shares the same harness.
-        let snap = ah.get();
-        ah.set(Harness::baseline("renamed"));
-        // The old snapshot is unaffected, but a fresh get() sees the new value.
-        assert!(snap.is_baseline("agent"));
-        assert!(ah.get().is_baseline("renamed"));
-    }
-
-    /// Test model that echoes the system prompt so we can assert which harness
-    /// was served on each turn.
+    /// Test model that echoes the system prompt so we can assert what was served.
     struct EchoModel;
 
     #[async_trait]
@@ -1188,44 +1033,33 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn run_uses_active_harness_and_hot_swaps() {
-        let memo = in_memory_memo();
-        let model: Box<dyn ModelClient> = Box::new(EchoModel);
-        let harness = Arc::new(ActiveHarness::baseline("agent"));
-        let agent =
-            Agent::with_harness(AgentConfig::default(), model, memo, harness.clone()).unwrap();
+    #[test]
+    fn system_text_is_static_from_agent_name() {
+        let agent = Agent::with_model(
+            AgentConfig::default(),
+            Box::new(EchoModel),
+            in_memory_context(),
+        )
+        .unwrap();
+        assert_eq!(agent.system_text(), "You are agent.");
+    }
 
-        let r1 = agent.run("hi").await.unwrap();
-        assert!(
-            r1.contains("You are agent."),
-            "baseline system served: {r1}"
-        );
-
-        // Hot-swap the harness; the next turn must use the new system prompt.
-        harness.set(Harness {
-            system_prompt: "Be terse.".into(),
-            skills: vec![Skill {
-                name: "short".into(),
-                body: "reply in one line".into(),
-            }],
-            rules: vec![],
-        });
-        let r2 = agent.run("hi").await.unwrap();
-        assert!(r2.contains("Be terse."), "swapped system served: {r2}");
-        assert!(
-            r2.contains("reply in one line"),
-            "swapped skill served: {r2}"
-        );
+    #[test]
+    fn system_text_appends_instructions() {
+        let cfg = AgentConfig {
+            instructions: "Be terse.".into(),
+            ..AgentConfig::default()
+        };
+        let agent = Agent::with_model(cfg, Box::new(EchoModel), in_memory_context()).unwrap();
+        assert_eq!(agent.system_text(), "You are agent.\n\nBe terse.");
     }
 
     #[tokio::test]
-    async fn with_model_builds_baseline_harness() {
-        let memo = in_memory_memo();
+    async fn run_serves_the_static_system_prompt() {
         let model: Box<dyn ModelClient> = Box::new(EchoModel);
-        let agent = Agent::with_model(AgentConfig::default(), model, memo).unwrap();
+        let agent = Agent::with_model(AgentConfig::default(), model, in_memory_context()).unwrap();
         let r = agent.run("hi").await.unwrap();
-        assert!(r.contains("You are agent."));
+        assert!(r.contains("You are agent."), "static system served: {r}");
     }
 
     // --- AgentEvent / agentic loop tests ---
@@ -1265,12 +1099,10 @@ mod tests {
     }
 
     fn local_agent(model: Box<dyn ModelClient>) -> Agent {
-        let harness = Arc::new(ActiveHarness::baseline("agent"));
         Agent::with_sandbox(
             AgentConfig::default(),
             model,
-            in_memory_memo(),
-            harness,
+            in_memory_context(),
             Arc::new(LocalSandbox),
         )
         .unwrap()
@@ -1326,7 +1158,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_event_stream_single_shot_emits_events() {
-        let memo = in_memory_memo();
+        let memo = in_memory_context();
         let agent = Agent::with_model(
             AgentConfig::default(),
             Box::new(StubModel::new("agent")),
@@ -1379,7 +1211,7 @@ mod tests {
         assert!(!results[0].is_error);
         // The tool result was persisted to memo and can be recalled.
         let frags = agent
-            .memo()
+            .context()
             .recall(&RecallQuery::new("default", "hello"))
             .await
             .unwrap();
@@ -1442,12 +1274,11 @@ mod tests {
 
     #[tokio::test]
     async fn exec_tool_call_runs_in_sandbox_and_persists() {
-        let memo = in_memory_memo();
+        let memo = in_memory_context();
         let agent = Agent::with_sandbox(
             AgentConfig::default(),
             Box::new(StubModel::new("agent")),
             memo.clone(),
-            Arc::new(ActiveHarness::baseline("agent")),
             Arc::new(LocalSandbox),
         )
         .unwrap();

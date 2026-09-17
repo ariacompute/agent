@@ -37,8 +37,8 @@ fun main() {
 ## Cloud streaming (OpenAI-compatible)
 
 `POST /v1/sessions/:id/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
-SSE events, so a Kotlin client parses `response.*` frames with no Aria-specific
-logic. Each `data:` frame is one event; `response.completed` is the terminal
+SSE events, so a Kotlin client parses `agent.*` frames with no Aria-specific
+logic. Each `data:` frame is one event; `agent.turn.completed` is the terminal
 one.
 
 ```kotlin
@@ -52,36 +52,25 @@ val json = Json { ignoreUnknownKeys = true }
 val client = OkHttpClient()
 val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
 
-// The session id is an opaque memo scope; `s1` is a fixed example. (An SDK
-// agent also exposes `agent.sessionId()`; the cloud can mint one via
-// `POST /v1/sessions`, which returns `{ "id": <uuid> }`.)
+// The session id scopes the conversation; mint one with
+// `POST /v1/agents/sessions` (body `{ "agent": "Agent Demo" }`).
 val request = Request.Builder()
-    .url("$base/v1/sessions/s1/runs/stream")
+    .url("$base/v1/agents/sessions/sess_1/events/stream")
     .header("Accept", "text/event-stream")
     .post("""{"agent":"Agent Demo","input":"tell me a joke"}"""
         .toRequestBody())
     .build()
 
 client.newCall(request).execute().use { resp ->
-    // The Reef receipt is also returned as the x-reef-agent-record-id header.
-    val receipt = resp.header("x-reef-agent-record-id")
     resp.body!!.byteStream().bufferedReader().useLines { lines ->
         run loop@{
             for (line in lines) {
                 if (!line.startsWith("data:")) continue
                 val event = json.parseToJsonElement(line.removePrefix("data:").trim()).jsonObject
                 when (event["type"]?.jsonPrimitive?.content) {
-                    "response.output_text.delta" ->
+                    "agent.turn.output_text.delta" ->
                         print(event["delta"]?.jsonPrimitive?.content.orEmpty())
-                    "response.completed" -> {
-                        // terminal event — the stream ends here
-                        println(
-                            "\nreceipt: " + (event["response"]?.jsonObject
-                                ?.get("metadata")?.jsonObject
-                                ?.get("reef_record_id")?.jsonPrimitive?.content ?: receipt)
-                        )
-                        return@loop
-                    }
+                    "agent.turn.completed" -> return@loop
                 }
             }
         }

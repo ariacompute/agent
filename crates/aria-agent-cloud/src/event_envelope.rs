@@ -1,96 +1,89 @@
-//! `AgentEvent` → SSE envelope: the frozen wire contract between agent-cloud
-//! and every consumer (SDKs, the playground Agent playground, raw HTTP).
+//! `AgentEvent` → SSE envelope for the **OpenAI beta Agents** session stream
+//! (`POST /v1/agents/sessions/{session_id}/events/stream`).
 //!
-//! Every frame carries an **OpenAI Responses API streaming `type`**, so OpenAI
-//! SDKs and the Agents SDK can consume `/v1/sessions/:id/runs/stream` unchanged.
-//! Data the Responses schema does not model (the agentic phase, the executed
-//! tool result, the Reef receipt id) is carried as **extra fields inside** those
-//! OpenAI-shaped frames — never as private `aria.*` frames — so a strict OpenAI
-//! client ignores them while our own clients can still render a rich timeline.
+//! Every frame is an `agent.*` streaming event: `agent.turn.*` for the turn
+//! lifecycle and its items, `agent.output.*` for raw command output. Each frame
+//! carries `event_id`, `session_id`, `turn_id`, a monotonic `sequence_number`
+//! and a `type`.
 //!
-//! The OpenAI Responses streaming event sequence is followed faithfully:
-//! `response.created` → `response.output_item.added` → `response.content_part.added`
-//! → `response.output_text.delta` (×N) → `response.content_part.done` →
-//! `response.output_text.done` → `response.output_item.done` → `response.completed`.
-//! `function_call` items emit `response.function_call_arguments.delta` instead of
-//! text parts. `response.failed` is the terminal event on error.
+//! `agent.turn.completed` (or `agent.turn.failed`) is the **only** terminal
+//! event — there is no trailing `data: [DONE]` sentinel. Data the beta schema
+//! does not model (the agentic `phase` / `label`, the executed tool `result`)
+//! rides along as extra fields inside the frames, so strict OpenAI clients
+//! ignore them while our own clients can still render a rich timeline.
 
 use agent_core::{AgentEvent, ToolResult};
 use serde_json::{json, Value};
 
-/// OpenAI Responses API streaming event types emitted by
-/// `/v1/sessions/:id/runs/stream`.
+/// Streaming event types emitted by `/v1/agents/sessions/{id}/events/stream`.
 pub mod event_type {
-    pub const CREATED: &str = "response.created";
-    pub const IN_PROGRESS: &str = "response.in_progress";
-    pub const OUTPUT_ITEM_ADDED: &str = "response.output_item.added";
-    pub const CONTENT_PART_ADDED: &str = "response.content_part.added";
-    pub const OUTPUT_TEXT_DELTA: &str = "response.output_text.delta";
-    pub const CONTENT_PART_DONE: &str = "response.content_part.done";
-    pub const OUTPUT_TEXT_DONE: &str = "response.output_text.done";
-    pub const OUTPUT_ITEM_DONE: &str = "response.output_item.done";
-    pub const FUNCTION_CALL_ARGUMENTS_DELTA: &str = "response.function_call_arguments.delta";
-    pub const COMPLETED: &str = "response.completed";
-    pub const FAILED: &str = "response.failed";
+    pub const TURN_CREATED: &str = "agent.turn.created";
+    pub const TURN_IN_PROGRESS: &str = "agent.turn.in_progress";
+    pub const TURN_ITEM_ADDED: &str = "agent.turn.item.added";
+    pub const TURN_ITEM_DONE: &str = "agent.turn.item.done";
+    pub const TURN_OUTPUT_TEXT_DELTA: &str = "agent.turn.output_text.delta";
+    pub const TURN_OUTPUT_TEXT_DONE: &str = "agent.turn.output_text.done";
+    pub const TURN_COMPLETED: &str = "agent.turn.completed";
+    pub const TURN_FAILED: &str = "agent.turn.failed";
+    #[allow(dead_code)]
+    pub const SESSION_ERROR: &str = "agent.session.error";
+    #[allow(dead_code)]
+    pub const OUTPUT_COMMAND_DELTA: &str = "agent.output.command_execution_output.delta";
 }
 
-/// Max bytes per `function_call_arguments.delta` chunk.
-const ARGS_CHUNK: usize = 64;
-
-/// Index of the single text content part of an assistant message item.
-const CONTENT_INDEX: u32 = 0;
+/// Message item type (an assistant reply).
+const ITEM_MESSAGE: &str = "message";
+/// Function-call item type (a tool invocation).
+const ITEM_FUNCTION_CALL: &str = "function_call";
 
 /// Stateful translator from the core agentic event stream to wire frames.
 ///
-/// One instance per run: it owns the monotonic `sequence_number`, the
-/// assistant message item id, and the accumulated reply text. Splitting
-/// `open_message` / `close_message` keeps the message lifecycle explicit and
-/// the text accumulator local to those two helpers.
+/// One instance per turn: it owns the monotonic `sequence_number`, the message
+/// item id, and the accumulated reply text. `closed` records whether a terminal
+/// frame has been emitted — with no `[DONE]` sentinel that is what makes
+/// "the last frame is terminal" a hard guarantee.
 pub struct EventEnvelope {
-    run_id: String,
+    session_id: String,
     agent_id: String,
-    session: String,
-    record_id: String,
+    turn_id: String,
     seq: u64,
     msg_item_id: String,
     msg_open: bool,
     text: String,
-    // Set once a terminal frame (`response.completed` / `response.failed`) has
-    // been emitted. With no `[DONE]` sentinel, this is what makes "the last
-    // frame is terminal" a hard guarantee.
     closed: bool,
 }
 
 impl EventEnvelope {
-    pub fn new(run_id: &str, agent_id: &str, session: &str, record_id: &str) -> Self {
+    pub fn new(turn_id: &str, agent_id: &str, session_id: &str) -> Self {
         Self {
-            run_id: run_id.to_string(),
+            session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
-            session: session.to_string(),
-            record_id: record_id.to_string(),
+            turn_id: turn_id.to_string(),
             seq: 0,
-            msg_item_id: format!("msg_{run_id}"),
+            msg_item_id: format!("msg_{turn_id}"),
             msg_open: false,
             text: String::new(),
             closed: false,
         }
     }
 
-    /// Opening frame: run identity + Reef receipt id under `response.metadata`.
+    /// Opening frame: the turn is created.
     pub fn created(&mut self) -> Value {
         let seq = self.next_seq();
-        let response = self.response_object("in_progress");
         json!({
-            "type": event_type::CREATED,
+            "type": event_type::TURN_CREATED,
+            "event_id": format!("event_{seq}"),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "sequence_number": seq,
-            "response": response,
+            "turn": self.turn_object("in_progress", None),
         })
     }
 
     /// Translate one core event into zero or more wire frames.
-    pub fn push(&mut self, event: &AgentEvent) -> Vec<Value> {
-        match event {
-            AgentEvent::Step { phase, label } => vec![self.step(phase, label.as_deref())],
+    pub fn push(&mut self, ev: &AgentEvent) -> Vec<Value> {
+        match ev {
+            AgentEvent::Step { phase, label } => self.step(phase, label.as_deref()),
             AgentEvent::ToolCall {
                 id,
                 name,
@@ -102,43 +95,24 @@ impl EventEnvelope {
         }
     }
 
-    /// Terminal frames for a successful run: close the assistant message, then
-    /// complete the response carrying the Reef receipt id.
-    pub fn finish(&mut self, final_text: &str) -> Vec<Value> {
-        let mut out = Vec::new();
-        // `Done` carries the full reply; when no deltas were streamed (e.g. a
-        // tool-only turn that ended with text) open the message first.
-        if !final_text.is_empty() && !self.msg_open {
-            out.extend(self.token(final_text));
-        }
-        out.extend(self.close_message());
-        out.push(self.completed());
-        self.closed = true;
-        out
-    }
-
-    /// Terminal frame for a failed run (still OpenAI-shaped so the client's
-    /// stream parser terminates cleanly).
+    /// Terminal frame on error. `agent.turn.failed` is the only end-of-stream
+    /// signal in the failure path.
     pub fn failed(&mut self, message: &str) -> Value {
         let seq = self.next_seq();
-        let mut response = self.response_object("failed");
-        response["error"] = json!({ "code": "server_error", "message": message });
         self.closed = true;
-        self.msg_open = false;
         json!({
-            "type": event_type::FAILED,
+            "type": event_type::TURN_FAILED,
+            "event_id": format!("event_{seq}"),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "sequence_number": seq,
-            "response": response,
+            "turn": self.turn_object("failed", None),
+            "error": { "type": "server_error", "message": message },
         })
     }
 
-    /// Guarantees the stream always ends on a terminal event.
-    ///
-    /// `response.completed` (or `response.failed`) is the *only* end-of-stream
-    /// signal a client keys on. If the core event stream ended without producing
-    /// a terminal frame, emit `response.completed` so the contract — "the last
-    /// frame is always a terminal one" — holds unconditionally. Returns an empty
-    /// vec when a terminal frame was already emitted.
+    /// Guarantee a terminal frame: if the core stream never produced `Done`,
+    /// close the turn here so the client always sees one terminal event.
     pub fn ensure_closed(&mut self) -> Vec<Value> {
         if self.closed {
             return Vec::new();
@@ -146,22 +120,26 @@ impl EventEnvelope {
         self.finish("")
     }
 
-    // --- frame builders ---
+    // ------------------------------------------------------------------ frames
 
-    /// Phase boundary (`recall` / `model` / `tool_exec` / `loop_guard`).
-    /// `phase` + `label` are extra fields; OpenAI clients ignore them.
-    fn step(&mut self, phase: &str, label: Option<&str>) -> Value {
+    /// A phase boundary: the model is working, a tool is executing, or the
+    /// loop guard tripped. Emitted as `agent.turn.in_progress` with the
+    /// agentic `phase` / `label` as extra fields.
+    fn step(&mut self, phase: &str, label: Option<&str>) -> Vec<Value> {
         let seq = self.next_seq();
-        json!({
-            "type": event_type::IN_PROGRESS,
+        vec![json!({
+            "type": event_type::TURN_IN_PROGRESS,
+            "event_id": format!("event_{seq}"),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "sequence_number": seq,
             "phase": phase,
             "label": label,
-        })
+            "turn": self.turn_object("in_progress", None),
+        })]
     }
 
-    /// One tool invocation: item added → argument deltas → item done (the
-    /// executed result rides along as the item's extra `result` field).
+    /// A tool invocation: the item is added, then closed with its output.
     fn tool_call(
         &mut self,
         id: &str,
@@ -169,162 +147,140 @@ impl EventEnvelope {
         arguments: &Value,
         result: &ToolResult,
     ) -> Vec<Value> {
-        let args = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string());
-        let mut out = Vec::new();
-
-        let seq = self.next_seq();
-        out.push(json!({
-            "type": event_type::OUTPUT_ITEM_ADDED,
-            "sequence_number": seq,
-            "item": {
-                "id": id,
-                "type": "function_call",
-                "status": "in_progress",
-                "name": name,
-                "arguments": "",
-                "call_id": id,
-            },
-        }));
-
-        for chunk in chunked(&args) {
-            let seq = self.next_seq();
-            out.push(json!({
-                "type": event_type::FUNCTION_CALL_ARGUMENTS_DELTA,
-                "sequence_number": seq,
-                "item_id": id,
-                "delta": chunk,
-            }));
-        }
-
-        let seq = self.next_seq();
-        out.push(json!({
-            "type": event_type::OUTPUT_ITEM_DONE,
-            "sequence_number": seq,
-            "item": {
-                "id": id,
-                "type": "function_call",
-                "status": "completed",
-                "name": name,
-                "arguments": args,
-                "call_id": id,
-                "result": result,
-            },
-        }));
-        out
+        let added_seq = self.next_seq();
+        let done_seq = self.next_seq();
+        let item = json!({
+            "id": id,
+            "type": ITEM_FUNCTION_CALL,
+            "status": "in_progress",
+            "name": name,
+            "arguments": serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into()),
+        });
+        let done_item = json!({
+            "id": id,
+            "type": ITEM_FUNCTION_CALL,
+            "status": if result.is_error { "failed" } else { "completed" },
+            "name": name,
+            "arguments": serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into()),
+            // Extra field (not in the beta schema): the executed tool output.
+            "result": { "content": result.content, "is_error": result.is_error },
+        });
+        vec![
+            json!({
+                "type": event_type::TURN_ITEM_ADDED,
+                "event_id": format!("event_{added_seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": added_seq,
+                "item": item,
+            }),
+            json!({
+                "type": event_type::TURN_ITEM_DONE,
+                "event_id": format!("event_{done_seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": done_seq,
+                "item": done_item,
+            }),
+        ]
     }
 
-    /// Open the assistant message item (empty `content`); the text part is added
-    /// by `content_part_added` immediately after.
-    fn open_message(&mut self) -> Value {
-        self.msg_open = true;
-        let seq = self.next_seq();
-        json!({
-            "type": event_type::OUTPUT_ITEM_ADDED,
-            "sequence_number": seq,
-            "item": {
-                "id": self.msg_item_id,
-                "type": "message",
-                "status": "in_progress",
-                "role": "assistant",
-                "content": [],
-            },
-        })
-    }
-
-    /// Announce the single `output_text` content part of the message item.
-    fn content_part_added(&mut self) -> Value {
-        let seq = self.next_seq();
-        json!({
-            "type": event_type::CONTENT_PART_ADDED,
-            "sequence_number": seq,
-            "item_id": self.msg_item_id,
-            "content_index": CONTENT_INDEX,
-            "part": { "type": "output_text", "text": "", "annotations": [] },
-        })
-    }
-
-    /// A model text delta. Opens the message + content part on the first delta.
+    /// A streamed text delta. Opens the assistant message item on first delta.
     fn token(&mut self, text: &str) -> Vec<Value> {
         let mut out = Vec::new();
         if !self.msg_open {
-            out.push(self.open_message());
-            out.push(self.content_part_added());
+            let seq = self.next_seq();
+            self.msg_open = true;
+            out.push(json!({
+                "type": event_type::TURN_ITEM_ADDED,
+                "event_id": format!("event_{seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": seq,
+                "item": {
+                    "id": self.msg_item_id,
+                    "type": ITEM_MESSAGE,
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                },
+            }));
         }
         self.text.push_str(text);
         let seq = self.next_seq();
         out.push(json!({
-            "type": event_type::OUTPUT_TEXT_DELTA,
+            "type": event_type::TURN_OUTPUT_TEXT_DELTA,
+            "event_id": format!("event_{seq}"),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "sequence_number": seq,
             "item_id": self.msg_item_id,
-            "content_index": CONTENT_INDEX,
             "delta": text,
         }));
         out
     }
 
-    /// Close the assistant message item: `content_part.done` → `output_text.done`
-    /// → `output_item.done`, carrying the full accumulated text.
-    fn close_message(&mut self) -> Vec<Value> {
-        if !self.msg_open {
-            return Vec::new();
-        }
-        self.msg_open = false;
+    /// Terminal frames for a successful run: close the text and the message
+    /// item, then complete the turn.
+    pub fn finish(&mut self, final_text: &str) -> Vec<Value> {
         let mut out = Vec::new();
-        let text = self.text.clone();
-
+        // `Done` carries the full reply; when no deltas were streamed (e.g. a
+        // tool-only turn that ended with text) open the message first.
+        if !final_text.is_empty() && !self.msg_open {
+            out.extend(self.token(final_text));
+        }
+        if !final_text.is_empty() {
+            self.text = final_text.to_string();
+        }
+        if self.msg_open {
+            let seq = self.next_seq();
+            out.push(json!({
+                "type": event_type::TURN_OUTPUT_TEXT_DONE,
+                "event_id": format!("event_{seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": seq,
+                "item_id": self.msg_item_id,
+                "text": self.text,
+            }));
+            let seq = self.next_seq();
+            out.push(json!({
+                "type": event_type::TURN_ITEM_DONE,
+                "event_id": format!("event_{seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": seq,
+                "item": {
+                    "id": self.msg_item_id,
+                    "type": ITEM_MESSAGE,
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": self.text }],
+                },
+            }));
+            self.msg_open = false;
+        }
         let seq = self.next_seq();
+        self.closed = true;
         out.push(json!({
-            "type": event_type::CONTENT_PART_DONE,
+            "type": event_type::TURN_COMPLETED,
+            "event_id": format!("event_{seq}"),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "sequence_number": seq,
-            "item_id": self.msg_item_id,
-            "content_index": CONTENT_INDEX,
-            "part": { "type": "output_text", "text": text.clone(), "annotations": [] },
-        }));
-
-        let seq = self.next_seq();
-        out.push(json!({
-            "type": event_type::OUTPUT_TEXT_DONE,
-            "sequence_number": seq,
-            "item_id": self.msg_item_id,
-            "content_index": CONTENT_INDEX,
-            "text": text.clone(),
-        }));
-
-        let seq = self.next_seq();
-        out.push(json!({
-            "type": event_type::OUTPUT_ITEM_DONE,
-            "sequence_number": seq,
-            "item": {
-                "id": self.msg_item_id,
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": text, "annotations": [] }],
-            },
+            "turn": self.turn_object("completed", Some(&self.text.clone())),
         }));
         out
     }
 
-    fn completed(&mut self) -> Value {
-        let seq = self.next_seq();
-        let response = self.response_object("completed");
+    fn turn_object(&self, status: &str, output: Option<&str>) -> Value {
         json!({
-            "type": event_type::COMPLETED,
-            "sequence_number": seq,
-            "response": response,
-        })
-    }
-
-    fn response_object(&self, status: &str) -> Value {
-        json!({
-            "id": self.run_id,
-            "object": "response",
+            "id": self.turn_id,
+            "object": "agent.session.turn",
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
             "status": status,
-            "metadata": {
-                "agent_id": self.agent_id,
-                "session": self.session,
-                "reef_record_id": self.record_id,
-            },
+            "output": output,
         })
     }
 
@@ -334,30 +290,12 @@ impl EventEnvelope {
     }
 }
 
-/// Split `s` into UTF-8-safe chunks so argument deltas never split a char.
-fn chunked(s: &str) -> Vec<&str> {
-    if s.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut start = 0;
-    while start < s.len() {
-        let mut end = (start + ARGS_CHUNK).min(s.len());
-        while end > start && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        out.push(&s[start..end]);
-        start = end;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn envelope() -> EventEnvelope {
-        EventEnvelope::new("run-1", "agent-demo", "default", "rec-1")
+        EventEnvelope::new("turn-1", "agent-demo", "sess-1")
     }
 
     fn types(frames: &[Value]) -> Vec<String> {
@@ -368,22 +306,15 @@ mod tests {
     }
 
     #[test]
-    fn created_frame_carries_run_metadata_and_receipt() {
+    fn created_frame_carries_turn_identity() {
         let mut env = envelope();
         let frame = env.created();
-        assert_eq!(frame["type"], json!(event_type::CREATED));
+        assert_eq!(frame["type"], json!(event_type::TURN_CREATED));
         assert_eq!(frame["sequence_number"], json!(1));
-        assert_eq!(frame["response"]["id"], json!("run-1"));
-        assert_eq!(frame["response"]["object"], json!("response"));
-        assert_eq!(frame["response"]["status"], json!("in_progress"));
-        assert_eq!(
-            frame["response"]["metadata"]["reef_record_id"],
-            json!("rec-1")
-        );
-        assert_eq!(
-            frame["response"]["metadata"]["agent_id"],
-            json!("agent-demo")
-        );
+        assert_eq!(frame["session_id"], json!("sess-1"));
+        assert_eq!(frame["turn_id"], json!("turn-1"));
+        assert_eq!(frame["turn"]["status"], json!("in_progress"));
+        assert_eq!(frame["turn"]["agent_id"], json!("agent-demo"));
     }
 
     #[test]
@@ -394,13 +325,32 @@ mod tests {
             label: Some("shell".into()),
         });
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0]["type"], json!(event_type::IN_PROGRESS));
+        assert_eq!(frames[0]["type"], json!(event_type::TURN_IN_PROGRESS));
         assert_eq!(frames[0]["phase"], json!("tool_exec"));
         assert_eq!(frames[0]["label"], json!("shell"));
     }
 
     #[test]
-    fn tool_call_streams_arguments_then_result() {
+    fn token_opens_message_then_streams_deltas() {
+        let mut env = envelope();
+        let first = env.push(&AgentEvent::Token { text: "he".into() });
+        assert_eq!(
+            types(&first),
+            vec![
+                event_type::TURN_ITEM_ADDED,
+                event_type::TURN_OUTPUT_TEXT_DELTA
+            ]
+        );
+        assert_eq!(first[0]["item"]["type"], json!(ITEM_MESSAGE));
+        assert_eq!(first[1]["delta"], json!("he"));
+
+        // The second delta does not re-open the message.
+        let second = env.push(&AgentEvent::Token { text: "llo".into() });
+        assert_eq!(types(&second), vec![event_type::TURN_OUTPUT_TEXT_DELTA]);
+    }
+
+    #[test]
+    fn tool_call_emits_item_added_and_done_with_result() {
         let mut env = envelope();
         let frames = env.push(&AgentEvent::ToolCall {
             id: "call_1".into(),
@@ -412,166 +362,114 @@ mod tests {
                 is_error: false,
             },
         });
-        // function_call items emit no content_part frames.
         assert_eq!(
             types(&frames),
-            vec![
-                event_type::OUTPUT_ITEM_ADDED,
-                event_type::FUNCTION_CALL_ARGUMENTS_DELTA,
-                event_type::OUTPUT_ITEM_DONE,
-            ]
+            vec![event_type::TURN_ITEM_ADDED, event_type::TURN_ITEM_DONE]
         );
-        assert_eq!(frames[0]["item"]["type"], json!("function_call"));
-        assert_eq!(frames[0]["item"]["call_id"], json!("call_1"));
-        // The executed result rides along on the completed item.
-        assert_eq!(frames[2]["item"]["result"]["content"], json!("hi\n"));
-        assert_eq!(frames[2]["item"]["result"]["is_error"], json!(false));
+        assert_eq!(frames[0]["item"]["name"], json!("shell"));
+        assert_eq!(frames[1]["item"]["status"], json!("completed"));
+        assert_eq!(frames[1]["item"]["result"]["content"], json!("hi\n"));
     }
 
     #[test]
-    fn token_streams_content_part_then_text_delta() {
+    fn failed_tool_call_marks_item_failed() {
         let mut env = envelope();
-        let open = env.push(&AgentEvent::Token { text: "he".into() });
-        // First delta opens the message, announces the text part, then streams.
-        assert_eq!(
-            types(&open),
-            vec![
-                event_type::OUTPUT_ITEM_ADDED,
-                event_type::CONTENT_PART_ADDED,
-                event_type::OUTPUT_TEXT_DELTA,
-            ]
-        );
-        assert_eq!(open[0]["item"]["type"], json!("message"));
-        assert_eq!(open[0]["item"]["content"], json!([]));
-        assert_eq!(open[1]["part"]["type"], json!("output_text"));
-        assert_eq!(open[2]["delta"], json!("he"));
+        let frames = env.push(&AgentEvent::ToolCall {
+            id: "c".into(),
+            name: "shell".into(),
+            arguments: json!({}),
+            result: ToolResult {
+                call_id: "c".into(),
+                content: "boom".into(),
+                is_error: true,
+            },
+        });
+        assert_eq!(frames[1]["item"]["status"], json!("failed"));
+    }
 
-        let frames = env.push(&AgentEvent::Token { text: "llo".into() });
-        // Already open: only the delta is emitted.
-        assert_eq!(types(&frames), vec![event_type::OUTPUT_TEXT_DELTA]);
-        assert_eq!(frames[0]["delta"], json!("llo"));
-
+    #[test]
+    fn done_closes_message_and_completes_turn() {
+        let mut env = envelope();
+        env.push(&AgentEvent::Token {
+            text: "hello".into(),
+        });
         let close = env.push(&AgentEvent::Done {
             text: "hello".into(),
         });
         assert_eq!(
             types(&close),
             vec![
-                event_type::CONTENT_PART_DONE,
-                event_type::OUTPUT_TEXT_DONE,
-                event_type::OUTPUT_ITEM_DONE,
-                event_type::COMPLETED,
+                event_type::TURN_OUTPUT_TEXT_DONE,
+                event_type::TURN_ITEM_DONE,
+                event_type::TURN_COMPLETED,
             ]
         );
-        // The full text is carried on both done frames and the completed item.
-        assert_eq!(close[0]["part"]["text"], json!("hello"));
-        assert_eq!(close[1]["text"], json!("hello"));
-        assert_eq!(close[2]["item"]["content"][0]["text"], json!("hello"));
-        assert_eq!(close[3]["response"]["status"], json!("completed"));
-        assert_eq!(
-            close[3]["response"]["metadata"]["reef_record_id"],
-            json!("rec-1")
-        );
+        assert_eq!(close[0]["text"], json!("hello"));
+        assert_eq!(close[1]["item"]["content"][0]["text"], json!("hello"));
+        assert_eq!(close[2]["turn"]["status"], json!("completed"));
+        assert_eq!(close[2]["turn"]["output"], json!("hello"));
     }
 
     #[test]
-    fn done_without_prior_delta_opens_and_closes_message() {
+    fn completed_is_the_only_terminal_frame() {
         let mut env = envelope();
-        let frames = env.push(&AgentEvent::Done {
-            text: "hello".into(),
-        });
-        assert_eq!(
-            types(&frames),
-            vec![
-                event_type::OUTPUT_ITEM_ADDED,
-                event_type::CONTENT_PART_ADDED,
-                event_type::OUTPUT_TEXT_DELTA,
-                event_type::CONTENT_PART_DONE,
-                event_type::OUTPUT_TEXT_DONE,
-                event_type::OUTPUT_ITEM_DONE,
-                event_type::COMPLETED,
-            ]
-        );
-    }
-
-    #[test]
-    fn no_private_frames_leak_into_the_stream() {
-        let mut env = envelope();
-        let mut all = vec![env.created()];
-        all.extend(env.push(&AgentEvent::Step {
-            phase: "recall".into(),
-            label: None,
-        }));
-        all.extend(env.push(&AgentEvent::ToolCall {
-            id: "call_1".into(),
-            name: "shell".into(),
-            arguments: json!({ "command": ["ls"] }),
-            result: ToolResult {
-                call_id: "call_1".into(),
-                content: String::new(),
-                is_error: true,
-            },
-        }));
-        all.extend(env.push(&AgentEvent::Token { text: "ok".into() }));
-        all.extend(env.push(&AgentEvent::Done { text: "ok".into() }));
-
-        assert!(!all.is_empty());
-        for frame in &all {
-            let t = frame["type"].as_str().expect("frame must carry a type");
-            assert!(
-                t.starts_with("response."),
-                "private (non-OpenAI) frame leaked: {t}"
-            );
-            assert!(
-                frame.get("sequence_number").is_some(),
-                "frame {t} missing sequence_number"
-            );
-        }
-    }
-
-    #[test]
-    fn failed_frame_is_openai_shaped() {
-        let mut env = envelope();
-        let frame = env.failed("boom");
-        assert_eq!(frame["type"], json!(event_type::FAILED));
-        assert_eq!(frame["response"]["status"], json!("failed"));
-        assert_eq!(frame["response"]["error"]["message"], json!("boom"));
-    }
-
-    // There is no `[DONE]` sentinel: `response.completed` / `response.failed`
-    // is the only end-of-stream signal, so the last frame MUST always be a
-    // terminal one.
-    #[test]
-    fn last_frame_is_always_terminal() {
-        // Normal completion via `Done`.
-        let mut env = envelope();
-        let frames = env.push(&AgentEvent::Done { text: "ok".into() });
-        assert_eq!(frames.last().unwrap()["type"], json!(event_type::COMPLETED));
-        // Already terminal: a second call must not emit a duplicate frame.
+        env.push(&AgentEvent::Done { text: "hi".into() });
+        // `ensure_closed` must not append a second terminal frame.
         assert!(env.ensure_closed().is_empty());
+    }
 
-        // Stream that ends without ever producing `Done`.
+    #[test]
+    fn ensure_closed_terminates_a_stream_without_done() {
         let mut env = envelope();
         env.push(&AgentEvent::Token {
             text: "partial".into(),
         });
         let frames = env.ensure_closed();
-        assert_eq!(frames.last().unwrap()["type"], json!(event_type::COMPLETED));
-        // Now closed, so a further call is a no-op.
-        assert!(env.ensure_closed().is_empty());
+        assert_eq!(types(&frames).last().unwrap(), event_type::TURN_COMPLETED);
+        assert_eq!(frames.last().unwrap()["turn"]["output"], json!("partial"));
+    }
 
-        // A failed run is terminal too, and closes the run.
+    #[test]
+    fn failed_is_terminal_and_carries_the_error() {
         let mut env = envelope();
         let frame = env.failed("boom");
-        assert_eq!(frame["type"], json!(event_type::FAILED));
+        assert_eq!(frame["type"], json!(event_type::TURN_FAILED));
+        assert_eq!(frame["turn"]["status"], json!("failed"));
+        assert_eq!(frame["error"]["message"], json!("boom"));
+        // Already terminal: no extra frames are appended afterwards.
         assert!(env.ensure_closed().is_empty());
     }
 
     #[test]
-    fn argument_deltas_never_split_utf8() {
-        let s = "é".repeat(100);
-        let joined: String = chunked(&s).concat();
-        assert_eq!(joined, s);
-        assert!(chunked("").is_empty());
+    fn sequence_numbers_are_monotonic() {
+        let mut env = envelope();
+        let mut seqs = vec![env.created()["sequence_number"].as_u64().unwrap()];
+        for ev in [
+            AgentEvent::Step {
+                phase: "model".into(),
+                label: None,
+            },
+            AgentEvent::Token { text: "a".into() },
+            AgentEvent::Done { text: "a".into() },
+        ] {
+            for f in env.push(&ev) {
+                seqs.push(f["sequence_number"].as_u64().unwrap());
+            }
+        }
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn every_frame_carries_session_and_turn_ids() {
+        let mut env = envelope();
+        let mut frames = vec![env.created()];
+        frames.extend(env.push(&AgentEvent::Token { text: "x".into() }));
+        frames.extend(env.push(&AgentEvent::Done { text: "x".into() }));
+        for f in frames {
+            assert_eq!(f["session_id"], json!("sess-1"));
+            assert_eq!(f["turn_id"], json!("turn-1"));
+            assert!(f["event_id"].is_string());
+        }
     }
 }

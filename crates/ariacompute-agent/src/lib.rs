@@ -10,8 +10,9 @@
 
 uniffi::setup_scaffolding!();
 
+use agent_core::context::{ContextFragment, ContextStore, FragmentKind};
 use agent_core::{Agent, AgentConfig, AgentEvent, Tool};
-use agent_memo::{ContextFragment, FragmentKind, MemoStore, SledMemoStore};
+use agent_memo::SledContextStore;
 use futures::StreamExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,10 +38,13 @@ fn next_session() -> String {
 }
 
 /// SDK-side agent configuration (advanced path). `session` is intentionally
-/// absent: the runtime assigns one isolated memo scope per agent instance.
+/// absent: the runtime assigns one isolated context scope per agent instance.
+///
+/// Mirrors the OpenAI Agents SDK agent definition: name + instructions + model.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SdkAgentConfig {
     pub agent_name: String,
+    pub instructions: String,
     pub model: String,
     pub sandbox_provider: String,
 }
@@ -49,6 +53,7 @@ impl Default for SdkAgentConfig {
     fn default() -> Self {
         Self {
             agent_name: "agent".to_string(),
+            instructions: String::new(),
             sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
         }
@@ -78,22 +83,23 @@ impl SdkAgent {
     /// Get the session memory handle for this agent.
     pub fn session(&self) -> Arc<SdkSession> {
         Arc::new(SdkSession {
-            memo: self.inner.memo(),
+            context: self.inner.context(),
             session: self.inner.session().to_string(),
         })
     }
 
-    /// The auto-assigned session id (memo scope). Useful when relaying a run to
-    /// the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+    /// The auto-assigned session id (context scope). Useful when relaying a run
+    /// to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
     pub fn session_id(&self) -> String {
         self.inner.session().to_string()
     }
 }
 
-/// A session's memo handle (long-term / externalized memory).
+/// A session's context handle (long-term / externalized memory). The on-device
+/// store is embedded (sled); the cloud uses Postgres + pgvector.
 #[derive(uniffi::Object)]
 pub struct SdkSession {
-    memo: Arc<dyn MemoStore>,
+    context: Arc<dyn ContextStore>,
     session: String,
 }
 
@@ -102,48 +108,50 @@ impl SdkSession {
     /// Write a long-term memory under `key`.
     pub fn memorize(&self, key: String, value: String) -> Result<(), SdkError> {
         let frag = ContextFragment::new(&self.session, FragmentKind::LongTerm, value).with_key(key);
-        rt().block_on(self.memo.memorize(frag))
+        rt().block_on(self.context.memorize(frag))
             .map_err(|e| SdkError::Core(e.to_string()))
     }
 
     /// Read a long-term memory by `key`.
     pub fn recall(&self, key: String) -> Result<Option<String>, SdkError> {
         let frag = rt()
-            .block_on(self.memo.get_by_key(&self.session, &key))
+            .block_on(self.context.get_by_key(&self.session, &key))
             .map_err(|e| SdkError::Core(e.to_string()))?;
         Ok(frag.map(|f| f.content))
     }
 }
 
-/// Open an in-memory memo store, or a persistent per-tenant sled DB when
+/// Open an in-memory on-device store, or a persistent per-tenant sled DB when
 /// `tenant_id` is non-empty (under `ARIA_MEMO_DIR`, else a temp subdir).
-fn build_memo(tenant_id: &str) -> Result<Arc<dyn MemoStore>, SdkError> {
-    let memo: Arc<dyn MemoStore> = if tenant_id.is_empty() {
-        SledMemoStore::memory().map_err(|e| SdkError::Core(e.to_string()))?
+fn build_context(tenant_id: &str) -> Result<Arc<dyn ContextStore>, SdkError> {
+    let context: Arc<dyn ContextStore> = if tenant_id.is_empty() {
+        SledContextStore::memory().map_err(|e| SdkError::Core(e.to_string()))?
     } else {
         let base = std::env::var("ARIA_MEMO_DIR")
             .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
         let dir = Path::new(&base).join("tenants").join(tenant_id);
         std::fs::create_dir_all(&dir).map_err(|e| SdkError::Core(e.to_string()))?;
-        SledMemoStore::open(&dir).map_err(|e| SdkError::Core(e.to_string()))?
+        SledContextStore::open(&dir).map_err(|e| SdkError::Core(e.to_string()))?
     };
-    Ok(memo)
+    Ok(context)
 }
 
 /// Build an [`SdkAgent`] with an auto-assigned, isolated session scope.
 fn make_agent(
     agent_name: String,
+    instructions: String,
     model: String,
     sandbox_provider: String,
-    memo: Arc<dyn MemoStore>,
+    context: Arc<dyn ContextStore>,
 ) -> Result<Arc<SdkAgent>, SdkError> {
     let cfg = AgentConfig {
         session: next_session(),
         agent_name,
         sandbox_provider,
         model,
+        instructions,
     };
-    let agent = Agent::new(cfg, memo).map_err(|e| SdkError::Core(e.to_string()))?;
+    let agent = Agent::new(cfg, context).map_err(|e| SdkError::Core(e.to_string()))?;
     Ok(Arc::new(SdkAgent {
         inner: Arc::new(agent),
     }))
@@ -153,19 +161,27 @@ fn make_agent(
 /// The sandbox defaults to Docker. Streaming is via [`SdkAgent::run_stream`].
 #[uniffi::export]
 pub fn create_agent(agent_name: String, model: String) -> Result<Arc<SdkAgent>, SdkError> {
-    let memo = build_memo("")?;
-    make_agent(agent_name, model, "docker".to_string(), memo)
+    let context = build_context("")?;
+    make_agent(
+        agent_name,
+        String::new(),
+        model,
+        "docker".to_string(),
+        context,
+    )
 }
 
-/// Advanced entry accepting a full [`SdkAgentConfig`] (custom sandbox, etc.).
+/// Advanced entry accepting a full [`SdkAgentConfig`] (instructions, custom
+/// sandbox, …).
 #[uniffi::export]
 pub fn create_agent_with(config: SdkAgentConfig) -> Result<Arc<SdkAgent>, SdkError> {
-    let memo = build_memo("")?;
+    let context = build_context("")?;
     make_agent(
         config.agent_name,
+        config.instructions,
         config.model,
         config.sandbox_provider,
-        memo,
+        context,
     )
 }
 
@@ -177,8 +193,14 @@ pub fn create_agent_for_tenant(
     agent_name: String,
     model: String,
 ) -> Result<Arc<SdkAgent>, SdkError> {
-    let memo = build_memo(&tenant_id)?;
-    make_agent(agent_name, model, "docker".to_string(), memo)
+    let context = build_context(&tenant_id)?;
+    make_agent(
+        agent_name,
+        String::new(),
+        model,
+        "docker".to_string(),
+        context,
+    )
 }
 
 /// Advanced tenant-scoped entry accepting a full [`SdkAgentConfig`].
@@ -187,12 +209,13 @@ pub fn create_agent_for_tenant_with(
     tenant_id: String,
     config: SdkAgentConfig,
 ) -> Result<Arc<SdkAgent>, SdkError> {
-    let memo = build_memo(&tenant_id)?;
+    let context = build_context(&tenant_id)?;
     make_agent(
         config.agent_name,
+        config.instructions,
         config.model,
         config.sandbox_provider,
-        memo,
+        context,
     )
 }
 

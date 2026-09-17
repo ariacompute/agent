@@ -17,6 +17,5 @@ path = "integration.rs"
 aria-agent-memo.workspace = true
 aria-agent-sandbox.workspace = true
 aria-agent-core.workspace = true
-aria-agent-reef.workspace = true
 uuid.workspace = true
 tokio.workspace = true

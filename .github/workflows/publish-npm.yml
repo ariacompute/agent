@@ -1,0 +1,58 @@
+name: Publish npm (@ariacompute/agent)
+
+# Publish the TypeScript SDK so consumers can run:
+#   npm install @ariacompute/agent
+#
+# The package mirrors the OpenAI Agents SDK shape (Agent / run / runStreamed /
+# tool / Session) on top of the aria-agent-cloud beta Agents API.
+#
+# Secrets required:
+#   NPM_TOKEN — npm automation token with publish permission for @ariacompute.
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (default: tag with v stripped)"
+        required: false
+
+jobs:
+  publish:
+    name: npm @ariacompute/agent
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Resolve version
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ] && [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          [ -n "$VERSION" ] || VERSION="0.0.0"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Publishing version=$VERSION"
+      - name: Install
+        working-directory: sdk/js
+        run: bun install --frozen-if-exists || bun install
+      - name: Test + typecheck
+        working-directory: sdk/js
+        run: |
+          bun test
+          bunx tsc -p tsconfig.json --noEmit
+      - name: Pin version
+        working-directory: sdk/js
+        run: npm version "$VERSION" --no-git-tag-version
+      - name: Publish
+        working-directory: sdk/js
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
+          npm publish --access public

@@ -1,135 +1,102 @@
 # AGENTS.md — contribution & architecture conventions
 
 This repo is a Rust workspace that wraps the OpenAI **codex** harness and ships a
-cloud API plus native (Swift/Kotlin) SDKs.
+cloud API (OpenAI **beta Agents** compatible) plus native (Swift/Kotlin) and
+language (JS/Python) SDKs.
 
 ## Workspace layout
 
-* `crates/aria-agent-memo`, `aria-agent-sandbox`, `aria-agent-core`, `ariacompute-agent`,
-  `aria-agent-cloud`, `aria-agent-reef`, `aria-agent-ffigen`
+* `crates/aria-agent-core`, `aria-agent-sandbox`, `aria-agent-memo`,
+  `ariacompute-agent`, `aria-agent-cloud`, `aria-agent-ffigen`
 * `bindings/swift` (`Package.swift` SwiftPM + `AriaAgent.podspec` CocoaPods),
   `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
   Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
   regenerate via `just ffi`; the podspec and Gradle publishing config are hand-maintained.
+* `sdk/js` — npm package `@ariacompute/agent` (mirrors `@openai/agents`).
+* `sdk/python` — pip package `ariacompute-agent` (mirrors `openai-agents`).
 * `codex/` is a **git submodule** (do not add it to the Cargo workspace).
 * `crates/aria-agent-cloud/src/event_envelope.rs` is the frozen SSE envelope:
-  `AgentEvent` → OpenAI Responses API streaming frames (see rule 10).
+  `AgentEvent` → OpenAI **beta Agents** streaming frames (see rule 9).
 
 ## Rules
 
-1. **memo is the only context store.** Never persist conversational/long-term
-   context in Postgres. Postgres (`aria-agent-cloud`) holds metadata only
-   (`agents`, `runs`). See `docs/adr/0004-memo-storage.md`. `aria-agent-memo` is a
-   sled-backed `MemoStore` (`memorize` / `recall` / `compact` / `get_by_key`)
-   with `ContextFragment` (`key` + `FragmentKind` + optional dense `embedding`)
-   and local hashing-trick + cosine semantic recall; its unit tests cover
-   normal + abnormal paths (`cargo test -p aria-agent-memo`).
-2. **FFI is stable.** Only change `ariacompute-agent`'s exported surface deliberately.
-   After any change run `just ffi` and commit the regenerated bindings. See
-   `docs/adr/0002-ffi-boundary.md`. The **public SDK ergonomics** (session-less
-   happy path, server-minted session hidden behind `AriaCloudClient`) are
-   specified in `docs/adr/0008-sdk-interface.md`: `create_agent` takes no
-   session; `agent.run(input)` / `agent.run_stream(input)` mirror the OpenAI
-   Agents SDK `Runner.run(agent, input)` shape.
+1. **Context storage is tiered.**
+   * **Cloud**: conversational / long-term context lives in **Postgres +
+     pgvector** (`context_fragments`), sharded by `principal_id`. pgvector is a
+     hard requirement — boot fails if the `vector` extension is missing
+     (`docs/adr/0010-context-storage-pgvector.md`).
+   * **On-device**: `aria-agent-memo` keeps the embedded sled store for the
+     native SDK (offline-first). Dependency direction is memo → core.
+   * The shared contract is `aria-agent-core::context` (`ContextStore`,
+     `ContextFragment`, `FragmentKind`, `RecallQuery`, `LocalEmbedder`, ranking
+     helpers). Never bypass it with ad-hoc queries.
+2. **FFI is stable.** Only change `ariacompute-agent`'s exported surface
+   deliberately. After any change run `just ffi` and commit the regenerated
+   bindings. See `docs/adr/0002-ffi-boundary.md`. The public SDK ergonomics
+   (session-less happy path) are specified in `docs/adr/0008-sdk-interface.md`.
 3. **Sandbox is pluggable.** Add providers by implementing the `Sandbox` trait
    and registering them in `from_provider`. Docker is the default. The cloud
-   selects the **codex** backend (`sandbox_provider = "codex"` in
-   `agent_config`) for agentic tool execution, resolved by this runtime to
-   `codex_sandbox::CodexSandbox` (ADR-0005); Docker/Kata/Cube remain available
-   through `from_provider`. See `docs/adr/0003-sandbox-providers.md` and
-   `docs/adr/0005-codex-integration.md`.
+   selects the **codex** backend (`sandbox_provider = "codex"`), resolved by this
+   runtime to `codex_sandbox::CodexSandbox` (ADR-0005); Docker/Kata/Cube remain
+   available through `from_provider`. See `docs/adr/0003-sandbox-providers.md`
+   and `docs/adr/0005-codex-integration.md`.
 4. **Submodule discipline.** Keep `codex` out of the workspace member list;
-   reference codex crate shapes by design. Deep compile-integration of codex's
-   `sandboxing`/`memories` crates is prescribed in
-   `docs/adr/0005-codex-integration.md` (currently blocked by a broken upstream
-   dependency; our `aria-agent-sandbox`/`aria-agent-memo` are the self-contained
-   integration seam). See `docs/adr/0001-submodule-strategy.md`.
-5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key or raw user
-   content.
-6. **Tests.** `cargo test --workspace` must pass. Cross-crate behavior belongs
-   in `tests/`.
-7. **Cloud auth + streaming (multi-tenant).** `aria-agent-cloud` resolves each
-   caller to a `Principal` (tenant) from a presented `Authorization: Bearer <key>`
-   / `ApiKey <key>`. Keys are looked up (by sha256 hash) in the Postgres
-   `api_keys` table (`AGENT_CLOUD_API_KEY` is the bootstrap **admin** key; open
-   mode when unset). Resolved keys are cached in-memory with a revocation TTL
-   (`API_KEY_CACHE_TTL_SEC`, default 60); `DELETE /v1/api-keys/:id` purges the
-   cache immediately. Admins self-serve keys via `POST/GET /v1/api-keys` and
-   revoke via `DELETE /v1/api-keys/:id`. `memo` / `reef records` / `reef
-   feedback` AND each tenant's `ActiveHarness` are sharded per `principal_id` (sled
-   subdirs / `REEF_DIR/tenants/<pid>`, isolated git repos); the admin principal
-   keeps the legacy root paths. `agents` / `runs` carry `principal_id` and are
-   scoped per tenant (admins see all). `GET /v1/agents` lists the agents a
-   caller can see (admins: all; tenants: their own). Streaming is served at
-   `POST /v1/sessions/:id/runs/stream` (and `POST /v1/sessions/:id/runs` for a
-   blocking run) — see rule 10 for the frozen event contract. See
-   `docs/adr/0007-*.md`.
-8. **Reef stores are separate from context/metadata.** `aria-agent-reef` logs every
-   turn (`RecordStore`) and binds feedback (`FeedbackStore`) in a **local sled
-   DB**, and versions winning harnesses in a **`.reef/` Git repo** — never in
-   memo (context store) nor Postgres (metadata only). The served harness is a
-   shared `ActiveHarness` hot-swapped atomically (no restart). See
-   `docs/adr/0006-reef-self-improvement.md`. Cloud routes: `POST /reef/report`,
-   `POST /reef/evolve`, `GET /reef/versions`.
-
-9. **Releases & publishing.** On `release: created`, `.github/workflows/release.yml`
-   builds/tests/packages the `aria-agent-cloud` binary and `ariacompute-agent` FFI cdylib across
-   linux-x86_64 / windows-x86_64 / linux-arm64 / macos and uploads them to the GitHub
-   Release (`secrets.ARIACOMPUTE_TOKEN`). Its `publish-packages` job is fail-pass
-   (`continue-on-error: true`) and only stubs language-package publishing so it never
-   blocks the CLI/FFI assets. Real publishes run in separate workflows:
-   `publish-cargo.yml` (crates.io: `aria-agent-memo` → `aria-agent-sandbox` → `aria-agent-core` →
-   `ariacompute-agent`, topological order, `secrets.CARGO_REGISTRY_TOKEN`) and `publish-maven.yml`
-   (Maven Central `com.ariacompute:agent` via vanniktech, `secrets.SONATYPE_*` +
-   `secrets.GPG_*`). `aria-agent-cloud` (CLI) and `aria-agent-ffigen` (`publish = false`) are NOT
-   published to crates.io.
-
-10. **Streaming contract is OpenAI-compatible and frozen.** `POST /v1/sessions/:id/runs/stream`
-    emits **OpenAI Responses API** streaming events (never bare
-    `{"token":"..."}`, never private `aria.*` frames), so OpenAI SDKs and the
-    Agents SDK consume it unchanged. `crates/aria-agent-cloud/src/event_envelope.rs`
-    is the single translation point from `AgentEvent` to wire frames:
-    `Step` → `response.in_progress`, `ToolCall` → `output_item.added` +
-    `function_call_arguments.delta` chunks + `output_item.done`, `Token` →
-    `output_item.added` (message) + `content_part.added` + `output_text.delta` +
-    `content_part.done` + `output_text.done`, `Done` → `output_item.done` +
-    `response.completed`, errors → `response.failed`. Every frame carries a
-    monotonic `sequence_number`; `response.completed` (or `response.failed`) is the
-    **only** terminal event and there is **no** trailing `data: [DONE]` sentinel —
-    clients must key on `response.completed` / `response.failed`, never on a
-    sentinel. Data the Responses schema does not model (the agentic
-    `phase` / `label`, the executed tool `result`, the Reef receipt
-    `reef_record_id`) travels as **extra fields inside** those OpenAI-shaped
-    frames, so strict OpenAI clients ignore them. Changing this contract is a
-    breaking change for downstream consumers (the Aria Playground's Agent
-    playground included) — update `event_envelope.rs`, its unit tests, both
-    READMEs and the Swift/Kotlin binding examples together.
-11. **Default agent seed.** `ensure_schema` seeds `id: agent-demo` /
-    `name: Agent Demo` (owned by the admin principal) and renames the legacy
-    `playground-demo` row in place. Both statements are idempotent and the
-    rename is skipped once `agent-demo` exists.
+   reference codex crate shapes by design. See `docs/adr/0001-submodule-strategy.md`.
+5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key, raw user content,
+   or embedding vectors.
+6. **Tests.** `cargo test --workspace` must pass; JS SDK via `just sdk-js-test`
+   (`bun test`), Python SDK via `just sdk-py-test`. Cross-crate behavior belongs
+   in `tests/`. DB-backed tests are gated on `DATABASE_URL` (skip when unset,
+   never fabricate results). New features need normal + abnormal path coverage.
+7. **Cloud auth + multi-tenancy.** `aria-agent-cloud` resolves each caller to a
+   `Principal` (tenant) from `Authorization: Bearer <key>` / `ApiKey <key>`,
+   looked up (sha256) in Postgres `api_keys` (`AGENT_CLOUD_API_KEY` is the
+   bootstrap admin key; open mode when unset). Resolved keys are cached with a
+   revocation TTL (`API_KEY_CACHE_TTL_SEC`, default 60); `DELETE /v1/api-keys/:id`
+   purges the cache. Every table (`agents`, `context_fragments`,
+   `agent_sessions`, `session_turns`, `session_items`) carries `principal_id`
+   and every query filters on it.
+8. **Cloud API = OpenAI beta Agents.** Implemented: `POST|GET /v1/agents`,
+   `GET|POST|DELETE /v1/agents/{id}`, `POST|GET /v1/agents/sessions`,
+   `GET|POST|DELETE /v1/agents/sessions/{id}`,
+   `POST /v1/agents/sessions/{id}/events`,
+   `POST /v1/agents/sessions/{id}/events/stream`, read-only `…/items`,
+   `…/turns`, `…/subagents`. `vaults`, `agents/environments` (+files/templates)
+   and `…/artifacts` return **501**. Requests may carry `OpenAI-Beta: agents=v1`.
+   See `docs/adr/0009-openai-beta-agents-api.md`.
+9. **Streaming contract is the beta Agents envelope and is frozen.**
+   `event_envelope.rs` is the single translation point from `AgentEvent` to
+   `agent.*` frames: `Step` → `agent.turn.in_progress` (+ `phase` / `label`),
+   `ToolCall` → `agent.turn.item.added` + `agent.turn.item.done` (with `result`),
+   `Token` → `agent.turn.item.added` (message) + `agent.turn.output_text.delta`,
+   `Done` → `agent.turn.output_text.done` + `agent.turn.item.done` +
+   `agent.turn.completed`, errors → `agent.turn.failed`. Every frame carries
+   `event_id`, `session_id`, `turn_id` and a monotonic `sequence_number`;
+   `agent.turn.completed` (or `agent.turn.failed`) is the **only** terminal event
+   and there is **no** trailing `data: [DONE]` sentinel. Changing this contract
+   is breaking for every SDK and downstream — update `event_envelope.rs`, its
+   tests, both SDKs, the READMEs and the binding examples together.
+10. **Default agent seed.** `ensure_schema` seeds `id: agent-demo` /
+    `name: Agent Demo` (admin-owned) and renames a legacy `playground-demo` row
+    in place. Both statements are idempotent.
+11. **Downstream migrations are follow-ups, not in-repo edits.** The playground,
+    serve and cockpit adaptations are tracked in `docs/followups/*.md`; do not
+    edit those repositories as part of an agent-repo change.
 
 ## Common commands
 
 * `just build` — build all crates
-* `just test` — run tests
-* `just reef-test` — run `aria-agent-reef` + integration tests (no API key / Postgres)
-* `just cov` — `cargo tarpaulin` coverage (if available)
+* `just test` — `cargo test --workspace`
+* `just sdk-js-test` / `just sdk-py-test` — SDK tests
 * `just ffi` — regenerate Swift/Kotlin bindings
-* `just cloud` — run the cloud service (`aria-agent serve` is the default subcommand;
-  it reads `~/.ariacompute/agent-cli.yml` and exports `ARIA_AGENT_FFI_LIB` to `~/.ariacompute/lib`).
-  Listen port: `aria-agent serve --port <n>` (default `CLOUD_PORT` env or 3000).
-* `aria-agent setup` — interactively choose the Releases source (github default
-  or gitee) and write `upgrade_url` to `~/.ariacompute/agent-cli.yml`
-  (override home via `ARIA_COMPUTE_HOME`). Non-interactive runs default to github.
-* `aria-agent setup --status` — show CLI config status (path, `upgrade_url`, lib dir).
-* `aria-agent setup --clear` — remove the CLI config file.
-* `aria-agent upgrade [version] [--url <url>]` — self-update from GitHub/Gitee
-  Releases: downloads `aria-agent` binary + `libaria-agent_ffi` cdylib
-  (`~/.ariacompute/lib`, set `ARIA_AGENT_FFI_LIB` if needed). Mirrors
-  `aria-router upgrade`; errors if `upgrade_url` is unset.
-* `aria-agent --version` / `aria-agent version` — print version
+* `just cloud` — run the cloud service (needs Postgres **with pgvector**;
+  `aria-agent serve` is the default subcommand). `aria-agent serve --port <n>`
+  (default `CLOUD_PORT` or 3000).
+* `aria-agent setup` / `aria-agent upgrade [version] [--url <url>]` — CLI
+  self-management (`~/.ariacompute/agent-cli.yml`).
+* `just migrate` — `sqlx database create` + `sqlx migrate run`
 * `just fmt` / `just lint` — formatting and clippy
-* Release & publish: see `.github/workflows/release.yml` (assets),
-  `publish-cargo.yml` (crates.io), `publish-maven.yml` (Maven Central); Swift also
-  via CocoaPods `bindings/swift/AriaAgent.podspec`.
+* Release & publish: `.github/workflows/release.yml` (binary + cdylib assets),
+  `publish-cargo.yml` (crates.io: sandbox → core → memo → ariacompute-agent),
+  `publish-maven.yml` (Maven Central), `publish-npm.yml`, `publish-pypi.yml`;
+  Swift via CocoaPods `bindings/swift/AriaAgent.podspec`.
