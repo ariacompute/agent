@@ -22,7 +22,7 @@
 
 ## Milestone 4 — cloud
 - [x] `aria-agent-cloud`: axum + Postgres (metadata) + OpenAI; `/v1/agents`,
-      `/v1/runs` (JSON), `/v1/runs/stream` (SSE). `migrations/0001_init.sql`.
+      `/v1/sessions/:id/runs` (JSON), `/v1/sessions/:id/runs/stream` (SSE). `migrations/0001_init.sql`.
 
 ## Milestone 5 — mobile bindings
 - [x] `bindings/swift` (SwiftPM `Package.swift` + FFI modulemap).
@@ -80,9 +80,9 @@
       `response.function_call_arguments.delta` / `response.output_text.delta` /
       `response.output_text.done` / `response.output_item.done` /
       `response.completed` / `response.failed`, monotonic `sequence_number`);
-      `response.completed` is the terminal event and is always the last event
-      (`ensure_closed` guarantees it), with a trailing `data: [DONE]` frame
-      kept only for OpenAI wire compatibility. No private `aria.*` frames —
+      `response.completed` (or `response.failed`) is the only terminal event and
+      is always the last event (`ensure_closed` guarantees it); there is no
+      trailing `data: [DONE]` frame. No private `aria.*` frames —
       phase, tool result and `reef_record_id` travel as extra fields inside
       OpenAI-shaped frames. Unit tests assert the mapping, that no private
       frame leaks, and that the last frame is always terminal.

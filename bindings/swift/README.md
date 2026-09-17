@@ -33,10 +33,10 @@ print(session.recall(key: "fact1") ?? "")
 
 ## Cloud streaming (OpenAI-compatible)
 
-`POST /v1/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
+`POST /v1/sessions/:id/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
 SSE events, so a Swift client parses `response.*` frames with no Aria-specific
 logic. Each `data:` frame is one event; `response.completed` is the terminal
-one (a trailing `data: [DONE]` frame follows for OpenAI wire compatibility).
+one.
 
 ```swift
 import Foundation
@@ -53,7 +53,7 @@ struct CloudResponse: Decodable {
 }
 
 let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
-var request = URLRequest(url: URL(string: "\(base)/v1/runs/stream")!)
+var request = URLRequest(url: URL(string: "\(base)/v1/sessions/:id/runs/stream")!)
 request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")

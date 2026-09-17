@@ -654,6 +654,29 @@ internal open class UniffiForeignFutureStructVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceSdkAgentListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("onEvent", "uniffiFree")
+internal open class UniffiVTableCallbackInterfaceSdkAgentListener(
+    @JvmField internal var `onEvent`: UniffiCallbackInterfaceSdkAgentListenerMethod0? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+) : Structure() {
+    class UniffiByValue(
+        `onEvent`: UniffiCallbackInterfaceSdkAgentListenerMethod0? = null,
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfaceSdkAgentListener(`onEvent`,`uniffiFree`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceSdkAgentListener) {
+        `onEvent` = other.`onEvent`
+        `uniffiFree` = other.`uniffiFree`
+    }
+
+}
+
+
+
+
 
 
 
@@ -738,6 +761,7 @@ internal interface UniffiLib : Library {
             .also { lib: UniffiLib ->
                 uniffiCheckContractApiVersion(lib)
                 uniffiCheckApiChecksums(lib)
+                uniffiCallbackInterfaceSdkAgentListener.register(lib)
                 }
         }
         
@@ -753,6 +777,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_aria_agent_ffi_fn_method_sdkagent_run(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(`ptr`: Pointer,`input`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_aria_agent_ffi_fn_method_sdkagent_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
     fun uniffi_aria_agent_ffi_fn_clone_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -763,6 +789,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_aria_agent_ffi_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(`vtable`: UniffiVTableCallbackInterfaceSdkAgentListener,
+    ): Unit
     fun uniffi_aria_agent_ffi_fn_func_create_agent(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
     fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(`tenantId`: RustBuffer.ByValue,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -885,11 +913,15 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run(
     ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream(
+    ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdksession_recall(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event(
     ): Short
     fun ffi_aria_agent_ffi_uniffi_contract_version(
     ): Int
@@ -917,6 +949,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream() != 38484.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -924,6 +959,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 50855.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event() != 35179.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1203,6 +1241,14 @@ public interface SdkAgentInterface {
     fun `run`(`input`: kotlin.String): kotlin.String
     
     /**
+     * Run a single agentic turn, streaming events to `listener` as they arrive.
+     * The call blocks until the run terminates (a `Done` or `Error` event). The
+     * memo contract (recall before / persist both turns after) is honored by the
+     * underlying runtime.
+     */
+    fun `runStream`(`input`: kotlin.String, `listener`: SdkAgentListener)
+    
+    /**
      * Get the session memory handle for this agent.
      */
     fun `session`(): SdkSession
@@ -1308,6 +1354,24 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
     }
     )
     }
+    
+
+    
+    /**
+     * Run a single agentic turn, streaming events to `listener` as they arrive.
+     * The call blocks until the run terminates (a `Done` or `Error` event). The
+     * memo contract (recall before / persist both turns after) is honored by the
+     * underlying runtime.
+     */
+    @Throws(SdkException::class)override fun `runStream`(`input`: kotlin.String, `listener`: SdkAgentListener)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(SdkException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(
+        it, FfiConverterString.lower(`input`),FfiConverterTypeSdkAgentListener.lower(`listener`),_status)
+}
+    }
+    
     
 
     
@@ -1730,6 +1794,259 @@ public object FfiConverterTypeSdkError : FfiConverterRustBuffer<SdkException> {
     }
 
 }
+
+
+
+/**
+ * A single streaming event delivered to [`SdkAgentListener`] during
+ * [`SdkAgent::run_stream`]. Mirrors the core [`AgentEvent`] so native apps can
+ * render the agentic turn (phases, tool calls, streamed tokens, completion).
+ */
+sealed class SdkStreamEvent {
+    
+    /**
+     * A phase boundary (`recall` / `model` / `tool_exec` / `loop_guard`).
+     */
+    data class Step(
+        val `phase`: kotlin.String, 
+        val `label`: kotlin.String?) : SdkStreamEvent() {
+        companion object
+    }
+    
+    /**
+     * A streamed model text delta.
+     */
+    data class Token(
+        val `text`: kotlin.String) : SdkStreamEvent() {
+        companion object
+    }
+    
+    /**
+     * A tool invocation and its executed result (content only).
+     */
+    data class ToolCall(
+        val `id`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `arguments`: kotlin.String, 
+        val `result`: kotlin.String?) : SdkStreamEvent() {
+        companion object
+    }
+    
+    /**
+     * Terminal event carrying the full final reply.
+     */
+    data class Done(
+        val `text`: kotlin.String) : SdkStreamEvent() {
+        companion object
+    }
+    
+    /**
+     * A stream error; the run terminates after this event.
+     */
+    data class Error(
+        val `message`: kotlin.String) : SdkStreamEvent() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSdkStreamEvent : FfiConverterRustBuffer<SdkStreamEvent>{
+    override fun read(buf: ByteBuffer): SdkStreamEvent {
+        return when(buf.getInt()) {
+            1 -> SdkStreamEvent.Step(
+                FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            2 -> SdkStreamEvent.Token(
+                FfiConverterString.read(buf),
+                )
+            3 -> SdkStreamEvent.ToolCall(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            4 -> SdkStreamEvent.Done(
+                FfiConverterString.read(buf),
+                )
+            5 -> SdkStreamEvent.Error(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: SdkStreamEvent) = when(value) {
+        is SdkStreamEvent.Step -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`phase`)
+                + FfiConverterOptionalString.allocationSize(value.`label`)
+            )
+        }
+        is SdkStreamEvent.Token -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`text`)
+            )
+        }
+        is SdkStreamEvent.ToolCall -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterString.allocationSize(value.`arguments`)
+                + FfiConverterOptionalString.allocationSize(value.`result`)
+            )
+        }
+        is SdkStreamEvent.Done -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`text`)
+            )
+        }
+        is SdkStreamEvent.Error -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`message`)
+            )
+        }
+    }
+
+    override fun write(value: SdkStreamEvent, buf: ByteBuffer) {
+        when(value) {
+            is SdkStreamEvent.Step -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`phase`, buf)
+                FfiConverterOptionalString.write(value.`label`, buf)
+                Unit
+            }
+            is SdkStreamEvent.Token -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`text`, buf)
+                Unit
+            }
+            is SdkStreamEvent.ToolCall -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterString.write(value.`arguments`, buf)
+                FfiConverterOptionalString.write(value.`result`, buf)
+                Unit
+            }
+            is SdkStreamEvent.Done -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`text`, buf)
+                Unit
+            }
+            is SdkStreamEvent.Error -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.`message`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+
+/**
+ * Receives streaming events from [`SdkAgent::run_stream`].
+ */
+public interface SdkAgentListener {
+    
+    fun `onEvent`(`event`: SdkStreamEvent)
+    
+    companion object
+}
+
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+internal const val IDX_CALLBACK_FREE = 0
+// Callback return codes
+internal const val UNIFFI_CALLBACK_SUCCESS = 0
+internal const val UNIFFI_CALLBACK_ERROR = 1
+internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
+
+/**
+ * @suppress
+ */
+public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
+    internal val handleMap = UniffiHandleMap<CallbackInterface>()
+
+    internal fun drop(handle: Long) {
+        handleMap.remove(handle)
+    }
+
+    override fun lift(value: Long): CallbackInterface {
+        return handleMap.get(value)
+    }
+
+    override fun read(buf: ByteBuffer) = lift(buf.getLong())
+
+    override fun lower(value: CallbackInterface) = handleMap.insert(value)
+
+    override fun allocationSize(value: CallbackInterface) = 8UL
+
+    override fun write(value: CallbackInterface, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceSdkAgentListener {
+    internal object `onEvent`: UniffiCallbackInterfaceSdkAgentListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeSdkAgentListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onEvent`(
+                    FfiConverterTypeSdkStreamEvent.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeSdkAgentListener.handleMap.remove(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceSdkAgentListener.UniffiByValue(
+        `onEvent`,
+        uniffiFree,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeSdkAgentListener: FfiConverterCallbackInterface<SdkAgentListener>()
 
 
 

@@ -36,10 +36,10 @@ fun main() {
 
 ## Cloud streaming (OpenAI-compatible)
 
-`POST /v1/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
+`POST /v1/sessions/:id/runs/stream` on `aria-agent-cloud` emits **OpenAI Responses API**
 SSE events, so a Kotlin client parses `response.*` frames with no Aria-specific
 logic. Each `data:` frame is one event; `response.completed` is the terminal
-one (a trailing `data: [DONE]` frame follows for OpenAI wire compatibility).
+one.
 
 ```kotlin
 import kotlinx.coroutines.flow.*
@@ -53,7 +53,7 @@ val client = OkHttpClient()
 val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
 
 val request = Request.Builder()
-    .url("$base/v1/runs/stream")
+    .url("$base/v1/sessions/:id/runs/stream")
     .header("Accept", "text/event-stream")
     .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
         .toRequestBody())

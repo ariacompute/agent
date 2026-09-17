@@ -12,7 +12,7 @@
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube。 |
 | **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`，工具在 sandbox 中执行。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
-| **aria-agent-cloud** | axum 服务，Postgres 仅存元数据，调用 OpenAI Agents API。`/v1/agents`、`/v1/runs`、SSE `/v1/runs/stream`。 |
+| **aria-agent-cloud** | axum 服务，Postgres 仅存元数据，调用 OpenAI Agents API。`/v1/agents`、`/v1/sessions/s1/runs`、SSE `/v1/sessions/s1/runs/stream`。 |
 | **bindings** | `bindings/swift`（SwiftPM）与 `bindings/kotlin`（Android）。 |
 
 > **存储边界：** memo 是**唯一的**上下文存储，从不使用 Postgres；Postgres
@@ -248,7 +248,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
   TypeScript 或任意 HTTP 客户端中调用。流式返回为 SSE，输出 **OpenAI
   Responses API 事件**（`response.created`、`response.output_text.delta`、
   `response.function_call_arguments.delta` 等），以 `response.completed` 结束
-  （其后仍有一帧 `data: [DONE]`）—— 详见
+  —— 详见
   [OpenAI Agents API 兼容性](#openai-agents-api-兼容性)。
 - **原生 SDK（进程内）** —— 通过 UniFFI 绑定把运行时直接嵌入 Swift / Kotlin
   应用（无服务端、无网络）。
@@ -257,9 +257,11 @@ echo "DOCKER_GID set to $DOCKER_GID"
 `AGENT_CLOUD_API_KEY`，需携带 `Authorization: Bearer <key>`（或 `ApiKey <key>`）
 请求头。
 
-在 `/v1/runs` 与 `/v1/runs/stream` 的请求体中，可用更易读的智能体名字 `agent`
-代替 `agent_id`（会按当前 principal 解析该智能体）。`session` 字段也是可选的，
-默认值为 `"default"`，且 `stream` 也可一并传入以兼容客户端写法。
+在运行（run）请求体中，可用更易读的智能体名字 `agent` 代替 `agent_id`（会按当前
+principal 解析该智能体）。**会话（session）** 是端点路径中的 `{id}` 段（即
+`/v1/sessions/{id}/runs`）—— 它在云端的 memo 存储中划定本次对话的上下文范围，因此
+请求体里不再有 `session` 字段。该端点始终以流式返回；若只要一次性阻塞回复，调用
+`/v1/sessions/{id}/runs`（不带 `/stream`）即可。
 
 ### Python（云端 API）
 
@@ -275,16 +277,16 @@ agent_name = agent["name"]
 
 # 一次性运行
 run = requests.post(
-    f"{BASE}/v1/runs",
-    json={"agent": agent_name, "session": "s1", "input": "hello"},
+    f"{BASE}/v1/sessions/s1/runs",
+    json={"agent": agent_name, "input": "hello"},
     headers=headers,
 ).json()
 print(run["output"])
 
 # 流式运行 —— OpenAI Responses API 事件
 with requests.post(
-    f"{BASE}/v1/runs/stream",
-    json={"agent": agent_name, "session": "s1", "input": "tell me a joke"},
+    f"{BASE}/v1/sessions/s1/runs/stream",
+    json={"agent": agent_name, "input": "tell me a joke"},
     headers=headers,
     stream=True,
 ) as r:
@@ -299,7 +301,7 @@ with requests.post(
         if event["type"] == "response.output_text.delta":
             print(event["delta"], end="", flush=True)
         elif event["type"] == "response.completed":
-            # 终止事件（其后还有一帧 `data: [DONE]`）
+            # 终止事件
             print("\n收执 ID：", event["response"]["metadata"]["reef_record_id"])
             break
 ```
@@ -330,17 +332,17 @@ async fn main() -> anyhow::Result<()> {
         .json(&serde_json::json!({"name": "my-agent"}))
         .send().await?.json().await?;
 
-    let run: Run = client.post(format!("{base}/v1/runs"))
+    let run: Run = client.post(format!("{base}/v1/sessions/s1/runs"))
         .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "hello"}))
+        .json(&serde_json::json!({"agent": agent.name, "input": "hello"}))
         .send().await?.json().await?;
 
     println!("{}", run.output);
 
     // 流式运行 —— OpenAI Responses API 事件
-    let mut res = client.post(format!("{base}/v1/runs/stream"))
+    let mut res = client.post(format!("{base}/v1/sessions/s1/runs/stream"))
         .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "tell me a joke"}))
+        .json(&serde_json::json!({"agent": agent.name, "input": "tell me a joke"}))
         .send().await?;
     let mut buf = String::new();
     while let Some(chunk) = res.chunk().await? {
@@ -353,7 +355,7 @@ async fn main() -> anyhow::Result<()> {
             if event["type"] == "response.output_text.delta" {
                 print!("{}", event["delta"].as_str().unwrap_or_default());
             } else if event["type"] == "response.completed" {
-                return Ok(()); // 终止事件（其后还有一帧 `data: [DONE]`）
+                return Ok(()); // 终止事件
             }
         }
     }
@@ -379,16 +381,16 @@ const agent = await fetch(`${base}/v1/agents`, {
   method: "POST", headers, body: JSON.stringify({ name: "my-agent" }),
 }).then((r) => r.json<{ name: string }>());
 
-const run = await fetch(`${base}/v1/runs`, {
+const run = await fetch(`${base}/v1/sessions/s1/runs`, {
   method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, session: "s1", input: "hello" }),
+  body: JSON.stringify({ agent: agent.name, input: "hello" }),
 }).then((r) => r.json<{ output: string }>());
 console.log(run.output);
 
 // 流式运行 —— OpenAI Responses API 事件
-const res = await fetch(`${base}/v1/runs/stream`, {
+const res = await fetch(`${base}/v1/sessions/s1/runs/stream`, {
   method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, session: "s1", input: "tell me a joke" }),
+  body: JSON.stringify({ agent: agent.name, input: "tell me a joke" }),
 });
 const reader = res.body!.getReader();
 const decoder = new TextDecoder();
@@ -406,7 +408,7 @@ outer: for (;;) {
     if (event.type === "response.output_text.delta") {
       process.stdout.write(event.delta);
     } else if (event.type === "response.completed") {
-      // 终止事件（其后还有一帧 `data: [DONE]`）
+      // 终止事件
       console.log("\n收执 ID：", event.response.metadata.reef_record_id);
       break outer;
     }
@@ -433,14 +435,14 @@ let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
 print(session.recall(key: "fact1") ?? "")
 
-// 云端流式（兼容 OpenAI）：消费 /v1/runs/stream 的 response.* 事件
+// 云端流式（兼容 OpenAI）：消费 /v1/sessions/s1/runs/stream 的 response.* 事件
 let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
-var request = URLRequest(url: URL(string: "\(base)/v1/runs/stream")!)
+var request = URLRequest(url: URL(string: "\(base)/v1/sessions/s1/runs/stream")!)
 request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 request.httpBody = try? JSONSerialization.data(withJSONObject: [
-    "agent": "Agent Demo", "session": "s1", "input": "tell me a joke"
+    "agent": "Agent Demo", "input": "tell me a joke"
 ])
 
 let (stream, response) = try await URLSession.shared.bytes(for: request)
@@ -456,7 +458,7 @@ outer: for try await line in stream.lines {
     case "response.output_text.delta":
         print(event.delta ?? "", terminator: "")
     case "response.completed":
-        // 终止事件（其后还有一帧 `data: [DONE]`）
+        // 终止事件
         print("\n收执 ID：", event.response?.metadata?.reefRecordId ?? receipt ?? "")
         break outer
     default:
@@ -483,15 +485,15 @@ fun main() {
     println(session.recall("fact1"))
 }
 
-// 云端流式（兼容 OpenAI）：消费 /v1/runs/stream 的 response.* 事件
+// 云端流式（兼容 OpenAI）：消费 /v1/sessions/s1/runs/stream 的 response.* 事件
 val json = Json { ignoreUnknownKeys = true }
 val client = OkHttpClient()
 val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
 
 val request = Request.Builder()
-    .url("$base/v1/runs/stream")
+    .url("$base/v1/sessions/s1/runs/stream")
     .header("Accept", "text/event-stream")
-    .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
+    .post("""{"agent":"Agent Demo","input":"tell me a joke"}"""
         .toRequestBody())
     .build()
 
@@ -507,7 +509,7 @@ client.newCall(request).execute().use { resp ->
                     "response.output_text.delta" ->
                         print(event["delta"]?.jsonPrimitive?.content.orEmpty())
                     "response.completed" -> {
-                        // 终止事件（其后还有一帧 `data: [DONE]`）
+                        // 终止事件
                         println(
                             "\n收执 ID： " + (event["response"]?.jsonObject
                                 ?.get("metadata")?.jsonObject
@@ -524,7 +526,7 @@ client.newCall(request).execute().use { resp ->
 
 ## OpenAI Agents API 兼容性
 
-`POST /v1/runs/stream` 采用 **OpenAI Responses API 流式协议**，因此 OpenAI SDK
+`POST /v1/sessions/s1/runs/stream` 采用 **OpenAI Responses API 流式协议**，因此 OpenAI SDK
 与 OpenAI Agents SDK 可以零改造直接消费。每个 SSE `data:` 帧都是一个带 `type`
 和单调递增 `sequence_number` 的 Responses 事件：
 
@@ -540,9 +542,8 @@ client.newCall(request).execute().use { resp ->
 | `response.completed` | `response.status = "completed"`、`response.metadata.reef_record_id` |
 | `response.failed` | `response.error` |
 
-`response.completed` 即为终止事件：客户端收到它便意味着运行结束。其后仍会补发
-一帧 `data: [DONE]`，仅为兼容 OpenAI 的线上约定——可在 `response.completed`
-处停止并忽略它，也可以一直读到该哨兵为止。每次运行还会通过响应头
+`response.completed` 即为终止事件：客户端收到它便意味着运行结束（没有额外的 `data: [DONE]`
+尾帧）——直接在 `response.completed`（或 `response.failed`）处停止解析即可。每次运行还会通过响应头
 `x-reef-agent-record-id` 返回 Reef 收执 ID，取值与
 `response.metadata.reef_record_id` 完全一致。
 

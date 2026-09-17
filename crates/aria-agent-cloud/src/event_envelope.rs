@@ -2,44 +2,50 @@
 //! and every consumer (SDKs, the playground Agent playground, raw HTTP).
 //!
 //! Every frame carries an **OpenAI Responses API streaming `type`**, so OpenAI
-//! SDKs and the Agents SDK can consume `/v1/runs/stream` unchanged. Data the
-//! Responses schema does not model (the agentic phase, the executed tool
-//! result, the Reef receipt id) is carried as **extra fields inside** those
+//! SDKs and the Agents SDK can consume `/v1/sessions/:id/runs/stream` unchanged.
+//! Data the Responses schema does not model (the agentic phase, the executed
+//! tool result, the Reef receipt id) is carried as **extra fields inside** those
 //! OpenAI-shaped frames — never as private `aria.*` frames — so a strict OpenAI
 //! client ignores them while our own clients can still render a rich timeline.
+//!
+//! The OpenAI Responses streaming event sequence is followed faithfully:
+//! `response.created` → `response.output_item.added` → `response.content_part.added`
+//! → `response.output_text.delta` (×N) → `response.content_part.done` →
+//! `response.output_text.done` → `response.output_item.done` → `response.completed`.
+//! `function_call` items emit `response.function_call_arguments.delta` instead of
+//! text parts. `response.failed` is the terminal event on error.
 
 use agent_core::{AgentEvent, ToolResult};
 use serde_json::{json, Value};
 
-/// OpenAI Responses API streaming event types emitted by `/v1/runs/stream`.
+/// OpenAI Responses API streaming event types emitted by
+/// `/v1/sessions/:id/runs/stream`.
 pub mod event_type {
     pub const CREATED: &str = "response.created";
     pub const IN_PROGRESS: &str = "response.in_progress";
     pub const OUTPUT_ITEM_ADDED: &str = "response.output_item.added";
+    pub const CONTENT_PART_ADDED: &str = "response.content_part.added";
+    pub const OUTPUT_TEXT_DELTA: &str = "response.output_text.delta";
+    pub const CONTENT_PART_DONE: &str = "response.content_part.done";
+    pub const OUTPUT_TEXT_DONE: &str = "response.output_text.done";
     pub const OUTPUT_ITEM_DONE: &str = "response.output_item.done";
     pub const FUNCTION_CALL_ARGUMENTS_DELTA: &str = "response.function_call_arguments.delta";
-    pub const OUTPUT_TEXT_DELTA: &str = "response.output_text.delta";
-    pub const OUTPUT_TEXT_DONE: &str = "response.output_text.done";
     pub const COMPLETED: &str = "response.completed";
     pub const FAILED: &str = "response.failed";
 }
 
-/// Trailing SSE sentinel emitted **after** the terminal event.
-///
-/// `response.completed` (or `response.failed`) is the semantic terminal event —
-/// that is what clients should key on, and what our own clients stop at. The
-/// `[DONE]` frame is appended purely for OpenAI wire compatibility, because
-/// strict SSE clients (and OpenAI's own tooling) expect that conventional
-/// end-of-stream marker. It carries no data and is safe to ignore.
-pub const DONE_SENTINEL: &str = "[DONE]";
-
 /// Max bytes per `function_call_arguments.delta` chunk.
 const ARGS_CHUNK: usize = 64;
+
+/// Index of the single text content part of an assistant message item.
+const CONTENT_INDEX: u32 = 0;
 
 /// Stateful translator from the core agentic event stream to wire frames.
 ///
 /// One instance per run: it owns the monotonic `sequence_number`, the
-/// assistant message item id, and the accumulated reply text.
+/// assistant message item id, and the accumulated reply text. Splitting
+/// `open_message` / `close_message` keeps the message lifecycle explicit and
+/// the text accumulator local to those two helpers.
 pub struct EventEnvelope {
     run_id: String,
     agent_id: String,
@@ -50,8 +56,8 @@ pub struct EventEnvelope {
     msg_open: bool,
     text: String,
     // Set once a terminal frame (`response.completed` / `response.failed`) has
-    // been emitted. No `[DONE]` sentinel exists, so this is what makes
-    // "the last frame is terminal" a hard guarantee.
+    // been emitted. With no `[DONE]` sentinel, this is what makes "the last
+    // frame is terminal" a hard guarantee.
     closed: bool,
 }
 
@@ -101,7 +107,7 @@ impl EventEnvelope {
     pub fn finish(&mut self, final_text: &str) -> Vec<Value> {
         let mut out = Vec::new();
         // `Done` carries the full reply; when no deltas were streamed (e.g. a
-        // tool-only turn that ended with text) flush it as one delta first.
+        // tool-only turn that ended with text) open the message first.
         if !final_text.is_empty() && !self.msg_open {
             out.extend(self.token(final_text));
         }
@@ -128,12 +134,11 @@ impl EventEnvelope {
 
     /// Guarantees the stream always ends on a terminal event.
     ///
-    /// Since no `[DONE]` sentinel is emitted, `response.completed` (or
-    /// `response.failed`) is the *only* end-of-stream signal a client can key
-    /// on. If the core event stream ended without producing a terminal frame,
-    /// emit `response.completed` so the contract — "the last frame is always a
-    /// terminal one" — holds unconditionally. Returns an empty vec when a
-    /// terminal frame was already emitted.
+    /// `response.completed` (or `response.failed`) is the *only* end-of-stream
+    /// signal a client keys on. If the core event stream ended without producing
+    /// a terminal frame, emit `response.completed` so the contract — "the last
+    /// frame is always a terminal one" — holds unconditionally. Returns an empty
+    /// vec when a terminal frame was already emitted.
     pub fn ensure_closed(&mut self) -> Vec<Value> {
         if self.closed {
             return Vec::new();
@@ -208,39 +213,57 @@ impl EventEnvelope {
         out
     }
 
-    /// A model text delta. Opens the assistant message item on first delta.
+    /// Open the assistant message item (empty `content`); the text part is added
+    /// by `content_part_added` immediately after.
+    fn open_message(&mut self) -> Value {
+        self.msg_open = true;
+        let seq = self.next_seq();
+        json!({
+            "type": event_type::OUTPUT_ITEM_ADDED,
+            "sequence_number": seq,
+            "item": {
+                "id": self.msg_item_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        })
+    }
+
+    /// Announce the single `output_text` content part of the message item.
+    fn content_part_added(&mut self) -> Value {
+        let seq = self.next_seq();
+        json!({
+            "type": event_type::CONTENT_PART_ADDED,
+            "sequence_number": seq,
+            "item_id": self.msg_item_id,
+            "content_index": CONTENT_INDEX,
+            "part": { "type": "output_text", "text": "", "annotations": [] },
+        })
+    }
+
+    /// A model text delta. Opens the message + content part on the first delta.
     fn token(&mut self, text: &str) -> Vec<Value> {
         let mut out = Vec::new();
         if !self.msg_open {
-            self.msg_open = true;
-            let seq = self.next_seq();
-            let id = self.msg_item_id.clone();
-            out.push(json!({
-                "type": event_type::OUTPUT_ITEM_ADDED,
-                "sequence_number": seq,
-                "item": {
-                    "id": id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": [],
-                },
-            }));
+            out.push(self.open_message());
+            out.push(self.content_part_added());
         }
         self.text.push_str(text);
         let seq = self.next_seq();
-        let id = self.msg_item_id.clone();
         out.push(json!({
             "type": event_type::OUTPUT_TEXT_DELTA,
             "sequence_number": seq,
-            "item_id": id,
-            "content_index": 0,
+            "item_id": self.msg_item_id,
+            "content_index": CONTENT_INDEX,
             "delta": text,
         }));
         out
     }
 
-    /// Close the assistant message item (`output_text.done` + item done).
+    /// Close the assistant message item: `content_part.done` → `output_text.done`
+    /// → `output_item.done`, carrying the full accumulated text.
     fn close_message(&mut self) -> Vec<Value> {
         if !self.msg_open {
             return Vec::new();
@@ -250,22 +273,29 @@ impl EventEnvelope {
         let text = self.text.clone();
 
         let seq = self.next_seq();
-        let id = self.msg_item_id.clone();
+        out.push(json!({
+            "type": event_type::CONTENT_PART_DONE,
+            "sequence_number": seq,
+            "item_id": self.msg_item_id,
+            "content_index": CONTENT_INDEX,
+            "part": { "type": "output_text", "text": text.clone(), "annotations": [] },
+        }));
+
+        let seq = self.next_seq();
         out.push(json!({
             "type": event_type::OUTPUT_TEXT_DONE,
             "sequence_number": seq,
-            "item_id": id,
-            "content_index": 0,
+            "item_id": self.msg_item_id,
+            "content_index": CONTENT_INDEX,
             "text": text.clone(),
         }));
 
         let seq = self.next_seq();
-        let id = self.msg_item_id.clone();
         out.push(json!({
             "type": event_type::OUTPUT_ITEM_DONE,
             "sequence_number": seq,
             "item": {
-                "id": id,
+                "id": self.msg_item_id,
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
@@ -382,6 +412,7 @@ mod tests {
                 is_error: false,
             },
         });
+        // function_call items emit no content_part frames.
         assert_eq!(
             types(&frames),
             vec![
@@ -398,30 +429,68 @@ mod tests {
     }
 
     #[test]
-    fn token_streams_text_deltas_and_completes() {
+    fn token_streams_content_part_then_text_delta() {
         let mut env = envelope();
         let open = env.push(&AgentEvent::Token { text: "he".into() });
-        assert_eq!(open[0]["type"], json!(event_type::OUTPUT_ITEM_ADDED));
-        assert_eq!(open[1]["type"], json!(event_type::OUTPUT_TEXT_DELTA));
-        assert_eq!(open[1]["delta"], json!("he"));
+        // First delta opens the message, announces the text part, then streams.
+        assert_eq!(
+            types(&open),
+            vec![
+                event_type::OUTPUT_ITEM_ADDED,
+                event_type::CONTENT_PART_ADDED,
+                event_type::OUTPUT_TEXT_DELTA,
+            ]
+        );
+        assert_eq!(open[0]["item"]["type"], json!("message"));
+        assert_eq!(open[0]["item"]["content"], json!([]));
+        assert_eq!(open[1]["part"]["type"], json!("output_text"));
+        assert_eq!(open[2]["delta"], json!("he"));
 
-        let frames = env.push(&AgentEvent::Done {
+        let frames = env.push(&AgentEvent::Token { text: "llo".into() });
+        // Already open: only the delta is emitted.
+        assert_eq!(types(&frames), vec![event_type::OUTPUT_TEXT_DELTA]);
+        assert_eq!(frames[0]["delta"], json!("llo"));
+
+        let close = env.push(&AgentEvent::Done {
             text: "hello".into(),
         });
-        let t = types(&frames);
         assert_eq!(
-            t,
+            types(&close),
             vec![
+                event_type::CONTENT_PART_DONE,
                 event_type::OUTPUT_TEXT_DONE,
                 event_type::OUTPUT_ITEM_DONE,
                 event_type::COMPLETED,
             ]
         );
-        let completed = frames.last().expect("completed frame");
-        assert_eq!(completed["response"]["status"], json!("completed"));
+        // The full text is carried on both done frames and the completed item.
+        assert_eq!(close[0]["part"]["text"], json!("hello"));
+        assert_eq!(close[1]["text"], json!("hello"));
+        assert_eq!(close[2]["item"]["content"][0]["text"], json!("hello"));
+        assert_eq!(close[3]["response"]["status"], json!("completed"));
         assert_eq!(
-            completed["response"]["metadata"]["reef_record_id"],
+            close[3]["response"]["metadata"]["reef_record_id"],
             json!("rec-1")
+        );
+    }
+
+    #[test]
+    fn done_without_prior_delta_opens_and_closes_message() {
+        let mut env = envelope();
+        let frames = env.push(&AgentEvent::Done {
+            text: "hello".into(),
+        });
+        assert_eq!(
+            types(&frames),
+            vec![
+                event_type::OUTPUT_ITEM_ADDED,
+                event_type::CONTENT_PART_ADDED,
+                event_type::OUTPUT_TEXT_DELTA,
+                event_type::CONTENT_PART_DONE,
+                event_type::OUTPUT_TEXT_DONE,
+                event_type::OUTPUT_ITEM_DONE,
+                event_type::COMPLETED,
+            ]
         );
     }
 
@@ -500,7 +569,6 @@ mod tests {
 
     #[test]
     fn argument_deltas_never_split_utf8() {
-        // Multi-byte chars must survive chunking intact.
         let s = "é".repeat(100);
         let joined: String = chunked(&s).concat();
         assert_eq!(joined, s);

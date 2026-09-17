@@ -13,7 +13,9 @@ crate-type = ["lib", "cdylib", "staticlib"]
 uniffi = "0.28"
 tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+futures = "0.3"
 aria-agent-core = { workspace = true, features = ["openai"] }
 aria-agent-memo.workspace = true
 

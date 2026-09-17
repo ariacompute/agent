@@ -9,21 +9,21 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 
 ## 2. Agents Cloud API (Rust + Postgres)
 * axum HTTP service exposing `/v1/agents` (create / get / **list**) and
-  `/v1/runs` (JSON) plus SSE-streaming `/v1/runs/stream`.
+  `/v1/sessions/:id/runs` (JSON) plus SSE-streaming `/v1/sessions/:id/runs/stream`.
 * Calls the OpenAI Agents / Responses API through `aria-agent-core`'s
   `OpenAiModel` (feature `openai`). `OPENAI_BASE_URL` overrides the endpoint
   so a deployment can target any OpenAI-compatible gateway; `OPENAI_API_KEY`
   supplies the credential.
 * **Postgres stores only metadata** (`agents`, `runs`); context is injected
   from memo.
-* **Streaming contract (frozen, OpenAI-compatible).** `/v1/runs/stream`
+* **Streaming contract (frozen, OpenAI-compatible).** `/v1/sessions/:id/runs/stream`
   emits OpenAI Responses API streaming events — `response.created`,
   `response.in_progress`, `response.output_item.added`,
   `response.function_call_arguments.delta`, `response.output_text.delta`,
   `response.output_text.done`, `response.output_item.done`,
   `response.completed`, `response.failed` — each with a monotonic
-  `sequence_number`; `response.completed` is the terminal event, followed by a
-  trailing `data: [DONE]` frame kept for OpenAI wire compatibility. No private
+  `sequence_number`; `response.completed` (or `response.failed`) is the only
+  terminal event — there is no trailing `data: [DONE]` sentinel. No private
   `aria.*` frames:
   the agentic phase (`recall` / `model` / `tool_exec` / `loop_guard`), the
   executed tool `result` and the Reef receipt `reef_record_id` ride along as
@@ -46,7 +46,7 @@ Five modules compose the agent platform. Each maps to a crate/deliverable.
 * Compiled to a cross-platform `cdylib` (`libaria-agent_ffi`).
 * Swift (SwiftPM) and Kotlin (Android) bindings generated from the cdylib.
 * Both binding READMEs additionally document **cloud streaming**
-  (OpenAI-compatible): consuming `/v1/runs/stream` `response.*` events from
+  (OpenAI-compatible): consuming `/v1/sessions/:id/runs/stream` `response.*` events from
   Swift / Kotlin over HTTP. This is documentation only — the FFI surface
   itself is unchanged and needs no `just ffi` regeneration.
 

@@ -208,10 +208,9 @@ use axum::response::{sse::Sse, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use clap::{ArgAction, Args, Parser, Subcommand};
-use futures::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::Executor;
 use sqlx::Row;
@@ -616,11 +615,8 @@ struct RunBody {
     /// …or by its human-friendly name (marketing / quick-start friendly).
     #[serde(default)]
     agent: Option<String>,
-    /// Optional session; defaults to `"default"` when omitted.
-    #[serde(default)]
-    session: Option<String>,
     input: String,
-    /// Accepted for client compatibility; `/v1/runs/stream` always streams, so
+    /// Accepted for client compatibility; `/v1/sessions/:id/runs/stream` always streams, so
     /// this is currently ignored.
     #[serde(default)]
     #[allow(dead_code)]
@@ -929,8 +925,27 @@ async fn list_agents(
     Ok(Json(out))
 }
 
-async fn run_agent(
+/// Create a new agent session. The session id is the memo scoping key (a uuid);
+/// no database row is created — memo stores lazily per session string, matching
+/// the prior `RunBody.session` semantics. Returns `{ "id": <uuid> }`.
+async fn create_session(
+    State(_state): State<AppState>,
+    _principal: Principal,
+) -> Json<SessionCreated> {
+    Json(SessionCreated {
+        id: Uuid::new_v4().to_string(),
+    })
+}
+
+#[derive(Serialize)]
+struct SessionCreated {
+    id: String,
+}
+
+/// Run one agentic turn and return the assistant reply (blocking, non-streaming).
+async fn session_run(
     State(state): State<AppState>,
+    Path(session): Path<String>,
     principal: Principal,
     Json(body): Json<RunBody>,
 ) -> Response {
@@ -938,10 +953,6 @@ async fn run_agent(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
-    let session = body
-        .session
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
     let agent = match build_agent(&state, &name, &session, &principal).await {
         Ok(a) => a,
         Err(e) => return e.into_response(),
@@ -1001,16 +1012,17 @@ async fn run_agent(
 
 /// Stream one agentic turn as **OpenAI Responses API** events.
 ///
-/// The core stream ([`Agent::run_event_stream`]) is translated frame by frame
-/// by [`event_envelope::EventEnvelope`]: the run opens with
-/// `response.created`, streams `response.output_text.delta` /
-/// `response.function_call_arguments.delta` / `response.output_item.*`, and
-/// closes with `response.completed`, which is the stream's terminal event; a
-/// trailing `data: [DONE]` frame follows it for OpenAI wire compatibility. The
-/// Reef receipt id is echoed both as the `x-reef-agent-record-id` header and in
-/// `response.*.metadata.reef_record_id`.
-async fn run_agent_stream(
+/// The core stream ([`Agent::run_event_stream`]) is translated frame by frame by
+/// [`event_envelope::EventEnvelope`]: the run opens with `response.created`,
+/// streams `response.content_part.added` / `response.output_text.delta` /
+/// `response.function_call_arguments.delta` / `response.output_item.*`, and closes
+/// with `response.completed`, which is the stream's terminal event. The Reef
+/// receipt id is echoed both as the `x-reef-agent-record-id` header and in
+/// `response.*.metadata.reef_record_id`. There is no trailing `[DONE]` frame —
+/// `response.completed` (or `response.failed`) is the only end-of-stream signal.
+async fn session_run_stream(
     State(state): State<AppState>,
+    Path(session): Path<String>,
     principal: Principal,
     Json(body): Json<RunBody>,
 ) -> Response {
@@ -1019,10 +1031,6 @@ async fn run_agent_stream(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
-    let session = body
-        .session
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
     let agent = match build_agent(&state, &name, &session, &principal).await {
         Ok(a) => a,
         Err(e) => return e.into_response(),
@@ -1102,26 +1110,30 @@ async fn run_agent_stream(
         let _ = records.record_turn(final_rec).await;
     };
 
-    // `response.completed` (emitted by `EventEnvelope::finish`) is the semantic
-    // terminal event. The trailing `[DONE]` frame is appended only for OpenAI
-    // wire compatibility: our own clients stop at `response.completed` and
-    // never read it, while strict SSE clients still see the conventional
-    // end-of-stream marker.
-    let sse = wrapped
-        .map(|frame| {
-            Ok::<Event, Infallible>(
-                Event::default()
-                    .json_data(frame)
-                    .unwrap_or_else(|_| Event::default().data("[encode-error]")),
-            )
-        })
-        .chain(stream::once(async {
-            Ok(Event::default().data(event_envelope::DONE_SENTINEL))
-        }));
+    build_sse_stream(wrapped, &rec_id)
+}
+
+/// Wrap a translated frame stream into an SSE response carrying the Reef receipt
+/// id. Every streaming endpoint shares this single wire path: the frame stream is
+/// produced by [`event_envelope::EventEnvelope`], and this helper only performs
+/// SSE encoding + header injection. No `[DONE]` sentinel is appended — the
+/// terminal `response.completed` / `response.failed` frame is the end-of-stream
+/// marker.
+fn build_sse_stream(
+    frames: impl futures::Stream<Item = Value> + Send + 'static,
+    rec_id: &str,
+) -> Response {
+    let sse = frames.map(|frame| {
+        Ok::<Event, Infallible>(
+            Event::default()
+                .json_data(frame)
+                .unwrap_or_else(|_| Event::default().data("[encode-error]")),
+        )
+    });
     let mut resp = Sse::new(Box::pin(sse)).into_response();
     resp.headers_mut().insert(
         HeaderName::from_static(REEF_RECORD_HEADER),
-        HeaderValue::from_str(&rec_id).unwrap_or(HeaderValue::from_static("")),
+        HeaderValue::from_str(rec_id).unwrap_or(HeaderValue::from_static("")),
     );
     resp
 }
@@ -1185,7 +1197,7 @@ fn agent_config(name: &str, session: &str) -> AgentConfig {
         // `SandboxProvider::Codex` is resolved by this runtime to
         // `codex_sandbox::CodexSandbox`, which runs commands through codex's
         // real `SandboxManager`. Docker/Kata/Cube remain available via
-        // `agent_sandbox::from_provider` for non-tool (`/v1/runs`) traffic.
+        // `agent_sandbox::from_provider` for non-tool (`/v1/sessions/:id/runs`) traffic.
         sandbox_provider: "codex".into(),
         model: DEFAULT_MODEL.into(),
     }
@@ -1713,8 +1725,9 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/v1/agents", post(create_agent).get(list_agents))
         .route("/v1/agents/:id", get(get_agent))
-        .route("/v1/runs", post(run_agent))
-        .route("/v1/runs/stream", post(run_agent_stream))
+        .route("/v1/sessions", post(create_session))
+        .route("/v1/sessions/:id/runs", post(session_run))
+        .route("/v1/sessions/:id/runs/stream", post(session_run_stream))
         .route("/reef/report", post(reef_report))
         .route("/reef/evolve", post(reef_evolve))
         .route("/reef/versions", get(reef_versions))

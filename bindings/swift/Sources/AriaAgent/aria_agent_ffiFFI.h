@@ -251,6 +251,21 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SDK_AGENT_LISTENER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SDK_AGENT_LISTENER_METHOD0
+typedef void (*UniffiCallbackInterfaceSdkAgentListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SDK_AGENT_LISTENER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SDK_AGENT_LISTENER
+typedef struct UniffiVTableCallbackInterfaceSdkAgentListener {
+    UniffiCallbackInterfaceSdkAgentListenerMethod0 _Nonnull onEvent;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+} UniffiVTableCallbackInterfaceSdkAgentListener;
+
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_CLONE_SDKAGENT
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_CLONE_SDKAGENT
 void*_Nonnull uniffi_aria_agent_ffi_fn_clone_sdkagent(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -264,6 +279,11 @@ void uniffi_aria_agent_ffi_fn_free_sdkagent(void*_Nonnull ptr, RustCallStatus *_
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_RUN
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_RUN
 RustBuffer uniffi_aria_agent_ffi_fn_method_sdkagent_run(void*_Nonnull ptr, RustBuffer input, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_RUN_STREAM
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_RUN_STREAM
+void uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(void*_Nonnull ptr, RustBuffer input, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_SESSION
@@ -289,6 +309,11 @@ void uniffi_aria_agent_ffi_fn_method_sdksession_memorize(void*_Nonnull ptr, Rust
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_RECALL
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKSESSION_RECALL
 RustBuffer uniffi_aria_agent_ffi_fn_method_sdksession_recall(void*_Nonnull ptr, RustBuffer key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_SDKAGENTLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_SDKAGENTLISTENER
+void uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(UniffiVTableCallbackInterfaceSdkAgentListener* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT
@@ -599,6 +624,12 @@ uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_run(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_RUN_STREAM
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_RUN_STREAM
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_SESSION
 uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_session(void
@@ -614,6 +645,12 @@ uint16_t uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKSESSION_RECALL
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKSESSION_RECALL
 uint16_t uniffi_aria_agent_ffi_checksum_method_sdksession_recall(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENTLISTENER_ON_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENTLISTENER_ON_EVENT
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event(void
     
 );
 #endif

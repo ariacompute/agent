@@ -10,8 +10,9 @@
 
 uniffi::setup_scaffolding!();
 
-use agent_core::{Agent, AgentConfig};
+use agent_core::{Agent, AgentConfig, AgentEvent, Tool};
 use agent_memo::{ContextFragment, FragmentKind, MemoStore, SledMemoStore};
+use futures::StreamExt;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
@@ -139,4 +140,170 @@ pub fn create_agent_for_tenant(
     Ok(Arc::new(SdkAgent {
         inner: Arc::new(agent),
     }))
+}
+
+/// A single streaming event delivered to [`SdkAgentListener`] during
+/// [`SdkAgent::run_stream`]. Mirrors the core [`AgentEvent`] so native apps can
+/// render the agentic turn (phases, tool calls, streamed tokens, completion).
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum SdkStreamEvent {
+    /// A phase boundary (`recall` / `model` / `tool_exec` / `loop_guard`).
+    Step {
+        phase: String,
+        label: Option<String>,
+    },
+    /// A streamed model text delta.
+    Token { text: String },
+    /// A tool invocation and its executed result (content only).
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+        result: Option<String>,
+    },
+    /// Terminal event carrying the full final reply.
+    Done { text: String },
+    /// A stream error; the run terminates after this event.
+    Error { message: String },
+}
+
+/// Receives streaming events from [`SdkAgent::run_stream`].
+#[uniffi::export(callback_interface)]
+pub trait SdkAgentListener: Send + Sync {
+    fn on_event(&self, event: SdkStreamEvent);
+}
+
+/// The frozen toolset exposed by the SDK runtime: a single `shell` exec tool
+/// whose `command` is a `[program, ...args]` array, matching the cloud's
+/// `agent_tools()`.
+fn sdk_tools() -> Vec<Tool> {
+    vec![Tool {
+        name: "shell".into(),
+        description:
+            "Execute a shell command given as a [program, ...args] array; runs in the configured sandbox."
+                .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "command + args",
+                }
+            },
+            "required": ["command"],
+        }),
+    }]
+}
+
+/// Translate a core [`AgentEvent`] into the SDK event shape. Pure and free of
+/// FFI / network dependencies so it can be unit-tested in isolation.
+pub fn map_event(ev: &AgentEvent) -> SdkStreamEvent {
+    match ev {
+        AgentEvent::Step { phase, label } => SdkStreamEvent::Step {
+            phase: phase.clone(),
+            label: label.clone(),
+        },
+        AgentEvent::Token { text } => SdkStreamEvent::Token { text: text.clone() },
+        AgentEvent::ToolCall {
+            id,
+            name,
+            arguments,
+            result,
+        } => SdkStreamEvent::ToolCall {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string()),
+            result: Some(result.content.clone()),
+        },
+        AgentEvent::Done { text } => SdkStreamEvent::Done { text: text.clone() },
+    }
+}
+
+#[uniffi::export]
+impl SdkAgent {
+    /// Run a single agentic turn, streaming events to `listener` as they arrive.
+    /// The call blocks until the run terminates (a `Done` or `Error` event). The
+    /// memo contract (recall before / persist both turns after) is honored by the
+    /// underlying runtime.
+    pub fn run_stream(
+        &self,
+        input: String,
+        listener: Box<dyn SdkAgentListener>,
+    ) -> Result<(), SdkError> {
+        let agent = self.inner.clone();
+        rt().block_on(async move {
+            let tools = sdk_tools();
+            let stream = agent
+                .run_event_stream(&input, &tools)
+                .await
+                .map_err(|e| SdkError::Core(e.to_string()))?;
+            let mut stream = stream;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(ev) => listener.on_event(map_event(&ev)),
+                    Err(e) => {
+                        listener.on_event(SdkStreamEvent::Error {
+                            message: e.to_string(),
+                        });
+                        return Err(SdkError::Core(e.to_string()));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_event_covers_every_variant() {
+        assert!(matches!(
+            map_event(&AgentEvent::Step { phase: "model".into(), label: Some("x".into()) }),
+            SdkStreamEvent::Step { phase, label } if phase == "model" && label == Some("x".into())
+        ));
+        assert!(matches!(
+            map_event(&AgentEvent::Token { text: "hi".into() }),
+            SdkStreamEvent::Token { text } if text == "hi"
+        ));
+        let tc = map_event(&AgentEvent::ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({ "command": ["echo", "hi"] }),
+            result: agent_core::ToolResult {
+                call_id: "c1".into(),
+                content: "hi\n".into(),
+                is_error: false,
+            },
+        });
+        match tc {
+            SdkStreamEvent::ToolCall {
+                id,
+                name,
+                arguments,
+                result,
+            } => {
+                assert_eq!(id, "c1");
+                assert_eq!(name, "shell");
+                assert_eq!(arguments, "{\"command\":[\"echo\",\"hi\"]}");
+                assert_eq!(result, Some("hi\n".to_string()));
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        assert!(matches!(
+            map_event(&AgentEvent::Done { text: "bye".into() }),
+            SdkStreamEvent::Done { text } if text == "bye"
+        ));
+    }
+
+    #[test]
+    fn sdk_tools_is_the_shell_exec_tool() {
+        let tools = sdk_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "shell");
+        assert!(tools[0].parameters.is_object());
+    }
 }

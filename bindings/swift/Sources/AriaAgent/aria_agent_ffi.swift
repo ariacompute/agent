@@ -451,6 +451,14 @@ public protocol SdkAgentProtocol : AnyObject {
     func run(input: String) throws  -> String
     
     /**
+     * Run a single agentic turn, streaming events to `listener` as they arrive.
+     * The call blocks until the run terminates (a `Done` or `Error` event). The
+     * memo contract (recall before / persist both turns after) is honored by the
+     * underlying runtime.
+     */
+    func runStream(input: String, listener: SdkAgentListener) throws 
+    
+    /**
      * Get the session memory handle for this agent.
      */
     func session()  -> SdkSession
@@ -519,6 +527,20 @@ open func run(input: String)throws  -> String {
         FfiConverterString.lower(input),$0
     )
 })
+}
+    
+    /**
+     * Run a single agentic turn, streaming events to `listener` as they arrive.
+     * The call blocks until the run terminates (a `Done` or `Error` event). The
+     * memo contract (recall before / persist both turns after) is honored by the
+     * underlying runtime.
+     */
+open func runStream(input: String, listener: SdkAgentListener)throws  {try rustCallWithError(FfiConverterTypeSdkError.lift) {
+    uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(self.uniffiClonePointer(),
+        FfiConverterString.lower(input),
+        FfiConverterCallbackInterfaceSdkAgentListener.lower(listener),$0
+    )
+}
 }
     
     /**
@@ -874,6 +896,238 @@ extension SdkError: Foundation.LocalizedError {
     }
 }
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * A single streaming event delivered to [`SdkAgentListener`] during
+ * [`SdkAgent::run_stream`]. Mirrors the core [`AgentEvent`] so native apps can
+ * render the agentic turn (phases, tool calls, streamed tokens, completion).
+ */
+
+public enum SdkStreamEvent {
+    
+    /**
+     * A phase boundary (`recall` / `model` / `tool_exec` / `loop_guard`).
+     */
+    case step(phase: String, label: String?
+    )
+    /**
+     * A streamed model text delta.
+     */
+    case token(text: String
+    )
+    /**
+     * A tool invocation and its executed result (content only).
+     */
+    case toolCall(id: String, name: String, arguments: String, result: String?
+    )
+    /**
+     * Terminal event carrying the full final reply.
+     */
+    case done(text: String
+    )
+    /**
+     * A stream error; the run terminates after this event.
+     */
+    case error(message: String
+    )
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSdkStreamEvent: FfiConverterRustBuffer {
+    typealias SwiftType = SdkStreamEvent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkStreamEvent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .step(phase: try FfiConverterString.read(from: &buf), label: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 2: return .token(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .toolCall(id: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf), arguments: try FfiConverterString.read(from: &buf), result: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 4: return .done(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 5: return .error(message: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SdkStreamEvent, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .step(phase,label):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(phase, into: &buf)
+            FfiConverterOptionString.write(label, into: &buf)
+            
+        
+        case let .token(text):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .toolCall(id,name,arguments,result):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(name, into: &buf)
+            FfiConverterString.write(arguments, into: &buf)
+            FfiConverterOptionString.write(result, into: &buf)
+            
+        
+        case let .done(text):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .error(message):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSdkStreamEvent_lift(_ buf: RustBuffer) throws -> SdkStreamEvent {
+    return try FfiConverterTypeSdkStreamEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSdkStreamEvent_lower(_ value: SdkStreamEvent) -> RustBuffer {
+    return FfiConverterTypeSdkStreamEvent.lower(value)
+}
+
+
+
+extension SdkStreamEvent: Equatable, Hashable {}
+
+
+
+
+
+
+/**
+ * Receives streaming events from [`SdkAgent::run_stream`].
+ */
+public protocol SdkAgentListener : AnyObject {
+    
+    func onEvent(event: SdkStreamEvent) 
+    
+}
+
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceSdkAgentListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceSdkAgentListener = UniffiVTableCallbackInterfaceSdkAgentListener(
+        onEvent: { (
+            uniffiHandle: UInt64,
+            event: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSdkAgentListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onEvent(
+                     event: try FfiConverterTypeSdkStreamEvent.lift(event)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterCallbackInterfaceSdkAgentListener.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface SdkAgentListener: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitSdkAgentListener() {
+    uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(&UniffiCallbackInterfaceSdkAgentListener.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceSdkAgentListener {
+    fileprivate static var handleMap = UniffiHandleMap<SdkAgentListener>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceSdkAgentListener : FfiConverter {
+    typealias SwiftType = SdkAgentListener
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -945,6 +1199,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream() != 38484) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -954,7 +1211,11 @@ private var initializationResult: InitializationResult = {
     if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 50855) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event() != 35179) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
+    uniffiCallbackInitSdkAgentListener()
     return InitializationResult.ok
 }()
 

@@ -57,7 +57,8 @@ cloud API plus native (Swift/Kotlin) SDKs.
    keeps the legacy root paths. `agents` / `runs` carry `principal_id` and are
    scoped per tenant (admins see all). `GET /v1/agents` lists the agents a
    caller can see (admins: all; tenants: their own). Streaming is served at
-   `POST /v1/runs/stream` — see rule 10 for the frozen event contract. See
+   `POST /v1/sessions/:id/runs/stream` (and `POST /v1/sessions/:id/runs` for a
+   blocking run) — see rule 10 for the frozen event contract. See
    `docs/adr/0007-*.md`.
 8. **Reef stores are separate from context/metadata.** `aria-agent-reef` logs every
    turn (`RecordStore`) and binds feedback (`FeedbackStore`) in a **local sled
@@ -79,20 +80,20 @@ cloud API plus native (Swift/Kotlin) SDKs.
    `secrets.GPG_*`). `aria-agent-cloud` (CLI) and `aria-agent-ffigen` (`publish = false`) are NOT
    published to crates.io.
 
-10. **Streaming contract is OpenAI-compatible and frozen.** `POST /v1/runs/stream`
+10. **Streaming contract is OpenAI-compatible and frozen.** `POST /v1/sessions/:id/runs/stream`
     emits **OpenAI Responses API** streaming events (never bare
     `{"token":"..."}`, never private `aria.*` frames), so OpenAI SDKs and the
     Agents SDK consume it unchanged. `crates/aria-agent-cloud/src/event_envelope.rs`
     is the single translation point from `AgentEvent` to wire frames:
     `Step` → `response.in_progress`, `ToolCall` → `output_item.added` +
     `function_call_arguments.delta` chunks + `output_item.done`, `Token` →
-    `output_text.delta` (with the message item lifecycle), `Done` →
-    `output_text.done` + `response.completed`, errors → `response.failed`. Every
-    frame carries a monotonic `sequence_number`; `response.completed` is the
-    terminal event. A trailing `data: [DONE]` frame is appended **only** for
-    OpenAI wire compatibility — clients must key on `response.completed`
-    (or `response.failed`), never on the sentinel. Data the Responses schema
-    does not model (the agentic
+    `output_item.added` (message) + `content_part.added` + `output_text.delta` +
+    `content_part.done` + `output_text.done`, `Done` → `output_item.done` +
+    `response.completed`, errors → `response.failed`. Every frame carries a
+    monotonic `sequence_number`; `response.completed` (or `response.failed`) is the
+    **only** terminal event and there is **no** trailing `data: [DONE]` sentinel —
+    clients must key on `response.completed` / `response.failed`, never on a
+    sentinel. Data the Responses schema does not model (the agentic
     `phase` / `label`, the executed tool `result`, the Reef receipt
     `reef_record_id`) travels as **extra fields inside** those OpenAI-shaped
     frames, so strict OpenAI clients ignore them. Changing this contract is a

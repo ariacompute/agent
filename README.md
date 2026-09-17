@@ -13,7 +13,7 @@ harness, exposing agents as (a) a **Rust + Cloud API** and (b)
 | **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube. |
 | **aria-agent-core** | Unified agent runtime: `recall → model → memorize`, tools in a sandbox. |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent` / `SdkSession` / `create_agent`. |
-| **aria-agent-cloud** | axum service, Postgres metadata only, OpenAI Agents API. `/v1/agents`, `/v1/runs`, SSE `/v1/runs/stream`. |
+| **aria-agent-cloud** | axum service, Postgres metadata only, OpenAI Agents API. `/v1/agents`, `/v1/sessions/s1/runs`, SSE `/v1/sessions/s1/runs/stream`. |
 | **bindings** | `bindings/swift` (SwiftPM) and `bindings/kotlin` (Android). |
 
 > **Storage boundary:** memo is the *only* context store and never uses
@@ -265,7 +265,7 @@ There are two ways to use an Aria Agent:
   Python, Rust, TypeScript, or any HTTP client. Streaming is SSE emitting
   **OpenAI Responses API events** (`response.created`,
   `response.output_text.delta`, `response.function_call_arguments.delta`, …),
-  terminated by `response.completed` (followed by a `data: [DONE]` frame) — see
+  terminated by `response.completed` — see
   [OpenAI Agents API compatibility](#openai-agents-api-compatibility).
 - **Native SDK (in-process)** — the UniFFI bindings embed the runtime directly
   in Swift / Kotlin apps (no server, no network).
@@ -274,10 +274,12 @@ All cloud examples assume a running service (see Quick start) and, when
 `AGENT_CLOUD_API_KEY` is set, an `Authorization: Bearer <key>` (or
 `ApiKey <key>`) header.
 
-In the `/v1/runs` and `/v1/runs/stream` bodies, you may use the agent's
-human-friendly name `agent` instead of `agent_id` (the run is resolved per
-principal). The `session` field is also optional and defaults to `"default"`,
-and `stream` is accepted for client compatibility.
+In the run request bodies you may use the agent's human-friendly name `agent`
+instead of `agent_id` (the run is resolved per principal). The **session** is the
+path `{id}` segment of `/v1/sessions/{id}/runs` — it scopes the conversation in
+the cloud's memo store, so there is no `session` field in the body. The endpoint
+always streams; call `/v1/sessions/{id}/runs` (without `/stream`) for a single
+blocking reply.
 
 ### Python (cloud API)
 
@@ -293,16 +295,16 @@ agent_name = agent["name"]
 
 # one-shot run
 run = requests.post(
-    f"{BASE}/v1/runs",
-    json={"agent": agent_name, "session": "s1", "input": "hello"},
+    f"{BASE}/v1/sessions/s1/runs",
+    json={"agent": agent_name, "input": "hello"},
     headers=headers,
 ).json()
 print(run["output"])
 
 # streaming run — OpenAI Responses API events
 with requests.post(
-    f"{BASE}/v1/runs/stream",
-    json={"agent": agent_name, "session": "s1", "input": "tell me a joke"},
+    f"{BASE}/v1/sessions/s1/runs/stream",
+    json={"agent": agent_name, "input": "tell me a joke"},
     headers=headers,
     stream=True,
 ) as r:
@@ -317,7 +319,7 @@ with requests.post(
         if event["type"] == "response.output_text.delta":
             print(event["delta"], end="", flush=True)
         elif event["type"] == "response.completed":
-            # terminal event (a trailing `data: [DONE]` frame follows)
+            # terminal event
             print("\nreceipt:", event["response"]["metadata"]["reef_record_id"])
             break
 ```
@@ -348,17 +350,17 @@ async fn main() -> anyhow::Result<()> {
         .json(&serde_json::json!({"name": "my-agent"}))
         .send().await?.json().await?;
 
-    let run: Run = client.post(format!("{base}/v1/runs"))
+    let run: Run = client.post(format!("{base}/v1/sessions/s1/runs"))
         .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "hello"}))
+        .json(&serde_json::json!({"agent": agent.name, "input": "hello"}))
         .send().await?.json().await?;
 
     println!("{}", run.output);
 
     // streaming run — OpenAI Responses API events
-    let mut res = client.post(format!("{base}/v1/runs/stream"))
+    let mut res = client.post(format!("{base}/v1/sessions/s1/runs/stream"))
         .headers(headers)
-        .json(&serde_json::json!({"agent": agent.name, "session": "s1", "input": "tell me a joke"}))
+        .json(&serde_json::json!({"agent": agent.name, "input": "tell me a joke"}))
         .send().await?;
     let mut buf = String::new();
     while let Some(chunk) = res.chunk().await? {
@@ -371,7 +373,7 @@ async fn main() -> anyhow::Result<()> {
             if event["type"] == "response.output_text.delta" {
                 print!("{}", event["delta"].as_str().unwrap_or_default());
             } else if event["type"] == "response.completed" {
-                return Ok(()); // terminal event (a trailing `data: [DONE]` frame follows)
+                return Ok(()); // terminal event
             }
         }
     }
@@ -397,16 +399,16 @@ const agent = await fetch(`${base}/v1/agents`, {
   method: "POST", headers, body: JSON.stringify({ name: "my-agent" }),
 }).then((r) => r.json<{ name: string }>());
 
-const run = await fetch(`${base}/v1/runs`, {
+const run = await fetch(`${base}/v1/sessions/s1/runs`, {
   method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, session: "s1", input: "hello" }),
+  body: JSON.stringify({ agent: agent.name, input: "hello" }),
 }).then((r) => r.json<{ output: string }>());
 console.log(run.output);
 
 // streaming run — OpenAI Responses API events
-const res = await fetch(`${base}/v1/runs/stream`, {
+const res = await fetch(`${base}/v1/sessions/s1/runs/stream`, {
   method: "POST", headers,
-  body: JSON.stringify({ agent: agent.name, session: "s1", input: "tell me a joke" }),
+  body: JSON.stringify({ agent: agent.name, input: "tell me a joke" }),
 });
 const reader = res.body!.getReader();
 const decoder = new TextDecoder();
@@ -424,7 +426,7 @@ outer: for (;;) {
     if (event.type === "response.output_text.delta") {
       process.stdout.write(event.delta);
     } else if (event.type === "response.completed") {
-      // terminal event (a trailing `data: [DONE]` frame follows)
+      // terminal event
       console.log("\nreceipt:", event.response.metadata.reef_record_id);
       break outer;
     }
@@ -452,14 +454,14 @@ let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
 print(session.recall(key: "fact1") ?? "")
 
-// Cloud streaming (OpenAI-compatible): consume /v1/runs/stream response.* events
+// Cloud streaming (OpenAI-compatible): consume /v1/sessions/s1/runs/stream response.* events
 let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
-var request = URLRequest(url: URL(string: "\(base)/v1/runs/stream")!)
+var request = URLRequest(url: URL(string: "\(base)/v1/sessions/s1/runs/stream")!)
 request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 request.httpBody = try? JSONSerialization.data(withJSONObject: [
-    "agent": "Agent Demo", "session": "s1", "input": "tell me a joke"
+    "agent": "Agent Demo", "input": "tell me a joke"
 ])
 
 let (stream, response) = try await URLSession.shared.bytes(for: request)
@@ -475,7 +477,7 @@ outer: for try await line in stream.lines {
     case "response.output_text.delta":
         print(event.delta ?? "", terminator: "")
     case "response.completed":
-        // terminal event (a trailing `data: [DONE]` frame follows)
+        // terminal event
         print("\nreceipt:", event.response?.metadata?.reefRecordId ?? receipt ?? "")
         break outer
     default:
@@ -502,15 +504,15 @@ fun main() {
     println(session.recall("fact1"))
 }
 
-// Cloud streaming (OpenAI-compatible): consume /v1/runs/stream response.* events
+// Cloud streaming (OpenAI-compatible): consume /v1/sessions/s1/runs/stream response.* events
 val json = Json { ignoreUnknownKeys = true }
 val client = OkHttpClient()
 val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
 
 val request = Request.Builder()
-    .url("$base/v1/runs/stream")
+    .url("$base/v1/sessions/s1/runs/stream")
     .header("Accept", "text/event-stream")
-    .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
+    .post("""{"agent":"Agent Demo","input":"tell me a joke"}"""
         .toRequestBody())
     .build()
 
@@ -526,7 +528,7 @@ client.newCall(request).execute().use { resp ->
                     "response.output_text.delta" ->
                         print(event["delta"]?.jsonPrimitive?.content.orEmpty())
                     "response.completed" -> {
-                        // terminal event (a trailing `data: [DONE]` frame follows)
+                        // terminal event
                         println(
                             "\nreceipt: " + (event["response"]?.jsonObject
                                 ?.get("metadata")?.jsonObject
@@ -543,7 +545,7 @@ client.newCall(request).execute().use { resp ->
 
 ## OpenAI Agents API compatibility
 
-`POST /v1/runs/stream` speaks the **OpenAI Responses API streaming protocol**,
+`POST /v1/sessions/s1/runs/stream` speaks the **OpenAI Responses API streaming protocol**,
 so OpenAI SDKs and the OpenAI Agents SDK can consume it unchanged. Every SSE
 `data:` frame is a Responses event with a `type` and a monotonic
 `sequence_number`:
@@ -561,11 +563,10 @@ so OpenAI SDKs and the OpenAI Agents SDK can consume it unchanged. Every SSE
 | `response.failed` | `response.error` |
 
 `response.completed` is the terminal event: when a client sees it the run is
-finished. A trailing `data: [DONE]` frame is still emitted afterwards, purely
-for OpenAI wire compatibility — stop on `response.completed` and ignore it, or
-read to the sentinel if you prefer. Every run also returns the Reef receipt id
-as the `x-reef-agent-record-id` response header — the same value exposed as
-`response.metadata.reef_record_id`.
+finished — there is no trailing `data: [DONE]` sentinel, so stop on
+`response.completed` (or `response.failed`). Every run also returns the Reef
+receipt id as the `x-reef-agent-record-id` response header — the same value
+exposed as `response.metadata.reef_record_id`.
 
 Extra fields our orchestration needs but the Responses schema does not model
 (the agentic `phase`, the tool `result`, the Reef receipt id) are carried
