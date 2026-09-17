@@ -26,7 +26,11 @@ cloud API plus native (Swift/Kotlin) SDKs.
    normal + abnormal paths (`cargo test -p aria-agent-memo`).
 2. **FFI is stable.** Only change `ariacompute-agent`'s exported surface deliberately.
    After any change run `just ffi` and commit the regenerated bindings. See
-   `docs/adr/0002-ffi-boundary.md`.
+   `docs/adr/0002-ffi-boundary.md`. The **public SDK ergonomics** (session-less
+   happy path, server-minted session hidden behind `AriaCloudClient`) are
+   specified in `docs/adr/0008-sdk-interface.md`: `create_agent` takes no
+   session; `agent.run(input)` / `agent.run_stream(input)` mirror the OpenAI
+   Agents SDK `Runner.run(agent, input)` shape.
 3. **Sandbox is pluggable.** Add providers by implementing the `Sandbox` trait
    and registering them in `from_provider`. Docker is the default. The cloud
    selects the **codex** backend (`sandbox_provider = "codex"` in

@@ -14,6 +14,7 @@ use agent_core::{Agent, AgentConfig, AgentEvent, Tool};
 use agent_memo::{ContextFragment, FragmentKind, MemoStore, SledMemoStore};
 use futures::StreamExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
@@ -22,19 +23,31 @@ fn rt() -> &'static Runtime {
     RT.get_or_init(|| Runtime::new().expect("tokio runtime"))
 }
 
-/// SDK-side agent configuration (mirrors `agent_core::AgentConfig`).
+/// Process-unique, monotonically increasing session scope. The session is the
+/// memo scoping key; it is auto-assigned per agent instance so callers never
+/// have to pass one (mirrors the OpenAI Agents SDK quickstart, where
+/// `Agent(name, model)` needs no session/thread).
+static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+fn next_session() -> String {
+    format!(
+        "sess-{}-{}",
+        std::process::id(),
+        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// SDK-side agent configuration (advanced path). `session` is intentionally
+/// absent: the runtime assigns one isolated memo scope per agent instance.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SdkAgentConfig {
-    pub session: String,
     pub agent_name: String,
-    pub sandbox_provider: String,
     pub model: String,
+    pub sandbox_provider: String,
 }
 
 impl Default for SdkAgentConfig {
     fn default() -> Self {
         Self {
-            session: "default".to_string(),
             agent_name: "agent".to_string(),
             sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
@@ -69,6 +82,12 @@ impl SdkAgent {
             session: self.inner.session().to_string(),
         })
     }
+
+    /// The auto-assigned session id (memo scope). Useful when relaying a run to
+    /// the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+    pub fn session_id(&self) -> String {
+        self.inner.session().to_string()
+    }
 }
 
 /// A session's memo handle (long-term / externalized memory).
@@ -96,15 +115,33 @@ impl SdkSession {
     }
 }
 
-/// Build an agent with an in-memory memo store.
-#[uniffi::export]
-pub fn create_agent(config: SdkAgentConfig) -> Result<Arc<SdkAgent>, SdkError> {
-    let memo = SledMemoStore::memory().map_err(|e| SdkError::Core(e.to_string()))?;
+/// Open an in-memory memo store, or a persistent per-tenant sled DB when
+/// `tenant_id` is non-empty (under `ARIA_MEMO_DIR`, else a temp subdir).
+fn build_memo(tenant_id: &str) -> Result<Arc<dyn MemoStore>, SdkError> {
+    let memo: Arc<dyn MemoStore> = if tenant_id.is_empty() {
+        SledMemoStore::memory().map_err(|e| SdkError::Core(e.to_string()))?
+    } else {
+        let base = std::env::var("ARIA_MEMO_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        let dir = Path::new(&base).join("tenants").join(tenant_id);
+        std::fs::create_dir_all(&dir).map_err(|e| SdkError::Core(e.to_string()))?;
+        SledMemoStore::open(&dir).map_err(|e| SdkError::Core(e.to_string()))?
+    };
+    Ok(memo)
+}
+
+/// Build an [`SdkAgent`] with an auto-assigned, isolated session scope.
+fn make_agent(
+    agent_name: String,
+    model: String,
+    sandbox_provider: String,
+    memo: Arc<dyn MemoStore>,
+) -> Result<Arc<SdkAgent>, SdkError> {
     let cfg = AgentConfig {
-        session: config.session,
-        agent_name: config.agent_name,
-        sandbox_provider: config.sandbox_provider,
-        model: config.model,
+        session: next_session(),
+        agent_name,
+        sandbox_provider,
+        model,
     };
     let agent = Agent::new(cfg, memo).map_err(|e| SdkError::Core(e.to_string()))?;
     Ok(Arc::new(SdkAgent {
@@ -112,34 +149,51 @@ pub fn create_agent(config: SdkAgentConfig) -> Result<Arc<SdkAgent>, SdkError> {
     }))
 }
 
-/// Build an agent whose memo store is namespaced to `tenant_id`, giving the
-/// native SDK the same per-tenant isolation the cloud enforces server-side.
-/// When `tenant_id` is empty behavior matches [`create_agent`] (in-memory memo).
+/// Minimal quickstart entry — `Agent(name, model)`, no session required.
+/// The sandbox defaults to Docker. Streaming is via [`SdkAgent::run_stream`].
+#[uniffi::export]
+pub fn create_agent(agent_name: String, model: String) -> Result<Arc<SdkAgent>, SdkError> {
+    let memo = build_memo("")?;
+    make_agent(agent_name, model, "docker".to_string(), memo)
+}
+
+/// Advanced entry accepting a full [`SdkAgentConfig`] (custom sandbox, etc.).
+#[uniffi::export]
+pub fn create_agent_with(config: SdkAgentConfig) -> Result<Arc<SdkAgent>, SdkError> {
+    let memo = build_memo("")?;
+    make_agent(
+        config.agent_name,
+        config.model,
+        config.sandbox_provider,
+        memo,
+    )
+}
+
+/// Minimal tenant-scoped quickstart entry (per-tenant memo isolation like the
+/// cloud enforces server-side). Empty `tenant_id` behaves like [`create_agent`].
 #[uniffi::export]
 pub fn create_agent_for_tenant(
     tenant_id: String,
+    agent_name: String,
+    model: String,
+) -> Result<Arc<SdkAgent>, SdkError> {
+    let memo = build_memo(&tenant_id)?;
+    make_agent(agent_name, model, "docker".to_string(), memo)
+}
+
+/// Advanced tenant-scoped entry accepting a full [`SdkAgentConfig`].
+#[uniffi::export]
+pub fn create_agent_for_tenant_with(
+    tenant_id: String,
     config: SdkAgentConfig,
 ) -> Result<Arc<SdkAgent>, SdkError> {
-    let memo: Arc<dyn MemoStore> = if tenant_id.is_empty() {
-        SledMemoStore::memory().map_err(|e| SdkError::Core(e.to_string()))?
-    } else {
-        // Persistent per-tenant sled DB under ARIA_MEMO_DIR (or a temp subdir).
-        let base = std::env::var("ARIA_MEMO_DIR")
-            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
-        let dir = Path::new(&base).join("tenants").join(&tenant_id);
-        std::fs::create_dir_all(&dir).map_err(|e| SdkError::Core(e.to_string()))?;
-        SledMemoStore::open(&dir).map_err(|e| SdkError::Core(e.to_string()))?
-    };
-    let cfg = AgentConfig {
-        session: config.session,
-        agent_name: config.agent_name,
-        sandbox_provider: config.sandbox_provider,
-        model: config.model,
-    };
-    let agent = Agent::new(cfg, memo).map_err(|e| SdkError::Core(e.to_string()))?;
-    Ok(Arc::new(SdkAgent {
-        inner: Arc::new(agent),
-    }))
+    let memo = build_memo(&tenant_id)?;
+    make_agent(
+        config.agent_name,
+        config.model,
+        config.sandbox_provider,
+        memo,
+    )
 }
 
 /// A single streaming event delivered to [`SdkAgentListener`] during

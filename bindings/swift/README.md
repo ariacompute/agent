@@ -21,10 +21,7 @@ cp target/debug/libaria-agent_ffi.so /usr/local/lib/
 ```swift
 import AriaAgent
 
-let agent = createAgent(AgentConfig(session: "default",
-                                     agentName: "agent",
-                                     sandboxProvider: "docker",
-                                     model: "gpt-4o-mini"))
+let agent = createAgent(agentName: "Assistant", model: "gpt-4o-mini")
 let reply = agent.run("hello")
 let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
@@ -53,12 +50,16 @@ struct CloudResponse: Decodable {
 }
 
 let base = ProcessInfo.processInfo.environment["ARIA_AGENT_BASE"] ?? "http://localhost:3000"
-var request = URLRequest(url: URL(string: "\(base)/v1/sessions/:id/runs/stream")!)
+
+// The session id is an opaque memo scope; `s1` is a fixed example. (An SDK
+// agent also exposes `agent.sessionId()`; the cloud can mint one via
+// `POST /v1/sessions`, which returns `{ "id": <uuid> }`.)
+var request = URLRequest(url: URL(string: "\(base)/v1/sessions/s1/runs/stream")!)
 request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 request.httpBody = try? JSONSerialization.data(withJSONObject: [
-    "agent": "Agent Demo", "session": "s1", "input": "tell me a joke"
+    "agent": "Agent Demo", "input": "tell me a joke"
 ])
 
 let (stream, response) = try await URLSession.shared.bytes(for: request)

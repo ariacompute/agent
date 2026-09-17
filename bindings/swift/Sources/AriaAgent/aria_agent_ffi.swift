@@ -463,6 +463,12 @@ public protocol SdkAgentProtocol : AnyObject {
      */
     func session()  -> SdkSession
     
+    /**
+     * The auto-assigned session id (memo scope). Useful when relaying a run to
+     * the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+     */
+    func sessionId()  -> String
+    
 }
 
 /**
@@ -549,6 +555,17 @@ open func runStream(input: String, listener: SdkAgentListener)throws  {try rustC
 open func session() -> SdkSession {
     return try!  FfiConverterTypeSdkSession.lift(try! rustCall() {
     uniffi_aria_agent_ffi_fn_method_sdkagent_session(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * The auto-assigned session id (memo scope). Useful when relaying a run to
+     * the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+     */
+open func sessionId() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -758,21 +775,20 @@ public func FfiConverterTypeSdkSession_lower(_ value: SdkSession) -> UnsafeMutab
 
 
 /**
- * SDK-side agent configuration (mirrors `agent_core::AgentConfig`).
+ * SDK-side agent configuration (advanced path). `session` is intentionally
+ * absent: the runtime assigns one isolated memo scope per agent instance.
  */
 public struct SdkAgentConfig {
-    public var session: String
     public var agentName: String
-    public var sandboxProvider: String
     public var model: String
+    public var sandboxProvider: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(session: String, agentName: String, sandboxProvider: String, model: String) {
-        self.session = session
+    public init(agentName: String, model: String, sandboxProvider: String) {
         self.agentName = agentName
-        self.sandboxProvider = sandboxProvider
         self.model = model
+        self.sandboxProvider = sandboxProvider
     }
 }
 
@@ -780,26 +796,22 @@ public struct SdkAgentConfig {
 
 extension SdkAgentConfig: Equatable, Hashable {
     public static func ==(lhs: SdkAgentConfig, rhs: SdkAgentConfig) -> Bool {
-        if lhs.session != rhs.session {
-            return false
-        }
         if lhs.agentName != rhs.agentName {
             return false
         }
-        if lhs.sandboxProvider != rhs.sandboxProvider {
+        if lhs.model != rhs.model {
             return false
         }
-        if lhs.model != rhs.model {
+        if lhs.sandboxProvider != rhs.sandboxProvider {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(session)
         hasher.combine(agentName)
-        hasher.combine(sandboxProvider)
         hasher.combine(model)
+        hasher.combine(sandboxProvider)
     }
 }
 
@@ -811,18 +823,16 @@ public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkAgentConfig {
         return
             try SdkAgentConfig(
-                session: FfiConverterString.read(from: &buf), 
                 agentName: FfiConverterString.read(from: &buf), 
-                sandboxProvider: FfiConverterString.read(from: &buf), 
-                model: FfiConverterString.read(from: &buf)
+                model: FfiConverterString.read(from: &buf), 
+                sandboxProvider: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: SdkAgentConfig, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.session, into: &buf)
         FfiConverterString.write(value.agentName, into: &buf)
-        FfiConverterString.write(value.sandboxProvider, into: &buf)
         FfiConverterString.write(value.model, into: &buf)
+        FfiConverterString.write(value.sandboxProvider, into: &buf)
     }
 }
 
@@ -1152,24 +1162,47 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     }
 }
 /**
- * Build an agent with an in-memory memo store.
+ * Minimal quickstart entry — `Agent(name, model)`, no session required.
+ * The sandbox defaults to Docker. Streaming is via [`SdkAgent::run_stream`].
  */
-public func createAgent(config: SdkAgentConfig)throws  -> SdkAgent {
+public func createAgent(agentName: String, model: String)throws  -> SdkAgent {
     return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
     uniffi_aria_agent_ffi_fn_func_create_agent(
+        FfiConverterString.lower(agentName),
+        FfiConverterString.lower(model),$0
+    )
+})
+}
+/**
+ * Minimal tenant-scoped quickstart entry (per-tenant memo isolation like the
+ * cloud enforces server-side). Empty `tenant_id` behaves like [`create_agent`].
+ */
+public func createAgentForTenant(tenantId: String, agentName: String, model: String)throws  -> SdkAgent {
+    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
+    uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
+        FfiConverterString.lower(tenantId),
+        FfiConverterString.lower(agentName),
+        FfiConverterString.lower(model),$0
+    )
+})
+}
+/**
+ * Advanced tenant-scoped entry accepting a full [`SdkAgentConfig`].
+ */
+public func createAgentForTenantWith(tenantId: String, config: SdkAgentConfig)throws  -> SdkAgent {
+    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
+    uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(
+        FfiConverterString.lower(tenantId),
         FfiConverterTypeSdkAgentConfig.lower(config),$0
     )
 })
 }
 /**
- * Build an agent whose memo store is namespaced to `tenant_id`, giving the
- * native SDK the same per-tenant isolation the cloud enforces server-side.
- * When `tenant_id` is empty behavior matches [`create_agent`] (in-memory memo).
+ * Advanced entry accepting a full [`SdkAgentConfig`] (custom sandbox, etc.).
  */
-public func createAgentForTenant(tenantId: String, config: SdkAgentConfig)throws  -> SdkAgent {
+public func createAgentWith(config: SdkAgentConfig)throws  -> SdkAgent {
     return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
-        FfiConverterString.lower(tenantId),
+    uniffi_aria_agent_ffi_fn_func_create_agent_with(
         FfiConverterTypeSdkAgentConfig.lower(config),$0
     )
 })
@@ -1190,10 +1223,16 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 2855) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 16266) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 56839) {
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 59195) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 39777) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471) {
@@ -1203,6 +1242,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 20313) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838) {

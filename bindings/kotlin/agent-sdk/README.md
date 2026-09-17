@@ -26,7 +26,7 @@ generated bindings.
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
 fun main() {
-    val agent = createAgent(AgentConfig("default", "agent", "docker", "gpt-4o-mini"))
+    val agent = createAgent("Assistant", "gpt-4o-mini")
     val reply = agent.run("hello")
     val session = agent.session()
     session.memorize("fact1", "the moon is cheese")
@@ -52,10 +52,13 @@ val json = Json { ignoreUnknownKeys = true }
 val client = OkHttpClient()
 val base = System.getenv("ARIA_AGENT_BASE") ?: "http://localhost:3000"
 
+// The session id is an opaque memo scope; `s1` is a fixed example. (An SDK
+// agent also exposes `agent.sessionId()`; the cloud can mint one via
+// `POST /v1/sessions`, which returns `{ "id": <uuid> }`.)
 val request = Request.Builder()
-    .url("$base/v1/sessions/:id/runs/stream")
+    .url("$base/v1/sessions/s1/runs/stream")
     .header("Accept", "text/event-stream")
-    .post("""{"agent":"Agent Demo","session":"s1","input":"tell me a joke"}"""
+    .post("""{"agent":"Agent Demo","input":"tell me a joke"}"""
         .toRequestBody())
     .build()
 

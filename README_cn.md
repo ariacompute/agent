@@ -424,12 +424,9 @@ outer: for (;;) {
 ```swift
 import AriaAgent
 
-// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）
-let agent = createAgent(AgentConfig(
-    session: "default",
-    agentName: "agent",
-    sandboxProvider: "docker",
-    model: "gpt-4o-mini"))
+// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）。
+// 无需 session：运行时为每个智能体分配独立的记忆作用域。
+let agent = createAgent(agentName: "Assistant", model: "gpt-4o-mini")
 let reply = agent.run("hello")
 let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
@@ -476,9 +473,10 @@ outer: for try await line in stream.lines {
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
-// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）
+// 原生 SDK —— 运行时嵌在进程内（无服务端、无网络）。
+// 无需 session：运行时为每个智能体分配独立的记忆作用域。
 fun main() {
-    val agent = createAgent(AgentConfig("default", "agent", "docker", "gpt-4o-mini"))
+    val agent = createAgent("Assistant", "gpt-4o-mini")
     val reply = agent.run("hello")
     val session = agent.session()
     session.memorize("fact1", "the moon is cheese")

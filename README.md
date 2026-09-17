@@ -443,12 +443,9 @@ cloud stream over HTTP:
 ```swift
 import AriaAgent
 
-// Native SDK — the runtime embedded in-process (no server, no network)
-let agent = createAgent(AgentConfig(
-    session: "default",
-    agentName: "agent",
-    sandboxProvider: "docker",
-    model: "gpt-4o-mini"))
+// Native SDK — the runtime embedded in-process (no server, no network).
+// No session needed: the runtime assigns one isolated memo scope per agent.
+let agent = createAgent(agentName: "Assistant", model: "gpt-4o-mini")
 let reply = agent.run("hello")
 let session = agent.session()
 session.memorize(key: "fact1", value: "the moon is cheese")
@@ -495,9 +492,10 @@ library (see `bindings/kotlin/agent-sdk/README.md`) to run the agent
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
-// Native SDK — the runtime embedded in-process (no server, no network)
+// Native SDK — the runtime embedded in-process (no server, no network).
+// No session needed: the runtime assigns one isolated memo scope per agent.
 fun main() {
-    val agent = createAgent(AgentConfig("default", "agent", "docker", "gpt-4o-mini"))
+    val agent = createAgent("Assistant", "gpt-4o-mini")
     val reply = agent.run("hello")
     val session = agent.session()
     session.memorize("fact1", "the moon is cheese")

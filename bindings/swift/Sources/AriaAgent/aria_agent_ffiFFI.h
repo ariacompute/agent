@@ -291,6 +291,11 @@ void uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(void*_Nonnull ptr, Rust
 void*_Nonnull uniffi_aria_agent_ffi_fn_method_sdkagent_session(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_SESSION_ID
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_METHOD_SDKAGENT_SESSION_ID
+RustBuffer uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_CLONE_SDKSESSION
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_CLONE_SDKSESSION
 void*_Nonnull uniffi_aria_agent_ffi_fn_clone_sdksession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -318,12 +323,22 @@ void uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(UniffiVTable
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT
-void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent(RustBuffer config, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent(RustBuffer agent_name, RustBuffer model, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT_FOR_TENANT
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT_FOR_TENANT
-void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(RustBuffer tenant_id, RustBuffer config, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(RustBuffer tenant_id, RustBuffer agent_name, RustBuffer model, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT_FOR_TENANT_WITH
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT_FOR_TENANT_WITH
+void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(RustBuffer tenant_id, RustBuffer config, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT_WITH
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_FN_FUNC_CREATE_AGENT_WITH
+void*_Nonnull uniffi_aria_agent_ffi_fn_func_create_agent_with(RustBuffer config, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ARIA_AGENT_FFI_RUSTBUFFER_ALLOC
@@ -618,6 +633,18 @@ uint16_t uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_FUNC_CREATE_AGENT_FOR_TENANT_WITH
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_FUNC_CREATE_AGENT_FOR_TENANT_WITH
+uint16_t uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_FUNC_CREATE_AGENT_WITH
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_FUNC_CREATE_AGENT_WITH
+uint16_t uniffi_aria_agent_ffi_checksum_func_create_agent_with(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_RUN
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_RUN
 uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_run(void
@@ -633,6 +660,12 @@ uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_SESSION
 uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_session(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_SESSION_ID
+#define UNIFFI_FFIDEF_UNIFFI_ARIA_AGENT_FFI_CHECKSUM_METHOD_SDKAGENT_SESSION_ID
+uint16_t uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id(void
     
 );
 #endif

@@ -751,6 +751,12 @@ internal open class UniffiVTableCallbackInterfaceSdkAgentListener(
 
 
 
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -781,6 +787,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_aria_agent_ffi_fn_method_sdkagent_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
+    fun uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_aria_agent_ffi_fn_clone_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
     fun uniffi_aria_agent_ffi_fn_free_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -791,9 +799,13 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(`vtable`: UniffiVTableCallbackInterfaceSdkAgentListener,
     ): Unit
-    fun uniffi_aria_agent_ffi_fn_func_create_agent(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_func_create_agent(`agentName`: RustBuffer.ByValue,`model`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(`tenantId`: RustBuffer.ByValue,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(`tenantId`: RustBuffer.ByValue,`agentName`: RustBuffer.ByValue,`model`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(`tenantId`: RustBuffer.ByValue,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_func_create_agent_with(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
     fun ffi_aria_agent_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -911,11 +923,17 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant(
     ): Short
+    fun uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_func_create_agent_with(
+    ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id(
     ): Short
     fun uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(
     ): Short
@@ -940,10 +958,16 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 2855.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 16266.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 56839.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 59195.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 39777.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471.toShort()) {
@@ -953,6 +977,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 20313.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 58838.toShort()) {
@@ -1253,6 +1280,12 @@ public interface SdkAgentInterface {
      */
     fun `session`(): SdkSession
     
+    /**
+     * The auto-assigned session id (memo scope). Useful when relaying a run to
+     * the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+     */
+    fun `sessionId`(): kotlin.String
+    
     companion object
 }
 
@@ -1382,6 +1415,22 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_session(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The auto-assigned session id (memo scope). Useful when relaying a run to
+     * the cloud `POST /v1/sessions/:id/runs/stream` endpoint.
+     */override fun `sessionId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(
         it, _status)
 }
     }
@@ -1696,13 +1745,13 @@ public object FfiConverterTypeSdkSession: FfiConverter<SdkSession, Pointer> {
 
 
 /**
- * SDK-side agent configuration (mirrors `agent_core::AgentConfig`).
+ * SDK-side agent configuration (advanced path). `session` is intentionally
+ * absent: the runtime assigns one isolated memo scope per agent instance.
  */
 data class SdkAgentConfig (
-    var `session`: kotlin.String, 
     var `agentName`: kotlin.String, 
-    var `sandboxProvider`: kotlin.String, 
-    var `model`: kotlin.String
+    var `model`: kotlin.String, 
+    var `sandboxProvider`: kotlin.String
 ) {
     
     companion object
@@ -1717,22 +1766,19 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: SdkAgentConfig) = (
-            FfiConverterString.allocationSize(value.`session`) +
             FfiConverterString.allocationSize(value.`agentName`) +
-            FfiConverterString.allocationSize(value.`sandboxProvider`) +
-            FfiConverterString.allocationSize(value.`model`)
+            FfiConverterString.allocationSize(value.`model`) +
+            FfiConverterString.allocationSize(value.`sandboxProvider`)
     )
 
     override fun write(value: SdkAgentConfig, buf: ByteBuffer) {
-            FfiConverterString.write(value.`session`, buf)
             FfiConverterString.write(value.`agentName`, buf)
-            FfiConverterString.write(value.`sandboxProvider`, buf)
             FfiConverterString.write(value.`model`, buf)
+            FfiConverterString.write(value.`sandboxProvider`, buf)
     }
 }
 
@@ -2080,28 +2126,54 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
     }
 }
         /**
-         * Build an agent with an in-memory memo store.
+         * Minimal quickstart entry — `Agent(name, model)`, no session required.
+         * The sandbox defaults to Docker. Streaming is via [`SdkAgent::run_stream`].
          */
-    @Throws(SdkException::class) fun `createAgent`(`config`: SdkAgentConfig): SdkAgent {
+    @Throws(SdkException::class) fun `createAgent`(`agentName`: kotlin.String, `model`: kotlin.String): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(
     uniffiRustCallWithError(SdkException) { _status ->
     UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent(
-        FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
+        FfiConverterString.lower(`agentName`),FfiConverterString.lower(`model`),_status)
 }
     )
     }
     
 
         /**
-         * Build an agent whose memo store is namespaced to `tenant_id`, giving the
-         * native SDK the same per-tenant isolation the cloud enforces server-side.
-         * When `tenant_id` is empty behavior matches [`create_agent`] (in-memory memo).
+         * Minimal tenant-scoped quickstart entry (per-tenant memo isolation like the
+         * cloud enforces server-side). Empty `tenant_id` behaves like [`create_agent`].
          */
-    @Throws(SdkException::class) fun `createAgentForTenant`(`tenantId`: kotlin.String, `config`: SdkAgentConfig): SdkAgent {
+    @Throws(SdkException::class) fun `createAgentForTenant`(`tenantId`: kotlin.String, `agentName`: kotlin.String, `model`: kotlin.String): SdkAgent {
             return FfiConverterTypeSdkAgent.lift(
     uniffiRustCallWithError(SdkException) { _status ->
     UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
+        FfiConverterString.lower(`tenantId`),FfiConverterString.lower(`agentName`),FfiConverterString.lower(`model`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Advanced tenant-scoped entry accepting a full [`SdkAgentConfig`].
+         */
+    @Throws(SdkException::class) fun `createAgentForTenantWith`(`tenantId`: kotlin.String, `config`: SdkAgentConfig): SdkAgent {
+            return FfiConverterTypeSdkAgent.lift(
+    uniffiRustCallWithError(SdkException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(
         FfiConverterString.lower(`tenantId`),FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Advanced entry accepting a full [`SdkAgentConfig`] (custom sandbox, etc.).
+         */
+    @Throws(SdkException::class) fun `createAgentWith`(`config`: SdkAgentConfig): SdkAgent {
+            return FfiConverterTypeSdkAgent.lift(
+    uniffiRustCallWithError(SdkException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_with(
+        FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
 }
     )
     }
