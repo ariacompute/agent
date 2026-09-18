@@ -197,21 +197,46 @@ mod openai_impl {
 
     impl OpenAiModel {
         pub fn new(model: &str) -> Self {
-            let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+            // Model backend configuration. Prefer the aria-compute GATEWAY_* vars
+            // (used by the standalone cloud deployment); fall back to the raw
+            // OPENAI_* vars (used when the playground injects the gateway into the
+            // agent sandbox). The gateway is OpenAI-compatible. Its base URL MUST
+            // include the `/v1` prefix because async-openai appends the resource
+            // path to it (final URL = base + "/chat/completions").
+            let base = trimmed_env("GATEWAY_BASE_URL")
+                .or_else(|| trimmed_env("OPENAI_BASE_URL"))
+                .map(|b| b.trim_end_matches('/').to_string());
+            let api_key = trimmed_env("GATEWAY_API_KEY")
+                .or_else(|| trimmed_env("OPENAI_API_KEY"))
+                .unwrap_or_default();
+            let model = trimmed_env("GATEWAY_MODEL")
+                .or_else(|| trimmed_env("OPENAI_MODEL"))
+                .unwrap_or_else(|| model.to_string());
+
             let mut config = OpenAIConfig::new().with_api_key(api_key);
-            // Optional override so a deployment can point the agent at any
-            // OpenAI-compatible endpoint (e.g. the aria-compute gateway) without
-            // rebuilding. Unset means the public OpenAI API.
-            if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
-                let base = base.trim().trim_end_matches('/').to_string();
-                if !base.is_empty() {
-                    config = config.with_api_base(base);
-                }
+            if let Some(base) = base {
+                config = config.with_api_base(base);
             }
             Self {
                 client: Client::with_config(config),
-                model: model.to_string(),
+                model,
             }
+        }
+    }
+
+    /// Reads an env var, trims surrounding whitespace, and returns `Some` only
+    /// when the result is non-empty.
+    fn trimmed_env(key: &str) -> Option<String> {
+        match std::env::var(key) {
+            Ok(v) => {
+                let v = v.trim().to_string();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+            Err(_) => None,
         }
     }
 
