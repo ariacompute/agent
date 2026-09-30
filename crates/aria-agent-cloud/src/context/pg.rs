@@ -2,11 +2,13 @@
 
 use agent_core::context::embed::Embedder as _;
 use agent_core::context::{
-    embed, ensure_embedding, rank, ContextError, ContextFragment, ContextStore, FragmentKind,
-    RecallQuery, EMBED_DIM,
+    embed, ensure_embedding, graph_bfs, rank, ContextError, ContextFragment, ContextStore,
+    FragmentKind, GraphRetrieveQuery, GraphRetrieveResult, RecallQuery, Relation, RelationKind,
+    RetrieveTrace, ScoredFragment, EMBED_DIM,
 };
 use async_trait::async_trait;
 use sqlx::{Executor, PgPool, Row};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Columns read by every query. `embedding` is fetched as text so sqlx does not
@@ -38,6 +40,21 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
         // Approximate nearest neighbour index for cosine distance.
         "CREATE INDEX IF NOT EXISTS idx_context_fragments_embedding \
          ON context_fragments USING hnsw (embedding vector_cosine_ops)",
+        // --- Multi-relational memory plane: relations between fragments ---
+        "CREATE TABLE IF NOT EXISTS context_relations (\
+            principal_id TEXT NOT NULL, \
+            session_id TEXT NOT NULL, \
+            from_id TEXT NOT NULL, \
+            to_id TEXT NOT NULL, \
+            kind TEXT NOT NULL, \
+            score REAL NOT NULL, \
+            provenance TEXT NOT NULL, \
+            created_at BIGINT NOT NULL, \
+            PRIMARY KEY (principal_id, session_id, from_id, to_id, kind))",
+        "CREATE INDEX IF NOT EXISTS idx_context_relations_from \
+         ON context_relations (principal_id, session_id, from_id, kind)",
+        "CREATE INDEX IF NOT EXISTS idx_context_relations_to \
+         ON context_relations (principal_id, session_id, to_id)",
     ] {
         pool.execute(stmt).await?;
     }
@@ -126,6 +143,22 @@ fn parse_vector(s: &str) -> Option<Vec<f32>> {
         .split(',')
         .map(|p| p.trim().parse::<f32>().ok())
         .collect()
+}
+
+fn row_to_relation(r: &sqlx::postgres::PgRow) -> Result<Relation, ContextError> {
+    let kind: String = r.get("kind");
+    let kind: RelationKind = kind
+        .parse()
+        .map_err(|e: String| ContextError::Storage(format!("bad relation kind: {e}")))?;
+    Ok(Relation {
+        session: r.get("session_id"),
+        from_id: r.get("from_id"),
+        to_id: r.get("to_id"),
+        kind,
+        score: r.get::<f64, _>("score") as f32,
+        provenance: r.get("provenance"),
+        created_at: r.get("created_at"),
+    })
 }
 
 #[async_trait]
@@ -268,6 +301,162 @@ impl ContextStore for PgContextStore {
         .map_err(|e| ContextError::Storage(e.to_string()))?;
         rows.iter().map(row_to_fragment).collect()
     }
+
+    async fn relate(&self, rel: Relation) -> Result<(), ContextError> {
+        rel.validate()?;
+        // Both endpoints must exist for this tenant/session.
+        for id in [&rel.from_id, &rel.to_id] {
+            let exists: bool = sqlx::query(
+                "SELECT 1 FROM context_fragments \
+                 WHERE principal_id = $1 AND session_id = $2 AND id = $3",
+            )
+            .bind(&self.principal_id)
+            .bind(&rel.session)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ContextError::Storage(e.to_string()))?
+            .is_some();
+            if !exists {
+                return Err(ContextError::NotFound(id.clone()));
+            }
+        }
+        sqlx::query(
+            "INSERT INTO context_relations \
+             (principal_id, session_id, from_id, to_id, kind, score, provenance, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (principal_id, session_id, from_id, to_id, kind) DO UPDATE SET \
+                score = EXCLUDED.score, provenance = EXCLUDED.provenance, created_at = EXCLUDED.created_at",
+        )
+        .bind(&self.principal_id)
+        .bind(&rel.session)
+        .bind(&rel.from_id)
+        .bind(&rel.to_id)
+        .bind(rel.kind.as_str())
+        .bind(rel.score as f64)
+        .bind(&rel.provenance)
+        .bind(rel.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ContextError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+        top_k: usize,
+    ) -> Result<Vec<Relation>, ContextError> {
+        let sql = "SELECT from_id, to_id, kind, score, provenance, created_at, session_id \
+             FROM context_relations \
+             WHERE principal_id = $1 AND session_id = $2 \
+               AND ($3 IS NULL OR from_id = $3) \
+               AND ($4 IS NULL OR to_id = $4) \
+               AND ($5 IS NULL OR kind = $5) \
+             ORDER BY created_at DESC LIMIT $6";
+        let rows = sqlx::query(sql)
+            .bind(&self.principal_id)
+            .bind(session)
+            .bind(from)
+            .bind(to)
+            .bind(kind.map(|k| k.as_str()))
+            .bind(top_k as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+        rows.iter().map(row_to_relation).collect()
+    }
+
+    async fn delete_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+    ) -> Result<usize, ContextError> {
+        if from.is_none() && to.is_none() && kind.is_none() {
+            return Err(ContextError::Storage(
+                "delete_relations needs at least one filter".into(),
+            ));
+        }
+        let sql = "DELETE FROM context_relations \
+             WHERE principal_id = $1 AND session_id = $2 \
+               AND ($3 IS NULL OR from_id = $3) \
+               AND ($4 IS NULL OR to_id = $4) \
+               AND ($5 IS NULL OR kind = $5)";
+        let n = sqlx::query(sql)
+            .bind(&self.principal_id)
+            .bind(session)
+            .bind(from)
+            .bind(to)
+            .bind(kind.map(|k| k.as_str()))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ContextError::Storage(e.to_string()))?
+            .rows_affected();
+        Ok(n as usize)
+    }
+
+    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+        query.validate()?;
+        // Load all edges for the session/tenant into memory, then traverse.
+        let rows = sqlx::query(
+            "SELECT from_id, to_id, kind, score FROM context_relations \
+             WHERE principal_id = $1 AND session_id = $2",
+        )
+        .bind(&self.principal_id)
+        .bind(&query.session)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ContextError::Storage(e.to_string()))?;
+        let mut edges: HashMap<String, Vec<(String, f32, RelationKind)>> = HashMap::new();
+        for r in &rows {
+            let from_id: String = r.get("from_id");
+            let to_id: String = r.get("to_id");
+            let kind: String = r.get("kind");
+            let kind: RelationKind = kind
+                .parse()
+                .map_err(|e: String| ContextError::Storage(format!("bad relation kind: {e}")))?;
+            let score = r.get::<f64, _>("score") as f32;
+            edges.entry(from_id).or_default().push((to_id, score, kind));
+        }
+        let (reached, stop) = graph_bfs(
+            &query.seeds,
+            &query.views,
+            query.budget,
+            query.max_hops,
+            |node| edges.get(node).cloned().unwrap_or_default(),
+        );
+        let mut items: Vec<ScoredFragment> = Vec::new();
+        for (id, score) in reached.into_iter().take(query.top_k) {
+            let row = sqlx::query(&format!(
+                "SELECT {SELECT_COLS} FROM context_fragments \
+                 WHERE principal_id = $1 AND session_id = $2 AND id = $3"
+            ))
+            .bind(&self.principal_id)
+            .bind(&query.session)
+            .bind(&id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+            if let Some(r) = row {
+                items.push(ScoredFragment {
+                    fragment: row_to_fragment(&r)?,
+                    score,
+                });
+            }
+        }
+        let trace = RetrieveTrace {
+            views: query.views.clone(),
+            budget: query.budget,
+            stop_reason: stop,
+            hits: items.len(),
+        };
+        Ok(GraphRetrieveResult { items, trace })
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +538,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pg_relations_roundtrip_when_database_url_is_set() {
+        let Some(pool) = maybe_pool().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let tenant = format!("test-{}", uuid::Uuid::new_v4());
+        let session = format!("s-{}", uuid::Uuid::new_v4());
+        let store = PgContextStore::new(pool, tenant);
+
+        store
+            .memorize(ContextFragment::new(&session, FragmentKind::LongTerm, "user likes rust programming"))
+            .await
+            .unwrap();
+        store
+            .memorize(ContextFragment::new(&session, FragmentKind::LongTerm, "rust is used for systems programming"))
+            .await
+            .unwrap();
+        let frags = store.list_session(&session, 10).await.unwrap();
+        let a = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
+        let b = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+
+        // Missing endpoint rejected.
+        assert!(store
+            .relate(Relation {
+                session: session.clone(),
+                from_id: a.id.clone(),
+                to_id: "ghost".into(),
+                kind: RelationKind::Semantic,
+                score: 0.8,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .is_err());
+
+        store
+            .relate(Relation {
+                session: session.clone(),
+                from_id: a.id.clone(),
+                to_id: b.id.clone(),
+                kind: RelationKind::Semantic,
+                score: 0.9,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let rels = store
+            .get_relations(&session, Some(&a.id), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(rels.len(), 1);
+
+        // Expand a -> b.
+        let q = GraphRetrieveQuery {
+            session: session.clone(),
+            seeds: vec![a.id.clone()],
+            views: vec![],
+            budget: 10,
+            max_hops: 3,
+            top_k: 10,
+        };
+        let res = store.expand(&q).await.unwrap();
+        assert_eq!(res.trace.hits, 2);
+
+        // Delete by from.
+        let removed = store
+            .delete_relations(&session, Some(&a.id), None, None)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(store
+            .delete_relations(&session, None, None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn pg_store_isolates_tenants_and_sessions() {
         let Some(pool) = maybe_pool().await else {
             eprintln!("skip: DATABASE_URL not set");
@@ -380,5 +647,74 @@ mod tests {
             b.compact(&session).await,
             Err(ContextError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn pg_relations_isolated_by_tenant() {
+        let Some(pool) = maybe_pool().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let session = format!("s-{}", uuid::Uuid::new_v4());
+        let a = PgContextStore::new(pool.clone(), format!("rel-tenant-a-{}", uuid::Uuid::new_v4()));
+        let b = PgContextStore::new(pool, format!("rel-tenant-b-{}", uuid::Uuid::new_v4()));
+
+        a.memorize(ContextFragment::new(
+            &session,
+            FragmentKind::LongTerm,
+            "user likes rust programming",
+        ))
+        .await
+        .unwrap();
+        a.memorize(ContextFragment::new(
+            &session,
+            FragmentKind::LongTerm,
+            "rust is used for systems programming",
+        ))
+        .await
+        .unwrap();
+        let frags = a.list_session(&session, 10).await.unwrap();
+        let fa = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
+        let fb = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+
+        // Tenant A relates fa -> fb.
+        a.relate(Relation {
+            session: session.clone(),
+            from_id: fa.id.clone(),
+            to_id: fb.id.clone(),
+            kind: RelationKind::Semantic,
+            score: 0.9,
+            provenance: "local".into(),
+            created_at: 1,
+        })
+        .await
+        .unwrap();
+
+        // Tenant A sees its edge.
+        assert_eq!(
+            a.get_relations(&session, None, None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Tenant B (same session id) sees nothing — principal_id scoping.
+        assert!(b
+            .get_relations(&session, None, None, None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Tenant B's graph expansion from fa's id reaches no fragments.
+        let q = GraphRetrieveQuery {
+            session: session.clone(),
+            seeds: vec![fa.id.clone()],
+            views: vec![],
+            budget: 10,
+            max_hops: 3,
+            top_k: 10,
+        };
+        let res = b.expand(&q).await.unwrap();
+        assert_eq!(res.trace.hits, 0);
     }
 }

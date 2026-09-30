@@ -1,7 +1,8 @@
 # agent
 
 基于 OpenAI [`codex`](https://github.com/openai/codex) harness 构建的分层 agent
-平台，向上提供 (a) **Rust + 云端 API** 与 (b) **Swift / Kotlin 原生 SDK**。
+平台，向上提供 (a) **Rust + 云端 API**（对应 **OpenAI beta Agents** 资源面）、
+(b) **JS / Python SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK**。
 
 ## 模块
 
@@ -14,9 +15,13 @@
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
 | **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
 | **bindings** | `bindings/swift`（SwiftPM）与 `bindings/kotlin`（Android）。 |
+| **sdk/js** | npm `@ariacompute/agent` —— 镜像 `@openai/agents`（`Agent`、`run`、`runStreamed`、`tool`、`Session`）。 |
+| **sdk/python** | pip `ariacompute-agent` —— 镜像 `openai-agents`（`Agent`、`Runner`、`function_tool`、`Session`）。 |
 
-> **存储边界：** memo 是**唯一的**上下文存储，从不使用 Postgres；Postgres
-> 仅由 `aria-agent-cloud` 用于存储 `agents`/`runs` 元数据。
+> **存储边界：** **云端**把对话 / 长期上下文保存在 Postgres + pgvector
+>（`context_fragments`，按 principal 分片）—— pgvector 为必需，缺少则启动失败。
+> **端侧** SDK 则保留其嵌入式 sled 存储。详见
+>`docs/adr/0010-context-storage-pgvector.md`。
 
 ## codex 子模块
 
@@ -30,17 +35,6 @@ git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
 `codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（branch `main`）
 所做的改动。在检出后，于 **`codex/` 子模块内部**应用该补丁：
 
-推荐使用上面的 SDK 消费该协议 —— 帧解析由 SDK 完成（对应
-`result.final_output` / `result.finalOutput`）：
-
-```python
-from ariacompute_agent import Agent, Runner
-
-agent = Agent(name="Agent Demo")
-streamed = await Runner.run_streamed(agent, "tell me a joke")
-async for event in streamed.events:
-    if event["type"] == "agent.turn.output_text.delta":
-        print(event["delta"], end="", flush=True)
 ```bash
 # 1. 克隆子模块（浅克隆）
 git submodule update --init --depth 1 codex
@@ -138,7 +132,7 @@ cp .env.example .env
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres 账号与库（元数据存儲）。 |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres（pgvector）账号与库：元数据 **与** 上下文记忆。 |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
 | `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，用于模型调用；仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
@@ -239,8 +233,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
 
 | 卷 | 对应路径 | 用途 |
 |----|----------|------|
-| `pgdata` | Postgres | `agents` / `runs` 元数据。 |
-| （无额外卷） | — | 上下文与元数据都在 Postgres 中，无需本地卷。 |
+| `pgdata` | Postgres（pgvector） | `agents` / `runs` 元数据 **与** `context_fragments`（上下文记忆）。 |
 
 ## SDK 示例
 
@@ -352,6 +345,29 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+### 错误处理与限制
+
+传输层会把失败统一归一化为带类型的 `AriaError`（`kind ∈ {auth, network, api,
+config, unknown}`）：`401/403` → `auth`，其他非 2xx → `api`（携带 HTTP
+`status`），连接失败 → `network`，本地误用（例如非正的 `max_turns`）→ `config`。
+请基于 `err.kind` 分支，而不是去匹配错误文案。
+
+```python
+from ariacompute_agent import AriaError, AriaErrorKind
+
+try:
+    final = await Runner.run(agent, "hi", session=session, max_turns=1)
+except AriaError as err:
+    if err.kind == AriaErrorKind.AUTH:
+        print("check your API key")
+    elif err.kind == AriaErrorKind.CONFIG:
+        print("bad option:", err)
+```
+
+只读的会话端点（不修改上下文）同样可用：`session.get_items()` 与
+`session.get_turns()`（GET `…/items`、`…/turns`）。JS SDK 镜像了上述全部能力
+（`AriaError`、`run`/`runStreamed` 的 `maxTurns`、`Session.getItems()`/`getTurns()`）。
 
 ### TypeScript
 

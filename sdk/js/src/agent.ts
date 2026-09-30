@@ -21,6 +21,13 @@ export class Agent {
     if (!config.name || !config.name.trim()) {
       throw new Error("Agent requires a `name`");
     }
+    const seen = new Set<string>();
+    for (const t of config.tools ?? []) {
+      if (seen.has(t.name)) {
+        throw new Error(`duplicate tool name: ${t.name}`);
+      }
+      seen.add(t.name);
+    }
     this.name = config.name;
     this.instructions = config.instructions;
     this.model = config.model;

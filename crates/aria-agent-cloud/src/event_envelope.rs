@@ -51,6 +51,10 @@ pub struct EventEnvelope {
     msg_open: bool,
     text: String,
     closed: bool,
+    // Optional non-breaking extra field for `agent.turn.completed` (Jev-Mem
+    // multi-relational memory summary). Absent by default, so older clients
+    // that ignore unknown fields are unaffected.
+    memory_relations: Option<Vec<serde_json::Value>>,
 }
 
 impl EventEnvelope {
@@ -64,7 +68,13 @@ impl EventEnvelope {
             msg_open: false,
             text: String::new(),
             closed: false,
+            memory_relations: None,
         }
+    }
+
+    /// Set the memory-relation summary attached to the terminal completed frame.
+    pub fn set_memory_relations(&mut self, relations: Vec<serde_json::Value>) {
+        self.memory_relations = Some(relations);
     }
 
     /// Opening frame: the turn is created.
@@ -262,14 +272,21 @@ impl EventEnvelope {
         }
         let seq = self.next_seq();
         self.closed = true;
-        out.push(json!({
+        // Non-breaking extra field: the multi-relational memory summary for
+        // this turn (Jev-Mem). Absent unless explicitly set, so clients that
+        // ignore unknown fields are unaffected.
+        let mut completed = json!({
             "type": event_type::TURN_COMPLETED,
             "event_id": format!("event_{seq}"),
             "session_id": self.session_id,
             "turn_id": self.turn_id,
             "sequence_number": seq,
             "turn": self.turn_object("completed", Some(&self.text.clone())),
-        }));
+        });
+        if let Some(relations) = &self.memory_relations {
+            completed["memory_relations"] = serde_json::json!(relations);
+        }
+        out.push(completed);
         out
     }
 
@@ -471,5 +488,76 @@ mod tests {
             assert_eq!(f["turn_id"], json!("turn-1"));
             assert!(f["event_id"].is_string());
         }
+    }
+
+    // --- Jev-Mem multi-relational memory summary (non-breaking extra field) ---
+
+    #[test]
+    fn completed_frame_omits_memory_relations_when_unset() {
+        // Default behaviour: older OpenAI-beta clients must not see an unknown
+        // field, so absence is the safe default.
+        let mut env = envelope();
+        let frames = env.finish("done");
+        let completed = frames
+            .iter()
+            .find(|f| f["type"] == json!(event_type::TURN_COMPLETED))
+            .expect("completed frame present");
+        assert!(
+            completed.get("memory_relations").is_none(),
+            "memory_relations must be absent by default (non-breaking)"
+        );
+    }
+
+    #[test]
+    fn completed_frame_includes_memory_relations_when_set() {
+        // The multi-relational summary rides along as an extra field on the
+        // terminal completed frame; `type` and the terminal contract are intact.
+        let mut env = envelope();
+        env.set_memory_relations(vec![serde_json::json!({
+            "session": "sess-1",
+            "from_id": "frag-a",
+            "to_id": "frag-b",
+            "kind": "semantic",
+            "score": 0.91,
+            "provenance": "rest",
+        })]);
+        let frames = env.finish("done");
+        let completed = frames
+            .iter()
+            .find(|f| f["type"] == json!(event_type::TURN_COMPLETED))
+            .expect("completed frame present");
+        assert_eq!(completed["type"], json!(event_type::TURN_COMPLETED));
+        let rels = completed["memory_relations"]
+            .as_array()
+            .expect("memory_relations array present");
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0]["kind"], json!("semantic"));
+        assert_eq!(rels[0]["from_id"], json!("frag-a"));
+        assert_eq!(rels[0]["score"], json!(0.91));
+    }
+
+    #[test]
+    fn ensure_closed_also_carries_memory_relations() {
+        // The streaming path calls `ensure_closed` (not `finish`) to terminate a
+        // turn without `Done`, so the extra field must survive that path too.
+        let mut env = envelope();
+        env.push(&AgentEvent::Token { text: "partial".into() });
+        env.set_memory_relations(vec![serde_json::json!({
+            "session": "sess-1",
+            "from_id": "frag-a",
+            "to_id": "frag-b",
+            "kind": "temporal",
+            "score": 0.5,
+            "provenance": "rest",
+        })]);
+        let frames = env.ensure_closed();
+        let completed = frames
+            .last()
+            .expect("terminal completed frame present");
+        assert_eq!(completed["type"], json!(event_type::TURN_COMPLETED));
+        let rels = completed["memory_relations"]
+            .as_array()
+            .expect("memory_relations present on ensure_closed path");
+        assert_eq!(rels[0]["kind"], json!("temporal"));
     }
 }

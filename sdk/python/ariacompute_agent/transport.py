@@ -12,13 +12,12 @@ import urllib.error
 import urllib.request
 from typing import Any, AsyncIterator, Iterator, Optional
 
-from .types import ClientOptions
+from .types import AriaError, AriaErrorKind, ClientOptions
 
 DEFAULT_BETA_HEADER = "agents=v1"
 
-
-class AgentTransportError(RuntimeError):
-    """Raised when the cloud returns a non-2xx response."""
+#: Backwards-compatible alias for the typed error.
+AgentTransportError = AriaError
 
 
 def resolve_client(options: Optional[ClientOptions] = None) -> ClientOptions:
@@ -56,7 +55,14 @@ def _request(
         return urllib.request.urlopen(req)  # noqa: S310 - see above
     except urllib.error.HTTPError as e:  # pragma: no cover - exercised via tests
         detail = e.read().decode("utf-8", "replace")[:400]
-        raise AgentTransportError(f"aria agent request failed ({e.code}): {detail}") from e
+        kind = AriaErrorKind.AUTH if e.code in (401, 403) else AriaErrorKind.API
+        raise AriaError(
+            f"aria agent request failed ({e.code}): {detail}", kind, e.code
+        ) from e
+    except urllib.error.URLError as e:  # pragma: no cover - exercised via tests
+        raise AriaError(
+            f"aria agent request failed (network): {e.reason}", AriaErrorKind.NETWORK
+        ) from e
 
 
 def post_json(client: ClientOptions, path: str, body: dict[str, Any]) -> dict[str, Any]:

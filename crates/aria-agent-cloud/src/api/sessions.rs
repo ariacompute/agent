@@ -8,17 +8,23 @@ use axum::Json;
 use futures::StreamExt;
 use serde::Deserialize;
 use sqlx::Row;
+use std::sync::Arc;
 
 use crate::api::agents::{fetch_agent, new_id, now_ms};
 use crate::api::error_response;
 use crate::types::{
-    AgentSession, CreateSessionRequest, ListResponse, MemoryItem, PutMemoryRequest, SessionAgent,
+    AgentSession, CreateRelationRequest, CreateSessionRequest, GraphRetrieveResponse,
+    ListResponse, MemoryItem, PutMemoryRequest, RelationDeleted, RelationGraphQuery,
+    RelationItem, RelationListParams, RetrieveTraceWire, ScoredMemoryItem, SessionAgent,
     SessionDeleted, SessionInputEvent, SessionItem, SessionTurn, Subagent, UpdateSessionRequest,
     ITEM_OBJECT, SESSION_OBJECT, SUBAGENT_OBJECT, TURN_OBJECT,
 };
 use crate::{agent_tools, AppError, AppState, Principal, PrincipalKind};
-use agent_core::context::RecallQuery;
-use agent_core::context::{ContextFragment, ContextStore, FragmentKind};
+use agent_core::context::embed::LocalEmbedder;
+use agent_core::context::{
+    ContextController, ContextFragment, ContextStore, FragmentKind, GraphRetrieveQuery,
+    RecallQuery, Relation, RelationKind, EMBED_DIM,
+};
 
 const SESSION_COLS: &str = "id, principal_id, agent_id, instructions, status, \
      (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS created_at";
@@ -353,6 +359,27 @@ pub async fn stream_session_events(
             }
         }
 
+        // Inject the multi-relational memory summary as a non-breaking extra
+        // field on the terminal completed frame (Jev-Mem `memory_relations`).
+        let relation_summary: Vec<serde_json::Value> =
+            match state.context_for(&principal).get_relations(&session_id_inner, None, None, None, 20).await {
+                Ok(rels) => rels
+                    .into_iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "session": r.session,
+                            "from_id": r.from_id,
+                            "to_id": r.to_id,
+                            "kind": r.kind.as_str(),
+                            "score": r.score,
+                            "provenance": r.provenance,
+                        })
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+        envelope.set_memory_relations(relation_summary);
+
         for frame in envelope.ensure_closed() {
             yield frame;
         }
@@ -403,6 +430,9 @@ pub async fn put_session_memory(
         .memorize(frag.clone())
         .await
         .map_err(|e| AppError::BadRequest(format!("memory write failed: {e}")))?;
+    // Write→connect: infer multi-relational edges (Jev-Mem) for the new fragment.
+    // Failure here must not fail the memory write itself.
+    relate_on_memorize(&store, &frag).await;
     Ok(Json(MemoryItem {
         id: frag.id,
         key: frag.key,
@@ -410,6 +440,25 @@ pub async fn put_session_memory(
         content: frag.content,
         created_at: frag.created_at,
     }))
+}
+
+/// After a memory fragment is persisted, infer four-view relations to existing
+/// fragments (Jev-Mem write→connect). Errors are logged and swallowed so they
+/// never break the primary memory write.
+async fn relate_on_memorize<S: ContextStore + 'static>(store: &Arc<S>, frag: &ContextFragment) {
+    let ctrl = ContextController::with_defaults(
+        store.clone(),
+        Arc::new(LocalEmbedder::new(EMBED_DIM)),
+    );
+    match ctrl.connect(frag).await {
+        Ok(n) if n > 0 => {
+            tracing::debug!("memory write→connect inferred {n} relation edge(s)");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("memory write→connect failed (ignored): {e}");
+        }
+    }
 }
 
 /// `GET /v1/agents/sessions/{id}/memory/{key}` — read a keyed memory.
@@ -498,6 +547,180 @@ fn to_memory_item(f: ContextFragment) -> MemoryItem {
         content: f.content,
         created_at: f.created_at,
     }
+}
+
+// ------------------------------------------------------- multi-relational memory
+
+fn parse_relation_kind(s: &str) -> Result<RelationKind, AppError> {
+    s.parse::<RelationKind>()
+        .map_err(|e: String| AppError::BadRequest(format!("bad relation_kind: {e}")))
+}
+
+/// `POST /v1/agents/sessions/{id}/memory/relations` — create a relation edge.
+pub async fn create_session_memory_relation(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(session_id): Path<String>,
+    Json(body): Json<CreateRelationRequest>,
+) -> Result<Json<RelationItem>, AppError> {
+    fetch_session(&state, &principal, &session_id).await?;
+    let kind = parse_relation_kind(&body.kind)?;
+    let score = body.score.unwrap_or(0.8);
+    let provenance = body.provenance.clone().unwrap_or_else(|| "rest".to_string());
+    let rel = Relation {
+        session: session_id.clone(),
+        from_id: body.from_id.clone(),
+        to_id: body.to_id.clone(),
+        kind,
+        score,
+        provenance: provenance.clone(),
+        created_at: now_ms(),
+    };
+    let store = state.context_for(&principal);
+    store
+        .relate(rel)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("relate failed: {e}")))?;
+    Ok(Json(RelationItem {
+        session: session_id,
+        from_id: body.from_id,
+        to_id: body.to_id,
+        kind: body.kind,
+        score,
+        provenance,
+        created_at: now_ms(),
+    }))
+}
+
+/// `GET /v1/agents/sessions/{id}/memory/relations` — list relation edges.
+pub async fn list_session_memory_relations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(session_id): Path<String>,
+    Query(params): Query<RelationListParams>,
+) -> Result<Json<ListResponse<RelationItem>>, AppError> {
+    fetch_session(&state, &principal, &session_id).await?;
+    let kind = match params.kind.as_deref().filter(|k| !k.is_empty()) {
+        Some(k) => Some(parse_relation_kind(k)?),
+        None => None,
+    };
+    let top_k = params.top_k.unwrap_or(50).clamp(1, 200);
+    let store = state.context_for(&principal);
+    let rels = store
+        .get_relations(
+            &session_id,
+            params.from.as_deref(),
+            params.to.as_deref(),
+            kind,
+            top_k,
+        )
+        .await
+        .map_err(|e| AppError::BadRequest(format!("get relations failed: {e}")))?;
+    let items = rels
+        .into_iter()
+        .map(|r| RelationItem {
+            session: r.session,
+            from_id: r.from_id,
+            to_id: r.to_id,
+            kind: r.kind.as_str().to_string(),
+            score: r.score,
+            provenance: r.provenance,
+            created_at: r.created_at,
+        })
+        .collect();
+    Ok(Json(ListResponse::new(items)))
+}
+
+/// `DELETE /v1/agents/sessions/{id}/memory/relations` — delete relation edges.
+pub async fn delete_session_memory_relations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(session_id): Path<String>,
+    Query(params): Query<RelationListParams>,
+) -> Result<Json<RelationDeleted>, AppError> {
+    fetch_session(&state, &principal, &session_id).await?;
+    let kind = match params.kind.as_deref().filter(|k| !k.is_empty()) {
+        Some(k) => Some(parse_relation_kind(k)?),
+        None => None,
+    };
+    if params.from.is_none() && params.to.is_none() && kind.is_none() {
+        return Err(AppError::BadRequest(
+            "relation delete needs at least one of from/to/kind".into(),
+        ));
+    }
+    let store = state.context_for(&principal);
+    let deleted = store
+        .delete_relations(
+            &session_id,
+            params.from.as_deref(),
+            params.to.as_deref(),
+            kind,
+        )
+        .await
+        .map_err(|e| AppError::BadRequest(format!("delete relations failed: {e}")))?;
+    Ok(Json(RelationDeleted {
+        object: "relation.deleted",
+        session: session_id,
+        deleted,
+    }))
+}
+
+/// `GET /v1/agents/sessions/{id}/memory/relations/graph` — bounded graph retrieval.
+pub async fn graph_session_memory_relations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(session_id): Path<String>,
+    Query(params): Query<RelationGraphQuery>,
+) -> Result<Json<GraphRetrieveResponse>, AppError> {
+    fetch_session(&state, &principal, &session_id).await?;
+    let seeds: Vec<String> = params
+        .seeds
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if seeds.is_empty() {
+        return Err(AppError::BadRequest("graph query needs >= 1 seed".into()));
+    }
+    let views: Vec<RelationKind> = match params.views.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => s
+            .split(',')
+            .map(parse_relation_kind)
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+    let q = GraphRetrieveQuery {
+        session: session_id.clone(),
+        seeds,
+        views,
+        budget: params.budget.unwrap_or(60),
+        max_hops: params.max_hops.unwrap_or(3),
+        top_k: params.top_k.unwrap_or(20),
+    };
+    let store = state.context_for(&principal);
+    let res = store
+        .expand(&q)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("graph expand failed: {e}")))?;
+    let items = res
+        .items
+        .into_iter()
+        .map(|sf| ScoredMemoryItem {
+            id: sf.fragment.id,
+            key: sf.fragment.key,
+            kind: sf.fragment.kind.as_str().to_string(),
+            content: sf.fragment.content,
+            created_at: sf.fragment.created_at,
+            score: sf.score,
+        })
+        .collect();
+    let trace = RetrieveTraceWire {
+        views: res.trace.views.iter().map(|v| v.as_str().to_string()).collect(),
+        budget: res.trace.budget,
+        stop_reason: res.trace.stop_reason,
+        hits: res.trace.hits,
+    };
+    Ok(Json(GraphRetrieveResponse { items, trace }))
 }
 
 // ------------------------------------------------------------- read-only reads

@@ -6,7 +6,10 @@
 //! `GET  /v1/agents/sessions/{id}/memory`          → list (used by `compact`)
 //! `GET  /v1/agents/sessions/{id}/memory/{key}`    → get_by_key
 
-use agent_core::context::{ContextError, ContextFragment, ContextStore, FragmentKind, RecallQuery};
+use agent_core::context::{
+    ContextError, ContextFragment, ContextStore, FragmentKind, GraphRetrieveQuery,
+    GraphRetrieveResult, RecallQuery, Relation, RelationKind, RetrieveTrace, ScoredFragment,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -31,6 +34,64 @@ struct MemoryItem {
 #[derive(Debug, Deserialize)]
 struct ListResponse {
     data: Vec<MemoryItem>,
+}
+
+// --- Multi-relational memory plane: wire shapes for the cloud relation endpoints ---
+
+#[derive(Debug, Serialize)]
+struct CreateRelationBody<'a> {
+    from_id: &'a str,
+    to_id: &'a str,
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationItem {
+    session: String,
+    from_id: String,
+    to_id: String,
+    kind: String,
+    score: f32,
+    provenance: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationListResponse {
+    data: Vec<RelationItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScoredItem {
+    id: String,
+    key: Option<String>,
+    kind: String,
+    content: String,
+    created_at: i64,
+    score: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceResp {
+    views: Vec<String>,
+    budget: usize,
+    stop_reason: String,
+    hits: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphRetrieveResponse {
+    items: Vec<ScoredItem>,
+    trace: TraceResp,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteRelationResponse {
+    deleted: usize,
 }
 
 fn kind_str(kind: FragmentKind) -> &'static str {
@@ -98,6 +159,25 @@ impl CloudContextStore {
             )));
         }
         let parsed: ListResponse = res
+            .json()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud decode failed: {e}")))?;
+        Ok(parsed.data)
+    }
+
+    async fn relation_items(&self, path: &str) -> Result<Vec<RelationItem>, ContextError> {
+        let res = self
+            .request(reqwest::Method::GET, path)
+            .send()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud request failed: {e}")))?;
+        if !res.status().is_success() {
+            return Err(ContextError::Storage(format!(
+                "cloud returned {}",
+                res.status()
+            )));
+        }
+        let parsed: RelationListResponse = res
             .json()
             .await
             .map_err(|e| ContextError::Storage(format!("cloud decode failed: {e}")))?;
@@ -239,6 +319,197 @@ impl ContextStore for CloudContextStore {
                 embedding: None,
             })
             .collect())
+    }
+
+    async fn relate(&self, rel: Relation) -> Result<(), ContextError> {
+        let path = format!(
+            "/v1/agents/sessions/{}/memory/relations",
+            urlencoding(&rel.session)
+        );
+        let body = CreateRelationBody {
+            from_id: &rel.from_id,
+            to_id: &rel.to_id,
+            kind: rel.kind.as_str(),
+            score: Some(rel.score),
+            provenance: Some(&rel.provenance),
+        };
+        let res = self
+            .request(reqwest::Method::POST, &path)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud relate failed: {e}")))?;
+        if !res.status().is_success() {
+            return Err(ContextError::Storage(format!(
+                "cloud relate returned {}",
+                res.status()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn get_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+        top_k: usize,
+    ) -> Result<Vec<Relation>, ContextError> {
+        let mut path = format!(
+            "/v1/agents/sessions/{}/memory/relations?top_k={}",
+            urlencoding(session),
+            top_k
+        );
+        if let Some(f) = from {
+            path.push_str(&format!("&from={}", urlencoding(f)));
+        }
+        if let Some(t) = to {
+            path.push_str(&format!("&to={}", urlencoding(t)));
+        }
+        if let Some(k) = kind {
+            path.push_str(&format!("&kind={}", k.as_str()));
+        }
+        let items = self.relation_items(&path).await?;
+        items
+            .into_iter()
+            .map(|i| {
+                let kind: RelationKind = i
+                    .kind
+                    .parse()
+                    .map_err(|e: String| ContextError::Storage(format!("bad relation kind: {e}")))?;
+                Ok(Relation {
+                    session: i.session,
+                    from_id: i.from_id,
+                    to_id: i.to_id,
+                    kind,
+                    score: i.score,
+                    provenance: i.provenance,
+                    created_at: i.created_at,
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+    ) -> Result<usize, ContextError> {
+        if from.is_none() && to.is_none() && kind.is_none() {
+            return Err(ContextError::Storage(
+                "delete_relations needs at least one filter".into(),
+            ));
+        }
+        let mut path = format!(
+            "/v1/agents/sessions/{}/memory/relations",
+            urlencoding(session)
+        );
+        let mut q = Vec::new();
+        if let Some(f) = from {
+            q.push(format!("from={}", urlencoding(f)));
+        }
+        if let Some(t) = to {
+            q.push(format!("to={}", urlencoding(t)));
+        }
+        if let Some(k) = kind {
+            q.push(format!("kind={}", k.as_str()));
+        }
+        if !q.is_empty() {
+            path.push('?');
+            path.push_str(&q.join("&"));
+        }
+        let res = self
+            .request(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud delete failed: {e}")))?;
+        if !res.status().is_success() {
+            return Err(ContextError::Storage(format!(
+                "cloud delete returned {}",
+                res.status()
+            )));
+        }
+        let parsed: DeleteRelationResponse = res
+            .json()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud decode failed: {e}")))?;
+        Ok(parsed.deleted)
+    }
+
+    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+        let seeds = query
+            .seeds
+            .iter()
+            .map(|s| urlencoding(s))
+            .collect::<Vec<_>>()
+            .join(",");
+        let views = query
+            .views
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let path = format!(
+            "/v1/agents/sessions/{}/memory/relations/graph?seeds={}&views={}&budget={}&max_hops={}&top_k={}",
+            urlencoding(&query.session),
+            seeds,
+            views,
+            query.budget,
+            query.max_hops,
+            query.top_k
+        );
+        let res = self
+            .request(reqwest::Method::GET, &path)
+            .send()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud expand failed: {e}")))?;
+        if !res.status().is_success() {
+            return Err(ContextError::Storage(format!(
+                "cloud expand returned {}",
+                res.status()
+            )));
+        }
+        let parsed: GraphRetrieveResponse = res
+            .json()
+            .await
+            .map_err(|e| ContextError::Storage(format!("cloud decode failed: {e}")))?;
+        let items = parsed
+            .items
+            .into_iter()
+            .map(|i| ScoredFragment {
+                fragment: ContextFragment {
+                    id: i.id,
+                    session: query.session.clone(),
+                    key: i.key,
+                    kind: kind_of(&i.kind),
+                    content: i.content,
+                    created_at: i.created_at,
+                    embedding: None,
+                },
+                score: i.score,
+            })
+            .collect();
+        let views = parsed
+            .trace
+            .views
+            .iter()
+            .map(|v| {
+                v.parse::<RelationKind>()
+                    .map_err(|e: String| ContextError::Storage(format!("bad relation kind: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(GraphRetrieveResult {
+            items,
+            trace: RetrieveTrace {
+                views,
+                budget: parsed.trace.budget,
+                stop_reason: parsed.trace.stop_reason,
+                hits: parsed.trace.hits,
+            },
+        })
     }
 }
 

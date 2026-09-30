@@ -98,6 +98,16 @@ class Session:
         """Read a keyed long-term memory (missing keys return ``None``)."""
         return self._store(backend).get(key)
 
+    def get_items(self) -> list[dict[str, Any]]:
+        """Read-only server endpoint (AGENTS rule 8): the session's items."""
+        resolved = resolve_client(self.client)
+        return get_json(resolved, f"/v1/agents/sessions/{self.id}/items")
+
+    def get_turns(self) -> list[dict[str, Any]]:
+        """Read-only server endpoint (AGENTS rule 8): the session's turns."""
+        resolved = resolve_client(self.client)
+        return get_json(resolved, f"/v1/agents/sessions/{self.id}/turns")
+
     def record(self, user_input: HistoryInput, output: str) -> None:
         """Append the exchange to the client-side history mirror."""
         self.history.append(user_input)

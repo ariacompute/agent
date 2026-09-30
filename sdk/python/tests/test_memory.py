@@ -166,6 +166,25 @@ class CompositeMemoryStoreTest(unittest.TestCase):
             composite.get("k")
 
 
+class SessionReadOnlyTest(unittest.TestCase):
+    def test_get_items_and_get_turns_hit_read_only_endpoints(self):
+        calls = []
+
+        def fake_request(client, method, path, body=None, stream=False):
+            calls.append((method, path))
+            if path.endswith("/items"):
+                return json_response([{"id": "i1"}])
+            return json_response([{"id": "t1", "status": "done"}])
+
+        session = Session("sess_1", ClientOptions(base_url="http://aria.test"))
+        with mock.patch.object(transport, "_request", side_effect=fake_request):
+            self.assertEqual(session.get_items(), [{"id": "i1"}])
+            self.assertEqual(session.get_turns(), [{"id": "t1", "status": "done"}])
+        self.assertEqual(calls[0][0], "GET")
+        self.assertEqual(calls[0][1], "/v1/agents/sessions/sess_1/items")
+        self.assertEqual(calls[1][1], "/v1/agents/sessions/sess_1/turns")
+
+
 class SessionBackendTest(unittest.TestCase):
     def test_default_is_cloud_and_override_reaches_local(self):
         with tempfile.TemporaryDirectory() as tmp:

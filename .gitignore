@@ -10,3 +10,4 @@
 # so CI can run `bun install --frozen-if-exists`.
 node_modules/
 sdk/js/dist/
+benches/results/

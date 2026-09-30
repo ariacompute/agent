@@ -36,6 +36,12 @@ class Agent:
     ) -> None:
         if not name or not name.strip():
             raise ValueError("Agent requires a `name`")
+        seen: set[str] = set()
+        for t in (tools or []):
+            spec = t if isinstance(t, ToolSpec) else self._coerce_tool(t)
+            if spec.name in seen:
+                raise ValueError(f"duplicate tool name: {spec.name}")
+            seen.add(spec.name)
         self.name = name
         self.instructions = instructions
         self.model = model

@@ -41,6 +41,8 @@ from .transport import (
     resolve_client,
 )
 from .types import (
+    AriaError,
+    AriaErrorKind,
     ClientOptions,
     HistoryInput,
     HistoryItem,
@@ -65,6 +67,8 @@ __all__ = [
     "RunResult",
     "StreamedRunResult",
     "ToolSpec",
+    "AriaError",
+    "AriaErrorKind",
     "AgentTransportError",
     "resolve_client",
     "post_json",

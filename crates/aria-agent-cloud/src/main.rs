@@ -1098,6 +1098,16 @@ fn build_router(state: AppState) -> Router {
             get(api::sessions::get_session_memory),
         )
         .route(
+            "/v1/agents/sessions/:session_id/memory/relations",
+            post(api::sessions::create_session_memory_relation)
+                .get(api::sessions::list_session_memory_relations)
+                .delete(api::sessions::delete_session_memory_relations),
+        )
+        .route(
+            "/v1/agents/sessions/:session_id/memory/relations/graph",
+            get(api::sessions::graph_session_memory_relations),
+        )
+        .route(
             "/v1/agents/sessions/:session_id/subagents",
             get(api::sessions::list_subagents),
         )
@@ -1216,6 +1226,18 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use agent_core::StubModel;
+    use axum::extract::{Path, Query, State};
+    use axum::Json;
+    use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
+
+    use crate::api::sessions::{
+        create_session_memory_relation, delete_session_memory_relations,
+        graph_session_memory_relations, list_session_memory_relations, put_session_memory,
+    };
+    use crate::types::{
+        CreateRelationRequest, PutMemoryRequest, RelationGraphQuery, RelationListParams,
+    };
 
     /// Build an `AppState` with a lazy pg pool + StubModel engine, so the
     /// non-DB unit tests need no real Postgres.
@@ -1322,5 +1344,215 @@ mod tests {
         let tenant_sql = "SELECT id, name FROM agents WHERE id = $1 AND principal_id = $2";
         assert!(admin_sql.contains("WHERE id = $1"));
         assert!(tenant_sql.contains("AND principal_id = $2"));
+    }
+
+    /// Build an `AppState` backed by a *real* pool (for DB-gated integration
+    /// tests) with the StubModel engine.
+    fn test_state_with_pool(pool: sqlx::PgPool) -> AppState {
+        let make_model: Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync> =
+            Arc::new(|| Box::new(StubModel::new("agent")));
+        let key_cache = KeyCache::new(Duration::from_secs(60));
+        AppState {
+            pool,
+            key_cache,
+            make_model,
+        }
+    }
+
+    /// Insert a bare session row for a tenant so relation handlers (which all
+    /// call `fetch_session`) find it. We avoid `create_session` so the test does
+    /// not depend on a seeded agent.
+    async fn insert_session(pool: &sqlx::PgPool, sid: &str, pid: &str) {
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, principal_id, agent_id, status) \
+             VALUES ($1, $2, 'agent-demo', 'idle')",
+        )
+        .bind(sid)
+        .bind(pid)
+        .execute(pool)
+        .await
+        .expect("insert session row");
+    }
+
+    // --- Multi-relational memory plane (Jev-Mem) REST integration ---
+    //
+    // DB-gated: skipped unless `DATABASE_URL` points at a reachable Postgres
+    // with the `vector` extension. Exercises the OpenAI-style relation
+    // endpoints through the real handlers + PgContextStore, including tenant
+    // isolation and write→connect.
+
+    #[tokio::test]
+    async fn relations_endpoints_openai_style_roundtrip() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("skip: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pool = match PgPoolOptions::new().max_connections(5).connect(&url).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skip: DATABASE_URL unreachable: {e}");
+                return;
+            }
+        };
+        ensure_schema(&pool)
+            .await
+            .expect("ensure_schema (needs pgvector)");
+
+        let state = test_state_with_pool(pool.clone());
+        let tenant_a = Principal {
+            id: format!("rel_a_{}", Uuid::new_v4()),
+            kind: PrincipalKind::User,
+            scopes: ApiKeyScopes::read_write(),
+        };
+        let tenant_b = Principal {
+            id: format!("rel_b_{}", Uuid::new_v4()),
+            kind: PrincipalKind::User,
+            scopes: ApiKeyScopes::read_write(),
+        };
+        let sess_a = format!("rel_sess_a_{}", Uuid::new_v4());
+        let sess_b = format!("rel_sess_b_{}", Uuid::new_v4());
+        insert_session(&pool, &sess_a, &tenant_a.id).await;
+        insert_session(&pool, &sess_b, &tenant_b.id).await;
+
+        // Write→connect: two near-identical memories should infer >=1 relation.
+        let m1 = put_session_memory(
+            State(state.clone()),
+            tenant_a.clone(),
+            Path(sess_a.clone()),
+            Json(PutMemoryRequest {
+                key: None,
+                value: "rust ownership and the borrow checker prevent data races".into(),
+                kind: Some("long_term".into()),
+            }),
+        )
+        .await
+        .expect("memorize m1");
+        let m2 = put_session_memory(
+            State(state.clone()),
+            tenant_a.clone(),
+            Path(sess_a.clone()),
+            Json(PutMemoryRequest {
+                key: None,
+                value: "rust ownership and the borrow checker avoid memory bugs".into(),
+                kind: Some("long_term".into()),
+            }),
+        )
+        .await
+        .expect("memorize m2");
+
+        let rels = list_session_memory_relations(
+            State(state.clone()),
+            tenant_a.clone(),
+            Path(sess_a.clone()),
+            Query(RelationListParams {
+                from: None,
+                to: None,
+                kind: None,
+                top_k: None,
+            }),
+        )
+        .await
+        .expect("list relations");
+        assert!(
+            !rels.data.is_empty(),
+            "write→connect should infer at least one edge for near-identical memories"
+        );
+
+        // Explicit relation creation (entity view).
+        let created = create_session_memory_relation(
+            State(state.clone()),
+            tenant_a.clone(),
+            Path(sess_a.clone()),
+            Json(CreateRelationRequest {
+                from_id: m1.id.clone(),
+                to_id: m2.id.clone(),
+                kind: "entity".into(),
+                score: Some(0.9),
+                provenance: Some("test".into()),
+            }),
+        )
+        .await
+        .expect("create relation");
+        assert_eq!(created.kind, "entity");
+        assert_eq!(created.from_id, m1.id);
+        assert_eq!(created.to_id, m2.id);
+
+        // Bounded graph retrieval starting from m1's seed.
+        let g = graph_session_memory_relations(
+            State(state.clone()),
+            tenant_a.clone(),
+            Path(sess_a.clone()),
+            Query(RelationGraphQuery {
+                seeds: m1.id.clone(),
+                views: None,
+                budget: None,
+                max_hops: None,
+                top_k: None,
+            }),
+        )
+        .await
+        .expect("graph retrieve");
+        assert!(
+            !g.items.is_empty(),
+            "graph retrieval should return scored memories"
+        );
+        assert!(
+            !g.trace.views.is_empty(),
+            "trace must record which views were expanded"
+        );
+        assert!(g.trace.hits >= 1, "trace should report >= 1 hit");
+
+        // Delete by `from` id.
+        let deleted = delete_session_memory_relations(
+            State(state.clone()),
+            tenant_a.clone(),
+            Path(sess_a.clone()),
+            Query(RelationListParams {
+                from: Some(m1.id.clone()),
+                to: None,
+                kind: None,
+                top_k: None,
+            }),
+        )
+        .await
+        .expect("delete relations");
+        assert!(deleted.deleted >= 1, "at least the explicit edge is removed");
+
+        // Tenant isolation: tenant B's own session has no relations, and tenant
+        // B cannot even resolve tenant A's session (principal_id scoping).
+        let b_empty = list_session_memory_relations(
+            State(state.clone()),
+            tenant_b.clone(),
+            Path(sess_b.clone()),
+            Query(RelationListParams {
+                from: None,
+                to: None,
+                kind: None,
+                top_k: None,
+            }),
+        )
+        .await
+        .expect("list B relations");
+        assert!(b_empty.data.is_empty(), "tenant B starts with no relations");
+
+        let cross = list_session_memory_relations(
+            State(state.clone()),
+            tenant_b.clone(),
+            Path(sess_a.clone()), // tenant A's session
+            Query(RelationListParams {
+                from: None,
+                to: None,
+                kind: None,
+                top_k: None,
+            }),
+        )
+        .await;
+        assert!(
+            cross.is_err(),
+            "tenant B must not resolve tenant A's session (NotFound)"
+        );
     }
 }

@@ -5,6 +5,7 @@
  */
 
 import type { ClientOptions } from "./types.js";
+import { AriaError } from "./types.js";
 
 export const DEFAULT_BETA_HEADER = "agents=v1";
 
@@ -20,7 +21,7 @@ export function resolveClient(options: ClientOptions = {}): ResolvedClient {
     options.fetch ??
     (globalThis as unknown as { fetch?: typeof globalThis.fetch }).fetch;
   if (!fetchImpl) {
-    throw new Error("no fetch implementation available; pass `client.fetch`");
+    throw new AriaError("no fetch implementation available; pass `client.fetch`", "config");
   }
   return {
     baseUrl: (options.baseUrl ?? process.env.ARIA_AGENT_BASE_URL ?? "http://localhost:3000").replace(
@@ -44,31 +45,47 @@ function headers(client: ResolvedClient, extra: Record<string, string> = {}): Re
   return h;
 }
 
-/** POST JSON and decode a JSON response. Throws on non-2xx. */
+/** POST JSON and decode a JSON response. Throws a typed `AriaError` on non-2xx. */
 export async function postJson<T>(
   client: ResolvedClient,
   path: string,
   body: unknown,
 ): Promise<T> {
-  const res = await client.fetch(`${client.baseUrl}${path}`, {
-    method: "POST",
-    headers: headers(client, { "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
+  let res: Awaited<ReturnType<typeof client.fetch>>;
+  try {
+    res = await client.fetch(`${client.baseUrl}${path}`, {
+      method: "POST",
+      headers: headers(client, { "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new AriaError(
+      `aria agent request failed (network): ${err instanceof Error ? err.message : String(err)}`,
+      "network",
+    );
+  }
   if (!res.ok) {
-    throw new Error(`aria agent request failed (${res.status}): ${await safeText(res)}`);
+    throw await toAriaError(res, "request");
   }
   return (await res.json()) as T;
 }
 
-/** GET JSON. Throws on non-2xx. */
+/** GET JSON. Throws a typed `AriaError` on non-2xx. */
 export async function getJson<T>(client: ResolvedClient, path: string): Promise<T> {
-  const res = await client.fetch(`${client.baseUrl}${path}`, {
-    method: "GET",
-    headers: headers(client),
-  });
+  let res: Awaited<ReturnType<typeof client.fetch>>;
+  try {
+    res = await client.fetch(`${client.baseUrl}${path}`, {
+      method: "GET",
+      headers: headers(client),
+    });
+  } catch (err) {
+    throw new AriaError(
+      `aria agent request failed (network): ${err instanceof Error ? err.message : String(err)}`,
+      "network",
+    );
+  }
   if (!res.ok) {
-    throw new Error(`aria agent request failed (${res.status}): ${await safeText(res)}`);
+    throw await toAriaError(res, "request");
   }
   return (await res.json()) as T;
 }
@@ -79,18 +96,38 @@ export async function* postJsonStream(
   path: string,
   body: unknown,
 ): AsyncGenerator<Record<string, any>> {
-  const res = await client.fetch(`${client.baseUrl}${path}`, {
-    method: "POST",
-    headers: headers(client, {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    }),
-    body: JSON.stringify(body),
-  });
+  let res: Awaited<ReturnType<typeof client.fetch>>;
+  try {
+    res = await client.fetch(`${client.baseUrl}${path}`, {
+      method: "POST",
+      headers: headers(client, {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new AriaError(
+      `aria agent stream failed (network): ${err instanceof Error ? err.message : String(err)}`,
+      "network",
+    );
+  }
   if (!res.ok || !res.body) {
-    throw new Error(`aria agent stream failed (${res.status}): ${await safeText(res)}`);
+    throw await toAriaError(res, "stream");
   }
   yield* readSse(res.body);
+}
+
+/** Normalize a non-2xx `Response` into a typed `AriaError`. */
+async function toAriaError(res: { status: number; text?: () => Promise<string> }, what: string): Promise<AriaError> {
+  const status = res.status;
+  const kind = status === 401 || status === 403 ? "auth" : "api";
+  const detail = await safeText(res);
+  return new AriaError(
+    `aria agent ${what} failed (${status}): ${detail}`,
+    kind,
+    status,
+  );
 }
 
 /**

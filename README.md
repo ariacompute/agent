@@ -368,6 +368,30 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+### Error handling & limits
+
+Transports normalize failures into a typed `AriaError` (`kind ∈ {auth, network,
+api, config, unknown}`): `401/403` → `auth`, other non-2xx → `api` (with the HTTP
+`status`), a connection failure → `network`, and local misuse (e.g. a non-positive
+`max_turns`) → `config`. Branch on `err.kind` instead of matching message text.
+
+```python
+from ariacompute_agent import AriaError, AriaErrorKind
+
+try:
+    final = await Runner.run(agent, "hi", session=session, max_turns=1)
+except AriaError as err:
+    if err.kind == AriaErrorKind.AUTH:
+        print("check your API key")
+    elif err.kind == AriaErrorKind.CONFIG:
+        print("bad option:", err)
+```
+
+Read-only session endpoints (no context mutation) are also available:
+`session.get_items()` and `session.get_turns()` (GET `…/items`, `…/turns`).
+The JS SDK mirrors all of the above (`AriaError`, `run`/`runStreamed` `maxTurns`,
+`Session.getItems()`/`getTurns()`).
+
 ### TypeScript
 
 ```typescript

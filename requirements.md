@@ -55,6 +55,25 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   `SdkStreamEvent`, `SdkAgentListener`; compiled to `libaria-agent_ffi`.
   Regenerate bindings with `just ffi` (ADR-0002 / ADR-0008).
 
+### 3.1 SDK 行为契约（js / python 对齐）
+
+- **类型化错误**：传输失败归一为 `AriaError`，`kind ∈ {auth, network, api,
+  config, unknown}`；401/403 → `auth`，其他非 2xx → `api`（带 HTTP `status`），
+  连接失败 → `network`，本地误用（`maxTurns` 非正整数、缺 `fetch`）→ `config`。
+- **`Session` 只读端点**：`getItems()` / `getTurns()` 走 GET `…/items`、
+  `…/turns`（规则 8，不改动上下文）；`memorize`/`recall` 走 cloud/local/both。
+- **`maxTurns`**：`run`/`runStreamed` 接受正整数上限；`runStreamed` 按
+  `agent.turn.created` 计数，超过则早退并抛 `config` 型错误（云端控制多步执行，
+  此仅作流防护）。
+- **`Agent` 校验**：`name` 必填非空；`tools` 名称唯一（重复抛 `duplicate tool
+  name`）；`toolSchemas()` 不透传 `execute`，默认 `parameters`。
+- **记忆三态**：`cloud`（agent-cloud REST）/ `local`（aria memo；js 经
+  `aria-memo` CLI、python 直连 SQLite `memories` 表）/ `both`（双侧写入、读取
+  合并、cloud 优先、local 兜底，单侧失败可容忍）。
+- **离线可测**：js 注入 `fetch`、python mock `transport._request`，零网络/零 LLM
+  覆盖正常 + 异常路径；不改 `event_envelope.rs`（冻结 SSE 契约），不引入 memo
+  记忆内部实现。
+
 ## 4. Pluggable Sandbox (docker / kata / cubesandbox / codex)
 * `Sandbox` trait (`spawn` / `exec` / `destroy`) with `ExecSpec` / `ExecOutput`
   mirroring codex's `sandboxing`.

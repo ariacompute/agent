@@ -17,12 +17,16 @@
 
 use agent_core::context::embed::Embedder as _;
 use agent_core::context::{
-    embed, ensure_embedding, rank, ContextError, ContextFragment, ContextStore, FragmentKind,
-    RecallQuery, EMBED_DIM,
+    embed, ensure_embedding, graph_bfs, rank, ContextError, ContextFragment, ContextStore,
+    FragmentKind, GraphRetrieveQuery, GraphRetrieveResult, RecallQuery, Relation, RelationKind,
+    RetrieveTrace, ScoredFragment, EMBED_DIM,
 };
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 pub use agent_core::context::{now_ms, ContextError as MemoError};
@@ -45,6 +49,20 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memo_type);
 CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at);
 CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted);
+-- Multi-relational memory plane: a SEPARATE table, never touching `memories`,
+-- so the aria-memo CLI keeps full interop.
+CREATE TABLE IF NOT EXISTS context_relations (
+    from_id TEXT NOT NULL,
+    to_id TEXT NOT NULL,
+    session TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    score REAL NOT NULL,
+    provenance TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (from_id, to_id, session, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_context_relations_from ON context_relations(from_id, kind);
+CREATE INDEX IF NOT EXISTS idx_context_relations_to ON context_relations(to_id);
 ";
 
 /// `aria-memo` writes `long_term:*` for durable memories; the mapping below
@@ -211,6 +229,11 @@ impl MemoContextStore {
         }
         Ok(out)
     }
+
+    /// Look up a single fragment by id (used while expanding a graph).
+    fn get(&self, id: &str) -> Result<Option<ContextFragment>, ContextError> {
+        Ok(self.all()?.into_iter().find(|f| f.id == id))
+    }
 }
 
 #[async_trait]
@@ -308,6 +331,215 @@ impl ContextStore for MemoContextStore {
         out.truncate(top_k);
         Ok(out)
     }
+
+    async fn relate(&self, rel: Relation) -> Result<(), ContextError> {
+        rel.validate()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ContextError::Storage(format!("memo db lock poisoned: {e}")))?;
+        for id in [&rel.from_id, &rel.to_id] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM memories WHERE id = ?1 AND deleted = 0",
+                    [id.clone()],
+                    |_| Ok(true),
+                )
+                .optional()
+                .map_err(|e| ContextError::Storage(e.to_string()))?
+                .is_some();
+            if !exists {
+                return Err(ContextError::NotFound(id.clone()));
+            }
+        }
+        conn.execute(
+            "INSERT INTO context_relations \
+             (from_id, to_id, session, kind, score, provenance, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(from_id, to_id, session, kind) DO UPDATE SET \
+                score = excluded.score, provenance = excluded.provenance, created_at = excluded.created_at",
+            rusqlite::params![
+                rel.from_id,
+                rel.to_id,
+                rel.session,
+                rel.kind.as_str(),
+                rel.score,
+                rel.provenance,
+                rel.created_at
+            ],
+        )
+        .map_err(|e| ContextError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+        top_k: usize,
+    ) -> Result<Vec<Relation>, ContextError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ContextError::Storage(format!("memo db lock poisoned: {e}")))?;
+        let mut sql = String::from(
+            "SELECT from_id, to_id, session, kind, score, provenance, created_at \
+             FROM context_relations WHERE session = ?1",
+        );
+        let mut binds: Vec<String> = vec![session.to_string()];
+        let mut n = 2;
+        if let Some(f) = from {
+            sql.push_str(&format!(" AND from_id = ?{n}"));
+            binds.push(f.to_string());
+            n += 1;
+        }
+        if let Some(t) = to {
+            sql.push_str(&format!(" AND to_id = ?{n}"));
+            binds.push(t.to_string());
+            n += 1;
+        }
+        if let Some(k) = kind {
+            sql.push_str(&format!(" AND kind = ?{n}"));
+            binds.push(k.as_str().to_string());
+            n += 1;
+        }
+        sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{n}"));
+        binds.push(top_k.to_string());
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), row_to_relation)
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| ContextError::Storage(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+    ) -> Result<usize, ContextError> {
+        if from.is_none() && to.is_none() && kind.is_none() {
+            return Err(ContextError::Storage(
+                "delete_relations needs at least one filter".into(),
+            ));
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ContextError::Storage(format!("memo db lock poisoned: {e}")))?;
+        let mut sql = String::from("DELETE FROM context_relations WHERE session = ?1");
+        let mut binds: Vec<String> = vec![session.to_string()];
+        let mut n = 2;
+        if let Some(f) = from {
+            sql.push_str(&format!(" AND from_id = ?{n}"));
+            binds.push(f.to_string());
+            n += 1;
+        }
+        if let Some(t) = to {
+            sql.push_str(&format!(" AND to_id = ?{n}"));
+            binds.push(t.to_string());
+            n += 1;
+        }
+        if let Some(k) = kind {
+            sql.push_str(&format!(" AND kind = ?{n}"));
+            binds.push(k.as_str().to_string());
+        }
+        let removed = conn
+            .execute(&sql, rusqlite::params_from_iter(binds.iter()))
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+        Ok(removed)
+    }
+
+    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+        query.validate()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ContextError::Storage(format!("memo db lock poisoned: {e}")))?;
+        let mut edges_stmt = conn
+            .prepare(
+                "SELECT from_id, to_id, kind, score FROM context_relations WHERE session = ?1",
+            )
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+        let edges_iter = edges_stmt
+            .query_map([query.session.clone()], |row| {
+                let from_id: String = row.get(0)?;
+                let to_id: String = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let score: f64 = row.get(3)?;
+                let kind = kind
+                    .parse::<RelationKind>()
+                    .map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    ))?;
+                Ok((from_id, to_id, kind, score as f32))
+            })
+            .map_err(|e| ContextError::Storage(e.to_string()))?;
+        let mut edges: HashMap<String, Vec<(String, f32, RelationKind)>> = HashMap::new();
+        for e in edges_iter {
+            let (f, t, k, s) = e.map_err(|e| ContextError::Storage(e.to_string()))?;
+            edges.entry(f).or_default().push((t, s, k));
+        }
+        drop(edges_stmt);
+        drop(conn);
+
+        let (reached, stop) = graph_bfs(
+            &query.seeds,
+            &query.views,
+            query.budget,
+            query.max_hops,
+            |node| edges.get(node).cloned().unwrap_or_default(),
+        );
+        let mut items: Vec<ScoredFragment> = Vec::new();
+        for (id, score) in reached.into_iter().take(query.top_k) {
+            if let Some(f) = self.get(&id)? {
+                items.push(ScoredFragment {
+                    fragment: f,
+                    score,
+                });
+            }
+        }
+        let trace = RetrieveTrace {
+            views: query.views.clone(),
+            budget: query.budget,
+            stop_reason: stop,
+            hits: items.len(),
+        };
+        Ok(GraphRetrieveResult { items, trace })
+    }
+}
+
+/// Map a `context_relations` row to a [`Relation`].
+fn row_to_relation(row: &rusqlite::Row) -> rusqlite::Result<Relation> {
+    let from_id: String = row.get(0)?;
+    let to_id: String = row.get(1)?;
+    let session: String = row.get(2)?;
+    let kind: String = row.get(3)?;
+    let score: f64 = row.get(4)?;
+    let provenance: String = row.get(5)?;
+    let created_at: i64 = row.get(6)?;
+    let kind = RelationKind::from_str(&kind)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
+    Ok(Relation {
+        session,
+        from_id,
+        to_id,
+        kind,
+        score: score as f32,
+        provenance,
+        created_at,
+    })
 }
 
 #[cfg(test)]
@@ -476,6 +708,86 @@ mod tests {
             assert_eq!(kind_of(memo_type_of(kind)), Some(kind));
         }
         assert_eq!(kind_of("unknown-type"), None);
+    }
+
+    #[tokio::test]
+    async fn relation_crud_and_expand_on_context_table() {
+        let store = store();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "user likes rust programming"))
+            .await
+            .unwrap();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "rust is used for systems programming"))
+            .await
+            .unwrap();
+        let frags = store.list_session("s", 10).await.unwrap();
+        let a = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
+        let b = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+
+        // Missing endpoint rejected.
+        assert!(store
+            .relate(Relation {
+                session: "s".into(),
+                from_id: a.id.clone(),
+                to_id: "ghost".into(),
+                kind: RelationKind::Semantic,
+                score: 0.8,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .is_err());
+
+        store
+            .relate(Relation {
+                session: "s".into(),
+                from_id: a.id.clone(),
+                to_id: b.id.clone(),
+                kind: RelationKind::Semantic,
+                score: 0.9,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let rels = store.get_relations("s", Some(&a.id), None, None, 10).await.unwrap();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].to_id, b.id);
+
+        // Expand a -> b.
+        let q = GraphRetrieveQuery {
+            session: "s".into(),
+            seeds: vec![a.id.clone()],
+            views: vec![],
+            budget: 10,
+            max_hops: 3,
+            top_k: 10,
+        };
+        let res = store.expand(&q).await.unwrap();
+        let ids: Vec<&str> = res.items.iter().map(|i| i.fragment.id.as_str()).collect();
+        assert!(ids.contains(&a.id.as_str()));
+        assert!(ids.contains(&b.id.as_str()));
+        assert_eq!(res.trace.hits, 2);
+
+        // Wrong session returns nothing (relations table is separate from memories).
+        assert!(store
+            .get_relations("other", None, None, None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Delete by from.
+        let removed = store
+            .delete_relations("s", Some(&a.id), None, None)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        // Empty filter rejected.
+        assert!(store
+            .delete_relations("s", None, None, None)
+            .await
+            .is_err());
     }
 
     /// Skip helper: the interop tests need the real `aria-memo` binary.

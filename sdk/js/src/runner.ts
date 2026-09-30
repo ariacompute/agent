@@ -9,12 +9,14 @@
 import type {
   ClientOptions,
   HistoryInput,
+  RunOptions,
   RunResult,
   StreamEvent,
   StreamedRunResult,
 } from "./types.js";
 import type { Agent } from "./agent.js";
 import { Session } from "./session.js";
+import { AriaError } from "./types.js";
 import { postJson, postJsonStream, resolveClient } from "./transport.js";
 
 interface TurnResponse {
@@ -32,6 +34,14 @@ function toText(input: HistoryInput | HistoryInput[]): string {
     return input.map((i) => (typeof i === "string" ? i : i.content)).join("\n");
   }
   return input.content;
+}
+
+/** `maxTurns`, when provided, must be a positive integer. */
+function validateMaxTurns(maxTurns?: number): void {
+  if (maxTurns === undefined) return;
+  if (!Number.isInteger(maxTurns) || maxTurns < 1) {
+    throw new AriaError(`maxTurns must be a positive integer, got ${maxTurns}`, "config");
+  }
 }
 
 /** Ensure we have a session id for this run, creating one when needed. */
@@ -58,10 +68,11 @@ async function ensureSession(
 export async function run(
   agent: Agent,
   input: HistoryInput | HistoryInput[],
-  options: { session?: Session | string; client?: ClientOptions } = {},
+  options: RunOptions = {},
 ): Promise<RunResult> {
   const client = { ...agent.client, ...options.client };
   const resolved = resolveClient(client);
+  validateMaxTurns(options.maxTurns);
   const session = await ensureSession(agent, client, options.session);
   const text = toText(input);
 
@@ -97,10 +108,11 @@ export async function run(
 export async function runStreamed(
   agent: Agent,
   input: HistoryInput | HistoryInput[],
-  options: { session?: Session | string; client?: ClientOptions } = {},
+  options: RunOptions = {},
 ): Promise<StreamedRunResult> {
   const client = { ...agent.client, ...options.client };
   const resolved = resolveClient(client);
+  validateMaxTurns(options.maxTurns);
   const session = await ensureSession(agent, client, options.session);
   const text = toText(input);
 
@@ -110,6 +122,7 @@ export async function runStreamed(
     { input: text },
   );
 
+  const maxTurns = options.maxTurns ?? Infinity;
   let collected = "";
   let turnId: string | undefined;
   let failed: string | undefined;
@@ -128,9 +141,17 @@ export async function runStreamed(
   }
 
   async function consume(): Promise<void> {
+    let turns = 0;
     for await (const frame of frames) {
       buffered.push(frame);
       turnId = (frame.turn_id as string) ?? turnId;
+      if (frame.type === "agent.turn.created") {
+        turns += 1;
+        if (turns > maxTurns) {
+          failed = `exceeded maxTurns (${maxTurns})`;
+          break;
+        }
+      }
       switch (frame.type) {
         case "agent.turn.output_text.delta":
           collected += String(frame.delta ?? "");
@@ -163,7 +184,8 @@ export async function runStreamed(
     // Draining here means `completed` resolves even when `events` is ignored.
     await drain();
     if (failed) {
-      throw new Error(failed);
+      const kind = failed.startsWith("exceeded maxTurns") ? "config" : "api";
+      throw new AriaError(failed, kind);
     }
     session.record(input as HistoryInput, collected);
     return {

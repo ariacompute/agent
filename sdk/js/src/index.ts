@@ -38,6 +38,7 @@ export {
   readSse,
   DEFAULT_BETA_HEADER,
 } from "./transport.js";
+export { AriaError } from "./types.js";
 export type {
   AgentConfig,
   ClientOptions,
@@ -52,4 +53,6 @@ export type {
   StreamedRunResult,
   ToolParameters,
   ToolSpec,
+  RunOptions,
+  AriaErrorKind,
 } from "./types.js";

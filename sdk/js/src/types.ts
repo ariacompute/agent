@@ -8,6 +8,7 @@
 
 // Type-only: `agent.ts` imports these types, so a value import would cycle.
 import type { Agent } from "./agent.js";
+import type { Session } from "./session.js";
 
 /// Where the memory context lives: agent-cloud, aria memo (local), or both.
 export type MemoryBackend = "cloud" | "local" | "both";
@@ -110,4 +111,36 @@ export interface StreamedRunResult {
   events: AsyncIterable<StreamEvent>;
   /** Resolves once the terminal `agent.turn.completed` / `agent.turn.failed` arrives. */
   completed: Promise<RunResult>;
+}
+
+/**
+ * Typed error surfaced by the SDK. Every transport failure is normalized to an
+ * `AriaError` so callers can branch on `kind` instead of matching on raw
+ * `message` strings.
+ */
+export type AriaErrorKind = "auth" | "network" | "api" | "config" | "unknown";
+
+export class AriaError extends Error {
+  readonly kind: AriaErrorKind;
+  /** HTTP status when `kind` is `api`/`auth`, else `undefined`. */
+  readonly status?: number;
+
+  constructor(message: string, kind: AriaErrorKind = "unknown", status?: number) {
+    super(message);
+    this.name = "AriaError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+/** Options accepted by `run` / `runStreamed`. */
+export interface RunOptions {
+  session?: Session | string;
+  client?: ClientOptions;
+  /**
+   * Safety cap on the number of agent turns consumed in a streamed run. The
+   * cloud controls multi-step execution; this only guards runaway streams.
+   * Must be a positive integer when provided.
+   */
+  maxTurns?: number;
 }

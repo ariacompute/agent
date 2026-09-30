@@ -128,6 +128,144 @@ impl RecallQuery {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-relational memory plane (Jev-Mem inspired: semantic/temporal/causal/entity)
+// ---------------------------------------------------------------------------
+
+/// The four relational graph views. Mirrors the `memo` crate's `RelationKind`
+/// so the two workspaces agree on the wire shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RelationKind {
+    /// Conceptual / meaning association.
+    Semantic,
+    /// Temporal ordering or co-occurrence.
+    Temporal,
+    /// Causal chain.
+    Causal,
+    /// Same entity / object aggregation.
+    Entity,
+}
+
+impl RelationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RelationKind::Semantic => "semantic",
+            RelationKind::Temporal => "temporal",
+            RelationKind::Causal => "causal",
+            RelationKind::Entity => "entity",
+        }
+    }
+}
+
+impl std::str::FromStr for RelationKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "semantic" => Ok(RelationKind::Semantic),
+            "temporal" => Ok(RelationKind::Temporal),
+            "causal" => Ok(RelationKind::Causal),
+            "entity" => Ok(RelationKind::Entity),
+            other => Err(format!("unknown relation_kind: {other}")),
+        }
+    }
+}
+
+/// A directed relation edge between two fragments, scoped to a session. Stored
+/// in its own table so `ContextFragment` is never mutated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relation {
+    pub session: String,
+    pub from_id: String,
+    pub to_id: String,
+    pub kind: RelationKind,
+    /// Edge confidence in [0, 1].
+    pub score: f32,
+    /// Provenance description (e.g. "local:semantic" or "llm:causal").
+    pub provenance: String,
+    /// Unix epoch milliseconds.
+    pub created_at: i64,
+}
+
+impl Relation {
+    pub fn validate(&self) -> Result<(), ContextError> {
+        if self.from_id == self.to_id {
+            return Err(ContextError::NotFound(format!(
+                "relation self-loop rejected: {}",
+                self.from_id
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.score) {
+            return Err(ContextError::Storage(format!(
+                "relation score {} out of [0,1]",
+                self.score
+            )));
+        }
+        if self.provenance.trim().is_empty() {
+            return Err(ContextError::Storage("empty relation provenance".into()));
+        }
+        Ok(())
+    }
+}
+
+/// A bounded graph retrieval query (mirrors Jev-Mem's Retrieve->Assess->Expand).
+#[derive(Debug, Clone)]
+pub struct GraphRetrieveQuery {
+    pub session: String,
+    /// Seed fragment ids to start expansion from.
+    pub seeds: Vec<String>,
+    /// Relation views to traverse; empty means "all four views".
+    pub views: Vec<RelationKind>,
+    /// Maximum number of distinct fragments to visit (budget).
+    pub budget: usize,
+    /// Maximum traversal depth.
+    pub max_hops: usize,
+    /// Final number of scored fragments to return.
+    pub top_k: usize,
+}
+
+impl GraphRetrieveQuery {
+    pub fn validate(&self) -> Result<(), ContextError> {
+        if self.seeds.is_empty() {
+            return Err(ContextError::Storage("graph query needs >= 1 seed".into()));
+        }
+        if self.budget == 0 {
+            return Err(ContextError::Storage("graph budget must be > 0".into()));
+        }
+        if self.max_hops == 0 {
+            return Err(ContextError::Storage("graph max_hops must be > 0".into()));
+        }
+        if self.top_k == 0 {
+            return Err(ContextError::Storage("graph top_k must be > 0".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Inspectable decision trace returned alongside a graph retrieval, mirroring
+/// Jev-Mem's typed/transparent decisions.
+#[derive(Debug, Clone)]
+pub struct RetrieveTrace {
+    pub views: Vec<RelationKind>,
+    pub budget: usize,
+    pub stop_reason: String,
+    pub hits: usize,
+}
+
+/// A fragment plus its graph-evidence score.
+#[derive(Debug, Clone)]
+pub struct ScoredFragment {
+    pub fragment: ContextFragment,
+    pub score: f32,
+}
+
+/// Bundled result of a bounded graph expansion.
+#[derive(Debug, Clone)]
+pub struct GraphRetrieveResult {
+    pub items: Vec<ScoredFragment>,
+    pub trace: RetrieveTrace,
+}
+
 #[derive(Debug, Error)]
 pub enum ContextError {
     #[error("storage error: {0}")]
@@ -211,6 +349,37 @@ pub trait ContextStore: Send + Sync {
         session: &str,
         top_k: usize,
     ) -> Result<Vec<ContextFragment>, ContextError>;
+
+    // --- Multi-relational memory plane (Jev-Mem inspired) ---
+
+    /// Persist a relation edge (session-scoped). Returns `NotFound` if either
+    /// endpoint fragment is missing, `Storage` on a self-loop/invalid edge.
+    async fn relate(&self, rel: Relation) -> Result<(), ContextError>;
+
+    /// List relations for a session, optionally filtered by `from`/`to`/`kind`.
+    /// `top_k` caps the returned edges (oldest skipped).
+    async fn get_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+        top_k: usize,
+    ) -> Result<Vec<Relation>, ContextError>;
+
+    /// Delete relations for a session matching the given filters. Returns the
+    /// number removed. At least one of `from`/`to`/`kind` must be set.
+    async fn delete_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+    ) -> Result<usize, ContextError>;
+
+    /// Bounded graph expansion from `query.seeds` across `query.views`. Returns
+    /// the reached scored fragments plus an inspectable [`RetrieveTrace`].
+    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError>;
 }
 
 /// Embed a fragment's content when it carries no vector yet. Shared by every
@@ -283,6 +452,88 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Token Jaccard overlap of two contents (used by the entity/causal heuristics).
+pub(crate) fn token_jaccard(a: &str, b: &str) -> f32 {
+    fn toks(s: &str) -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 2)
+            .map(|w| w.to_string())
+            .collect()
+    }
+    let ta = toks(a);
+    let tb = toks(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    inter / union
+}
+
+/// Generic bounded graph traversal (BFS with cycle avoidance) shared by every
+/// backend. `neighbor_fn` returns outgoing edges `(to_id, score, kind)` for a
+/// node; the caller filters by `views`, caps visited nodes at `budget`, and
+/// decays the accumulated score by 0.9 per hop. The returned `stop` reason is
+/// human-readable ("budget" / "exhausted").
+pub fn graph_bfs(
+    seeds: &[String],
+    views: &[RelationKind],
+    budget: usize,
+    max_hops: usize,
+    mut neighbor_fn: impl FnMut(&str) -> Vec<(String, f32, RelationKind)>,
+) -> (Vec<(String, f32)>, String) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let view_set: Option<&[RelationKind]> = if views.is_empty() { None } else { Some(views) };
+    let mut best: HashMap<String, f32> = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, usize, f32)> = VecDeque::new();
+
+    for s in seeds {
+        if visited.insert(s.clone()) {
+            best.insert(s.clone(), 1.0);
+            queue.push_back((s.clone(), 0, 1.0));
+        }
+    }
+
+    let mut stop = "exhausted".to_string();
+    while let Some((node, hop, acc)) = queue.pop_front() {
+        if hop >= max_hops {
+            continue;
+        }
+        let edges = neighbor_fn(&node);
+        for (nid, escore, kind) in edges {
+            if let Some(vs) = view_set {
+                if !vs.contains(&kind) {
+                    continue;
+                }
+            }
+            if visited.contains(&nid) {
+                continue;
+            }
+            if visited.len() >= budget {
+                stop = "budget".to_string();
+                break;
+            }
+            let nacc = acc * escore * 0.9;
+            visited.insert(nid.clone());
+            let e = best.entry(nid.clone()).or_insert(0.0);
+            if nacc > *e {
+                *e = nacc;
+            }
+            queue.push_back((nid, hop + 1, nacc));
+        }
+        if stop == "budget" {
+            break;
+        }
+    }
+
+    let mut out: Vec<(String, f32)> = best.into_iter().collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    (out, stop)
 }
 
 /// Merge results from two backends: a fragment is a duplicate when **either**
@@ -441,6 +692,338 @@ impl ContextStore for CompositeContextStore {
         merged.truncate(top_k);
         Ok(merged)
     }
+
+    async fn relate(&self, rel: Relation) -> Result<(), ContextError> {
+        let local = self.local.relate(rel.clone()).await;
+        let cloud = self.cloud.relate(rel).await;
+        match (local, cloud) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(e)) => {
+                tracing::warn!("context: cloud relate failed, kept local edge: {e}");
+                Ok(())
+            }
+            (Err(e), Ok(())) => {
+                tracing::warn!("context: local relate failed, kept cloud edge: {e}");
+                Ok(())
+            }
+            (Err(e), Err(_)) => Err(e),
+        }
+    }
+
+    async fn get_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+        top_k: usize,
+    ) -> Result<Vec<Relation>, ContextError> {
+        let local = self.local.get_relations(session, from, to, kind, top_k).await;
+        let cloud = self.cloud.get_relations(session, from, to, kind, top_k).await;
+        let (local, cloud) = match (local, cloud) {
+            (Ok(l), Ok(c)) => (l, c),
+            (Ok(l), Err(e)) => {
+                tracing::warn!("context: cloud get_relations failed, using local: {e}");
+                (l, Vec::new())
+            }
+            (Err(e), Ok(c)) => {
+                tracing::warn!("context: local get_relations failed, using cloud: {e}");
+                (Vec::new(), c)
+            }
+            (Err(e), Err(_)) => return Err(e),
+        };
+        // Merge by (session, from, to, kind), keeping the freshest copy.
+        let mut index: HashMap<(String, String, String, RelationKind), usize> = HashMap::new();
+        let mut out: Vec<Relation> = Vec::new();
+        for r in local.into_iter().chain(cloud) {
+            let key = (r.session.clone(), r.from_id.clone(), r.to_id.clone(), r.kind);
+            match index.get(&key).copied() {
+                Some(i) if r.created_at > out[i].created_at => out[i] = r,
+                Some(_) => {}
+                None => {
+                    let i = out.len();
+                    index.insert(key, i);
+                    out.push(r);
+                }
+            }
+        }
+        out.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+        out.truncate(top_k);
+        Ok(out)
+    }
+
+    async fn delete_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+    ) -> Result<usize, ContextError> {
+        let local = self.local.delete_relations(session, from, to, kind).await;
+        let cloud = self.cloud.delete_relations(session, from, to, kind).await;
+        let (local, cloud) = match (local, cloud) {
+            (Ok(l), Ok(c)) => (l, c),
+            (Ok(l), Err(e)) => {
+                tracing::warn!("context: cloud delete_relations failed: {e}");
+                (l, 0)
+            }
+            (Err(e), Ok(c)) => {
+                tracing::warn!("context: local delete_relations failed: {e}");
+                (0, c)
+            }
+            (Err(e), Err(_)) => return Err(e),
+        };
+        Ok(local + cloud)
+    }
+
+    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+        // Gather edges from both sides, merge by (session, from, to, kind) keeping
+        // the freshest, then run a single bounded traversal.
+        let all = self
+            .get_relations(&query.session, None, None, None, usize::MAX)
+            .await?;
+        let mut edges: HashMap<String, Vec<(String, f32, RelationKind)>> = HashMap::new();
+        let mut frags: HashMap<String, ContextFragment> = HashMap::new();
+        for r in all {
+            edges
+                .entry(r.from_id.clone())
+                .or_default()
+                .push((r.to_id.clone(), r.score, r.kind));
+        }
+        for f in self
+            .local
+            .list_session(&query.session, usize::MAX)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .chain(
+                self.cloud
+                    .list_session(&query.session, usize::MAX)
+                    .await
+                    .unwrap_or_default(),
+            )
+        {
+            frags.insert(f.id.clone(), f);
+        }
+        let (reached, stop) = graph_bfs(
+            &query.seeds,
+            &query.views,
+            query.budget,
+            query.max_hops,
+            |n| edges.get(n).cloned().unwrap_or_default(),
+        );
+        let mut items: Vec<ScoredFragment> = Vec::new();
+        for (id, score) in reached.into_iter().take(query.top_k) {
+            if let Some(f) = frags.get(&id) {
+                items.push(ScoredFragment {
+                    fragment: f.clone(),
+                    score,
+                });
+            }
+        }
+        let trace = RetrieveTrace {
+            views: query.views.clone(),
+            budget: query.budget,
+            stop_reason: stop,
+            hits: items.len(),
+        };
+        Ok(GraphRetrieveResult { items, trace })
+    }
+}
+
+/// Tunables for the relation controller.
+#[derive(Debug, Clone)]
+pub struct RelationConfig {
+    /// How many existing fragments to evaluate as relation candidates per write.
+    pub candidate_top_k: usize,
+    /// Minimum score to accept an inferred relation edge.
+    pub relation_threshold: f32,
+    /// Cap on edges created in a single write→connect pass.
+    pub max_relations_per_write: usize,
+}
+
+impl Default for RelationConfig {
+    fn default() -> Self {
+        Self {
+            candidate_top_k: 10,
+            relation_threshold: 0.6,
+            max_relations_per_write: 8,
+        }
+    }
+}
+
+/// Pluggable relation scorer. The default [`LocalRelationScorer`] runs fully
+/// offline; swap in an LLM-backed implementation without touching the controller.
+pub trait RelationScorer: Send + Sync {
+    fn score(&self, a: &ContextFragment, b: &ContextFragment, kind: RelationKind) -> f32;
+}
+
+/// Default offline heuristic scorer mirroring the four relation views.
+pub struct LocalRelationScorer;
+
+impl RelationScorer for LocalRelationScorer {
+    fn score(&self, a: &ContextFragment, b: &ContextFragment, kind: RelationKind) -> f32 {
+        match kind {
+            RelationKind::Semantic => match (&a.embedding, &b.embedding) {
+                (Some(x), Some(y)) => embed::cosine(x, y).unwrap_or(0.0),
+                _ => token_jaccard(&a.content, &b.content),
+            },
+            RelationKind::Temporal => {
+                if a.created_at <= b.created_at {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            RelationKind::Entity => token_jaccard(&a.content, &b.content),
+            RelationKind::Causal => {
+                let adj = if a.created_at <= b.created_at { 0.5 } else { 0.0 };
+                let overlap = token_jaccard(&a.content, &b.content);
+                (adj + 0.5 * overlap).min(1.0)
+            }
+        }
+    }
+}
+
+/// Local control plane: write→connect relation inference and
+/// retrieve→assess→expand bounded graph traversal.
+pub struct ContextController {
+    store: Arc<dyn ContextStore>,
+    #[allow(dead_code)]
+    embedder: Arc<dyn embed::Embedder>,
+    scorer: Arc<dyn RelationScorer>,
+    cfg: RelationConfig,
+}
+
+impl ContextController {
+    pub fn new(
+        store: Arc<dyn ContextStore>,
+        embedder: Arc<dyn embed::Embedder>,
+        scorer: Arc<dyn RelationScorer>,
+        cfg: RelationConfig,
+    ) -> Self {
+        Self {
+            store,
+            embedder,
+            scorer,
+            cfg,
+        }
+    }
+
+    /// Convenience constructor with the offline default scorer and config.
+    pub fn with_defaults(store: Arc<dyn ContextStore>, embedder: Arc<dyn embed::Embedder>) -> Self {
+        Self::new(store, embedder, Arc::new(LocalRelationScorer), RelationConfig::default())
+    }
+
+    /// Write→connect: after `frag` is persisted, pick bounded candidates and
+    /// infer four-view relations, persisting edges above the threshold.
+    /// Returns the number of edges created.
+    pub async fn connect(&self, frag: &ContextFragment) -> Result<usize, ContextError> {
+        // The source fragment must already be persisted (write→connect ordering).
+        let exists = self
+            .store
+            .recall(&RecallQuery::new(&frag.session, &frag.content))
+            .await?
+            .iter()
+            .any(|f| f.id == frag.id);
+        if !exists {
+            return Err(ContextError::NotFound(frag.id.clone()));
+        }
+        let mut rq = RecallQuery::new(&frag.session, &frag.content);
+        rq.top_k = self.cfg.candidate_top_k + 1;
+        let candidates = self.store.recall(&rq).await?;
+        let candidates: Vec<ContextFragment> =
+            candidates.into_iter().filter(|f| f.id != frag.id).collect();
+        let mut added = 0;
+        for cand in candidates.iter().take(self.cfg.max_relations_per_write) {
+            for kind in [
+                RelationKind::Semantic,
+                RelationKind::Temporal,
+                RelationKind::Causal,
+                RelationKind::Entity,
+            ] {
+                let sc = self.scorer.score(frag, cand, kind);
+                if sc < self.cfg.relation_threshold {
+                    continue;
+                }
+                let now = now_ms();
+                let forward = kind == RelationKind::Temporal && frag.created_at > cand.created_at;
+                if !forward {
+                    self.store
+                        .relate(Relation {
+                            session: frag.session.clone(),
+                            from_id: frag.id.clone(),
+                            to_id: cand.id.clone(),
+                            kind,
+                            score: sc,
+                            provenance: "local".into(),
+                            created_at: now,
+                        })
+                        .await?;
+                    added += 1;
+                }
+                if kind != RelationKind::Temporal {
+                    self.store
+                        .relate(Relation {
+                            session: frag.session.clone(),
+                            from_id: cand.id.clone(),
+                            to_id: frag.id.clone(),
+                            kind,
+                            score: sc,
+                            provenance: "local".into(),
+                            created_at: now,
+                        })
+                        .await?;
+                    added += 1;
+                }
+            }
+        }
+        Ok(added)
+    }
+
+    /// Retrieve→assess→expand: hybrid recall seeds anchors, then bounded graph
+    /// expansion across `views` returns scored fragments plus an inspectable trace.
+    pub async fn retrieve(
+        &self,
+        query: &RecallQuery,
+        views: Vec<RelationKind>,
+        budget: usize,
+        max_hops: usize,
+        top_k: usize,
+    ) -> Result<GraphRetrieveResult, ContextError> {
+        if budget == 0 || max_hops == 0 || top_k == 0 {
+            return Err(ContextError::Storage(
+                "retrieve budget/max_hops/top_k must be > 0".into(),
+            ));
+        }
+        let seeds: Vec<String> = self
+            .store
+            .recall(query)
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        if seeds.is_empty() {
+            return Ok(GraphRetrieveResult {
+                items: Vec::new(),
+                trace: RetrieveTrace {
+                    views,
+                    budget,
+                    stop_reason: "no-seeds".into(),
+                    hits: 0,
+                },
+            });
+        }
+        let q = GraphRetrieveQuery {
+            session: query.session.clone(),
+            seeds,
+            views,
+            budget,
+            max_hops,
+            top_k,
+        };
+        self.store.expand(&q).await
+    }
 }
 
 /// In-process [`ContextStore`] used by tests and by the SDK default.
@@ -449,12 +1032,14 @@ impl ContextStore for CompositeContextStore {
 /// dependency on the embedded store crate).
 pub struct MemoryContextStore {
     inner: RwLock<HashMap<String, ContextFragment>>,
+    relations: RwLock<Vec<Relation>>,
 }
 
 impl MemoryContextStore {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: RwLock::new(HashMap::new()),
+            relations: RwLock::new(Vec::new()),
         })
     }
 }
@@ -463,6 +1048,7 @@ impl Default for MemoryContextStore {
     fn default() -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),
+            relations: RwLock::new(Vec::new()),
         }
     }
 }
@@ -552,6 +1138,141 @@ impl ContextStore for MemoryContextStore {
         out.sort_by_key(|f| f.created_at);
         out.truncate(top_k);
         Ok(out)
+    }
+
+    async fn relate(&self, rel: Relation) -> Result<(), ContextError> {
+        rel.validate()?;
+        {
+            let g = self
+                .inner
+                .read()
+                .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+            if !g.contains_key(&rel.from_id) {
+                return Err(ContextError::NotFound(rel.from_id.clone()));
+            }
+            if !g.contains_key(&rel.to_id) {
+                return Err(ContextError::NotFound(rel.to_id.clone()));
+            }
+        }
+        let mut rels = self
+            .relations
+            .write()
+            .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+        if let Some(existing) = rels.iter_mut().find(|r| {
+            r.session == rel.session
+                && r.from_id == rel.from_id
+                && r.to_id == rel.to_id
+                && r.kind == rel.kind
+        }) {
+            existing.score = rel.score;
+            existing.provenance = rel.provenance;
+            existing.created_at = rel.created_at;
+        } else {
+            rels.push(rel);
+        }
+        Ok(())
+    }
+
+    async fn get_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+        top_k: usize,
+    ) -> Result<Vec<Relation>, ContextError> {
+        let rels = self
+            .relations
+            .read()
+            .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+        let mut out: Vec<Relation> = rels
+            .iter()
+            .filter(|r| r.session == session)
+            .filter(|r| from.map(|f| r.from_id == f).unwrap_or(true))
+            .filter(|r| to.map(|t| r.to_id == t).unwrap_or(true))
+            .filter(|r| kind.map(|k| k == r.kind).unwrap_or(true))
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+        out.truncate(top_k);
+        Ok(out)
+    }
+
+    async fn delete_relations(
+        &self,
+        session: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        kind: Option<RelationKind>,
+    ) -> Result<usize, ContextError> {
+        if from.is_none() && to.is_none() && kind.is_none() {
+            return Err(ContextError::Storage(
+                "delete_relations needs at least one filter".into(),
+            ));
+        }
+        let mut rels = self
+            .relations
+            .write()
+            .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+        let before = rels.len();
+        rels.retain(|r| {
+            // A provided filter must match; an absent filter is ignored. The
+            // top-level guard above already guarantees at least one is present.
+            let matches = r.session == session
+                && from.map(|f| r.from_id == f).unwrap_or(true)
+                && to.map(|t| r.to_id == t).unwrap_or(true)
+                && kind.map(|k| k == r.kind).unwrap_or(true);
+            !matches
+        });
+        Ok(before - rels.len())
+    }
+
+    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+        query.validate()?;
+        let (rels_snapshot, frags_snapshot) = {
+            let rels = self
+                .relations
+                .read()
+                .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+            let frags = self
+                .inner
+                .read()
+                .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
+            (rels.clone(), frags.clone())
+        };
+        let mut edges: HashMap<String, Vec<(String, f32, RelationKind)>> = HashMap::new();
+        for r in rels_snapshot.iter() {
+            if r.session != query.session {
+                continue;
+            }
+            edges
+                .entry(r.from_id.clone())
+                .or_default()
+                .push((r.to_id.clone(), r.score, r.kind));
+        }
+        let (reached, stop) = graph_bfs(
+            &query.seeds,
+            &query.views,
+            query.budget,
+            query.max_hops,
+            |n| edges.get(n).cloned().unwrap_or_default(),
+        );
+        let mut items: Vec<ScoredFragment> = Vec::new();
+        for (id, score) in reached.into_iter().take(query.top_k) {
+            if let Some(f) = frags_snapshot.get(&id) {
+                items.push(ScoredFragment {
+                    fragment: f.clone(),
+                    score,
+                });
+            }
+        }
+        let trace = RetrieveTrace {
+            views: query.views.clone(),
+            budget: query.budget,
+            stop_reason: stop,
+            hits: items.len(),
+        };
+        Ok(GraphRetrieveResult { items, trace })
     }
 }
 
@@ -848,6 +1569,34 @@ mod tests {
         ) -> Result<Vec<ContextFragment>, ContextError> {
             Err(ContextError::Storage("boom".into()))
         }
+        async fn relate(&self, _rel: Relation) -> Result<(), ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn get_relations(
+            &self,
+            _session: &str,
+            _from: Option<&str>,
+            _to: Option<&str>,
+            _kind: Option<RelationKind>,
+            _top_k: usize,
+        ) -> Result<Vec<Relation>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn delete_relations(
+            &self,
+            _session: &str,
+            _from: Option<&str>,
+            _to: Option<&str>,
+            _kind: Option<RelationKind>,
+        ) -> Result<usize, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn expand(
+            &self,
+            _query: &GraphRetrieveQuery,
+        ) -> Result<GraphRetrieveResult, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
     }
 
     #[test]
@@ -1076,5 +1825,301 @@ mod tests {
         assert!(!out.is_empty());
         assert!(out[0].content.contains("rust"));
         assert!(out[0].embedding.is_some());
+    }
+
+    // --- Multi-relational memory plane ---
+
+    #[test]
+    fn relation_kind_roundtrip() {
+        for k in [
+            RelationKind::Semantic,
+            RelationKind::Temporal,
+            RelationKind::Causal,
+            RelationKind::Entity,
+        ] {
+            let s = k.as_str();
+            let back: RelationKind = s.parse().unwrap();
+            assert_eq!(k, back);
+        }
+        assert!("bogus".parse::<RelationKind>().is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_store_relation_crud_and_expand() {
+        let store = MemoryContextStore::new();
+        store
+            .memorize(ContextFragment::new("s1", FragmentKind::LongTerm, "user likes rust programming"))
+            .await
+            .unwrap();
+        store
+            .memorize(ContextFragment::new("s1", FragmentKind::LongTerm, "rust is used for systems programming"))
+            .await
+            .unwrap();
+        // Capture the generated ids.
+        let frags = store.list_session("s1", 10).await.unwrap();
+        let a = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
+        let b = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+
+        // Missing endpoint rejected.
+        assert!(store
+            .relate(Relation {
+                session: "s1".into(),
+                from_id: a.id.clone(),
+                to_id: "ghost".into(),
+                kind: RelationKind::Semantic,
+                score: 0.8,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .is_err());
+
+        store
+            .relate(Relation {
+                session: "s1".into(),
+                from_id: a.id.clone(),
+                to_id: b.id.clone(),
+                kind: RelationKind::Semantic,
+                score: 0.9,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let all = store
+            .get_relations("s1", None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1, "all relations: {:#?}", all);
+        let rels = store
+            .get_relations("s1", Some(&a.id), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(rels.len(), 1, "relations for a.id={}: {:#?}", a.id, rels);
+
+        // Expand a -> b.
+        let q = GraphRetrieveQuery {
+            session: "s1".into(),
+            seeds: vec![a.id.clone()],
+            views: vec![],
+            budget: 10,
+            max_hops: 3,
+            top_k: 10,
+        };
+        let res = store.expand(&q).await.unwrap();
+        let ids: Vec<&str> = res.items.iter().map(|i| i.fragment.id.as_str()).collect();
+        assert!(ids.contains(&a.id.as_str()));
+        assert!(ids.contains(&b.id.as_str()));
+        assert_eq!(res.trace.hits, 2);
+
+        // Wrong session returns nothing.
+        assert!(store.get_relations("other", None, None, None, 10).await.unwrap().is_empty());
+
+        // Delete by from.
+        let removed = store
+            .delete_relations("s1", Some(&a.id), None, None)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        // Empty filter rejected.
+        assert!(store
+            .delete_relations("s1", None, None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn context_controller_write_connect_and_retrieve() {
+        let store = MemoryContextStore::new();
+        let a = ContextFragment::new("s1", FragmentKind::LongTerm, "user likes rust programming language");
+        let b = ContextFragment::new("s1", FragmentKind::LongTerm, "user likes rust systems programming");
+        store.memorize(a.clone()).await.unwrap();
+        store.memorize(b.clone()).await.unwrap();
+
+        let ctrl = ContextController::with_defaults(
+            store.clone(),
+            Arc::new(embed::LocalEmbedder::new(EMBED_DIM)),
+        );
+        // connect on b should infer edges (semantic/entity) to a.
+        let n = ctrl.connect(&b).await.unwrap();
+        assert!(n >= 2, "expected symmetric semantic+entity edges, got {n}");
+
+        // Retrieve from text near b should reach a through the graph.
+        let q = RecallQuery::new("s1", "rust programming");
+        let res = ctrl.retrieve(&q, vec![], 20, 3, 10).await.unwrap();
+        let ids: Vec<&str> = res.items.iter().map(|i| i.fragment.id.as_str()).collect();
+        assert!(ids.contains(&a.id.as_str()));
+        assert!(ids.contains(&b.id.as_str()));
+        assert!(!res.trace.stop_reason.is_empty());
+
+        // Invalid retrieve params rejected.
+        assert!(ctrl.retrieve(&q, vec![], 0, 3, 10).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn context_controller_rejects_missing_fragment() {
+        let store = MemoryContextStore::new();
+        let ghost = ContextFragment::new("s1", FragmentKind::LongTerm, "standalone");
+        let ctrl = ContextController::with_defaults(
+            store.clone(),
+            Arc::new(embed::LocalEmbedder::new(EMBED_DIM)),
+        );
+        assert!(matches!(ctrl.connect(&ghost).await, Err(ContextError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn composite_merges_relations() {
+        let local = MemoryContextStore::new();
+        let cloud = MemoryContextStore::new();
+        let composite = CompositeContextStore::new(local.clone(), cloud.clone());
+
+        // Store fragments through the composite so they exist on both sides.
+        composite
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "alpha node"))
+            .await
+            .unwrap();
+        composite
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "beta node"))
+            .await
+            .unwrap();
+        let frags = composite.list_session("s", 10).await.unwrap();
+        let a = frags.iter().find(|f| f.content.contains("alpha")).unwrap();
+        let b = frags.iter().find(|f| f.content.contains("beta")).unwrap();
+
+        composite
+            .relate(Relation {
+                session: "s".into(),
+                from_id: a.id.clone(),
+                to_id: b.id.clone(),
+                kind: RelationKind::Semantic,
+                score: 0.8,
+                provenance: "local".into(),
+                created_at: 5,
+            })
+            .await
+            .unwrap();
+        // The edge must be visible from both sides (writes to both).
+        assert_eq!(local.get_relations("s", None, None, None, 10).await.unwrap().len(), 1);
+        assert_eq!(cloud.get_relations("s", None, None, None, 10).await.unwrap().len(), 1);
+
+        // get_relations via composite returns a single merged edge.
+        let merged = composite.get_relations("s", None, None, None, 10).await.unwrap();
+        assert_eq!(merged.len(), 1);
+
+        // expand across the composite reaches both nodes.
+        let q = GraphRetrieveQuery {
+            session: "s".into(),
+            seeds: vec![a.id.clone()],
+            views: vec![],
+            budget: 10,
+            max_hops: 3,
+            top_k: 10,
+        };
+        let res = composite.expand(&q).await.unwrap();
+        assert_eq!(res.trace.hits, 2);
+    }
+
+    // --- Abnormal paths (no DB) ---
+
+    fn sample_relation() -> Relation {
+        Relation {
+            session: "s".into(),
+            from_id: "a".into(),
+            to_id: "b".into(),
+            kind: RelationKind::Semantic,
+            score: 0.5,
+            provenance: "local".into(),
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn relation_validate_rejects_self_loop_and_bad_score() {
+        let ok = sample_relation();
+        assert!(ok.validate().is_ok());
+
+        // Self-loop rejected (NotFound, never a valid edge).
+        let mut self_loop = ok.clone();
+        self_loop.to_id = "a".into();
+        assert!(matches!(self_loop.validate(), Err(ContextError::NotFound(_))));
+
+        // Score out of [0,1] rejected (Storage).
+        let mut bad = ok.clone();
+        bad.score = 1.4;
+        assert!(matches!(bad.validate(), Err(ContextError::Storage(_))));
+        bad.score = -0.1;
+        assert!(matches!(bad.validate(), Err(ContextError::Storage(_))));
+
+        // Empty provenance rejected (Storage).
+        let mut no_prov = ok.clone();
+        no_prov.provenance = "   ".into();
+        assert!(matches!(no_prov.validate(), Err(ContextError::Storage(_))));
+    }
+
+    #[test]
+    fn graph_query_validate_rejects_bad_bounds() {
+        let good = GraphRetrieveQuery {
+            session: "s".into(),
+            seeds: vec!["a".into()],
+            views: vec![],
+            budget: 10,
+            max_hops: 3,
+            top_k: 10,
+        };
+        assert!(good.validate().is_ok());
+
+        let mut q = good.clone();
+        q.seeds = vec![];
+        assert!(q.validate().is_err(), "empty seeds rejected");
+
+        q = good.clone();
+        q.budget = 0;
+        assert!(q.validate().is_err(), "budget=0 rejected");
+
+        q = good.clone();
+        q.max_hops = 0;
+        assert!(q.validate().is_err(), "max_hops=0 rejected");
+
+        q = good.clone();
+        q.top_k = 0;
+        assert!(q.validate().is_err(), "top_k=0 rejected");
+    }
+
+    #[tokio::test]
+    async fn memory_store_expand_rejects_invalid_query() {
+        let store = MemoryContextStore::new();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "x"))
+            .await
+            .unwrap();
+        let bad = GraphRetrieveQuery {
+            session: "s".into(),
+            seeds: vec!["x".into()],
+            views: vec![],
+            budget: 0,
+            max_hops: 3,
+            top_k: 10,
+        };
+        assert!(store.expand(&bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_store_relate_rejects_self_loop() {
+        let store = MemoryContextStore::new();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "x"))
+            .await
+            .unwrap();
+        let id = store.list_session("s", 10).await.unwrap()[0].id.clone();
+        let self_loop = Relation {
+            session: "s".into(),
+            from_id: id.clone(),
+            to_id: id.clone(),
+            kind: RelationKind::Semantic,
+            score: 0.5,
+            provenance: "local".into(),
+            created_at: 1,
+        };
+        assert!(store.relate(self_loop).await.is_err());
     }
 }

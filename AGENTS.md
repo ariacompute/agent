@@ -88,6 +88,55 @@ language (JS/Python) SDKs.
     serve and cockpit adaptations are tracked in `docs/followups/*.md`; do not
     edit those repositories as part of an agent-repo change.
 
+## SDK（js / python）
+
+端侧/服务端通用的 agent SDK，API 形状对齐 OpenAI Agents SDK（`Agent` / `run` /
+`runStreamed` / `tool` / `Session` / `result.finalOutput` / `result.history`）。
+`bindings/swift`、`bindings/kotlin` 由 `ariacompute-agent` 的 UniFFI 表面生成，
+语义与 js/python 一致（见规则 2）。
+
+### 分层
+
+`transport`（HTTP/SSE，可注入 `fetch`/urllib） → `session`（会话 + 只读
+items/turns + 记忆 backend） → `runner`（`run`/`runStreamed` + `maxTurns` + 事件解码）
+→ `agent`/`tool`（配置与工具） → `memory`（cloud/local/both，保持）。所有模块
+零网络/零 LLM 可单测（js 用 `bun test` 注入 `fetch`，python 用 `unittest`
+mock `transport._request`）。
+
+### 公开 API 契约
+
+- `Agent(config)`：`name` 必填且非空（空白报错）；`tools` 名称必须唯一（重复抛
+  `duplicate tool name`）；`toolSchemas()` 不透传 `execute`，默认 `parameters`。
+- `run(agent, input, { session?, client?, maxTurns? })`：单轮阻塞；`maxTurns`
+  须为正整数（否则 `config` 型错误）；返回 `RunResult`（finalOutput/history/
+  lastAgent/sessionId/turnId）。
+- `runStreamed(agent, input, { session?, client?, maxTurns? })`：SSE 流；按
+  `agent.turn.created` 计数，超过 `maxTurns` 早退并抛 `config` 型错误；`events`
+  为已解码 `agent.*` 帧，`completed` 在终端帧到达后解析。
+- `Session`：`memorize`/`recall` 走 cloud/local/both；`getItems()`/`getTurns()`
+  是只读端点（GET `…/items`、`…/turns`，不改动上下文，对应规则 8）。
+- `memory`：`cloud` = agent-cloud REST；`local` = aria memo（js 经
+  `aria-memo` CLI、python 直连 SQLite `memories` 表，`memo.db` 与 CLI 同格式）；
+  `both` = 双侧写入、读取合并（cloud 优先、local 兜底），单侧失败可容忍。
+
+### 异常
+
+传输失败统一归一为类型化错误：`AriaError`，`kind ∈ {auth, network, api,
+config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他非 2xx →
+`api`，连接失败 → `network`，`maxTurns`/缺 `fetch` 等本地误用 → `config`。
+`memory` 的 `both`：单侧失败容忍，双侧同时失败才抛错。解码未知 `agent.*` 帧
+透传、不中断流；`data: [DONE]` 与保活/残缺帧被忽略（终端帧为
+`agent.turn.completed`/`agent.turn.failed`，无 `[DONE]` 哨兵）。
+
+### 验收
+
+- `just sdk-js-test`（51 用例）与 `just sdk-py-test`（28 用例）全绿：覆盖正常 +
+  异常（类型化错误 kind、未知 backend、`getItems`/`getTurns`、空/数组输入、
+  `maxTurns` 上限、单侧 backend 失败、解码回退）。
+- 冻结约束：不改 `event_envelope.rs`（SSE 契约），不改 `memory` 三层结构，不引入
+  memo 记忆内部实现。
+- 日志沿用 `tracing`，不打印 OpenAI key / 原始用户输入 / 嵌入向量。
+
 ## Common commands
 
 * `just build` — build all crates

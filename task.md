@@ -168,6 +168,24 @@ see `docs/followups/*` for the downstream cleanups.
 - [x] Docs: `docs/adr/0011-memory-backend-switch.md`, README/README_cn five
       language examples, AGENTS.md rule 1, requirements.md §3/§5.
 
+## Milestone 14 — SDK 成熟度（测试 + 功能对齐，参考 memo）
+- [x] 类型化错误：`AriaError`（`kind ∈ {auth,network,api,config,unknown}`），
+      `transport` 将 401/403→auth、其他非 2xx→api（带 status）、连接失败→network；
+      js/python 双端 `transport`/`runner`/`session` 单测覆盖各 kind。
+- [x] `Session` 只读端点：`getItems()`/`getTurns()`（GET `…/items`、`…/turns`），
+      对应规则 8 不改动上下文；js/python 双端单测。
+- [x] `maxTurns`：`run`/`runStreamed` 接受正整数上限；`runStreamed` 按
+      `agent.turn.created` 计数超额早退并抛 `config` 型错误；双端单测。
+- [x] `Agent` 校验：`name` 必填非空、`tools` 名称唯一（`duplicate tool name`）、
+      `toolSchemas()` 不透传 `execute` 且默认 `parameters`；双端单测。
+- [x] 测试硬化：js `bun test` 51 用例、python `unittest` 28 用例全绿，覆盖正常 +
+      异常（类型化错误、未知 backend、`getItems`/`getTurns`、空/数组输入、
+      `maxTurns` 上限、单侧 backend 失败、SSE 解码回退）。
+- [x] 原生面 `ariacompute-agent` 保持稳定：新特性为云 REST 层，不映射到本地优先
+      运行时，避免 FFI 绑定漂移（规则 2）；crate 编译通过。
+- [x] 文档同步：AGENTS.md 新增「SDK（js/python）」章节、requirements.md §3.1 行为
+      契约、本里程碑条目。
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.

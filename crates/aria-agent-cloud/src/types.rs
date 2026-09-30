@@ -236,6 +236,100 @@ pub struct PutMemoryRequest {
     pub kind: Option<String>,
 }
 
+// --- Multi-relational memory plane (Jev-Mem inspired) ---
+
+/// A relation edge between two memory fragments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationItem {
+    pub session: String,
+    pub from_id: String,
+    pub to_id: String,
+    /// One of: semantic | temporal | causal | entity
+    pub kind: String,
+    /// Edge confidence in [0, 1].
+    pub score: f32,
+    pub provenance: String,
+    pub created_at: i64,
+}
+
+/// Request body to create a relation edge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRelationRequest {
+    pub from_id: String,
+    pub to_id: String,
+    /// One of: semantic | temporal | causal | entity
+    pub kind: String,
+    #[serde(default)]
+    pub score: Option<f32>,
+    #[serde(default)]
+    pub provenance: Option<String>,
+}
+
+/// Query params for listing/deleting relations.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelationListParams {
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+}
+
+/// Response for a relation deletion.
+#[derive(Debug, Clone, Serialize)]
+pub struct RelationDeleted {
+    pub object: &'static str,
+    pub session: String,
+    pub deleted: usize,
+}
+
+/// Query params for graph retrieval.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelationGraphQuery {
+    /// Comma-separated seed fragment ids.
+    pub seeds: String,
+    /// Comma-separated relation views (semantic/temporal/causal/entity); empty = all.
+    #[serde(default)]
+    pub views: Option<String>,
+    #[serde(default)]
+    pub budget: Option<usize>,
+    #[serde(default)]
+    pub max_hops: Option<usize>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+}
+
+/// A scored memory returned by graph retrieval.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoredMemoryItem {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub kind: String,
+    pub content: String,
+    pub created_at: i64,
+    pub score: f32,
+}
+
+/// An inspectable decision trace for graph retrieval (Jev-Mem typed decisions).
+#[derive(Debug, Clone, Serialize)]
+pub struct RetrieveTraceWire {
+    pub views: Vec<String>,
+    pub budget: usize,
+    pub stop_reason: String,
+    pub hits: usize,
+}
+
+/// Response for graph retrieval.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphRetrieveResponse {
+    pub items: Vec<ScoredMemoryItem>,
+    pub trace: RetrieveTraceWire,
+}
+
 /// A user input event posted to `POST /v1/agents/sessions/{id}/events`.
 ///
 /// Accepts either a plain string or the OpenAI input-content shape

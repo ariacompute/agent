@@ -103,6 +103,20 @@ export class Session {
     return this.storeFor(options.backend).get(key);
   }
 
+  /**
+   * Read-only server endpoints (AGENTS rule 8): the session's item and turn
+   * lists. These never mutate context and are safe to call repeatedly.
+   */
+  async getItems(): Promise<any[]> {
+    const resolved = resolveClient(this.client);
+    return getJson<any[]>(resolved, `/v1/agents/sessions/${encodeURIComponent(this.id)}/items`);
+  }
+
+  async getTurns(): Promise<any[]> {
+    const resolved = resolveClient(this.client);
+    return getJson<any[]>(resolved, `/v1/agents/sessions/${encodeURIComponent(this.id)}/turns`);
+  }
+
   /** Append an exchange to the client-side history mirror. */
   record(input: HistoryInput, output: string): void {
     this.history.push(input, { role: "assistant", content: output });

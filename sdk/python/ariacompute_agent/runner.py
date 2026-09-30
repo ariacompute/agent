@@ -12,7 +12,22 @@ from typing import Any, AsyncIterator, Optional, Union
 
 from .session import Session
 from .transport import async_stream_json, post_json, resolve_client
-from .types import ClientOptions, HistoryInput, HistoryItem, RunResult, StreamedRunResult
+from .types import (
+    AriaError,
+    AriaErrorKind,
+    ClientOptions,
+    HistoryInput,
+    HistoryItem,
+    RunResult,
+    StreamedRunResult,
+)
+
+
+def _validate_max_turns(max_turns: Optional[int]) -> None:
+    if max_turns is None:
+        return
+    if not isinstance(max_turns, int) or max_turns < 1:
+        raise AriaError(f"max_turns must be a positive integer, got {max_turns}", AriaErrorKind.CONFIG)
 
 
 def _to_text(value: HistoryInput) -> str:
@@ -51,6 +66,7 @@ class Runner:
         *,
         session: Optional[Union[Session, str]] = None,
         client: Optional[ClientOptions] = None,
+        max_turns: Optional[int] = None,
     ) -> RunResult:
         """Run one turn to completion and return the result.
 
@@ -59,6 +75,7 @@ class Runner:
         print(result.final_output)
         ```
         """
+        _validate_max_turns(max_turns)
         merged = client or agent.client
         resolved = resolve_client(merged)
         sess = _ensure_session(agent, merged, session)
@@ -87,6 +104,7 @@ class Runner:
         *,
         session: Optional[Union[Session, str]] = None,
         client: Optional[ClientOptions] = None,
+        max_turns: Optional[int] = None,
     ) -> StreamedRunResult:
         """Run one turn, streaming events (``agent.turn.*`` frames).
 
@@ -99,11 +117,13 @@ class Runner:
         print(result.final_output)
         ```
         """
+        _validate_max_turns(max_turns)
         merged = client or agent.client
         resolved = resolve_client(merged)
         sess = _ensure_session(agent, merged, session)
         text = _to_text(input)
 
+        cap = max_turns if max_turns is not None else None
         state: dict[str, Any] = {"text": "", "turn_id": None, "error": None}
         buffered: list[dict[str, Any]] = []
         drained = asyncio.Event()
@@ -121,12 +141,18 @@ class Runner:
                 state["error"] = (frame.get("error") or {}).get("message") or "run failed"
 
         async def _drain() -> None:
+            turns = 0
             async for frame in async_stream_json(
                 resolved,
                 f"/v1/agents/sessions/{sess.id}/events/stream",
                 {"input": text},
             ):
                 buffered.append(frame)
+                if frame.get("type") == "agent.turn.created" and cap is not None:
+                    turns += 1
+                    if turns > cap:
+                        state["error"] = f"exceeded max_turns ({cap})"
+                        break
                 _note(frame)
             drained.set()
 
@@ -140,7 +166,12 @@ class Runner:
         async def completed() -> RunResult:
             await asyncio.shield(drain_task)
             if state["error"]:
-                raise RuntimeError(state["error"])
+                kind = (
+                    AriaErrorKind.CONFIG
+                    if str(state["error"]).startswith("exceeded max_turns")
+                    else AriaErrorKind.API
+                )
+                raise AriaError(state["error"], kind)
             sess.record(input, state["text"])
             return RunResult(
                 final_output=state["text"],

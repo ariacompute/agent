@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ariacompute_agent import (  # noqa: E402
     Agent,
+    AriaError,
+    AriaErrorKind,
     ClientOptions,
     Runner,
     Session,
@@ -54,6 +57,13 @@ class AgentTest(unittest.TestCase):
     def test_requires_name(self):
         with self.assertRaises(ValueError):
             Agent(name="")
+        with self.assertRaises(ValueError):
+            Agent(name="   ")
+
+    def test_rejects_duplicate_tool_name(self):
+        shared = function_tool(lambda: "x")  # type: ignore
+        with self.assertRaises(ValueError):
+            Agent(name="tutor", tools=[shared, shared])
 
     def test_tool_schemas_drop_execute(self):
         @function_tool
@@ -159,8 +169,9 @@ class RunnerTest(unittest.TestCase):
                 streamed = await Runner.run_streamed(agent, "Rome?")
                 await streamed.completed
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(AriaError) as ctx:
             asyncio.run(main())
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.API)
 
 
 class SseTest(unittest.TestCase):
@@ -176,6 +187,90 @@ class SseTest(unittest.TestCase):
             [f["type"] for f in frames],
             ["agent.turn.output_text.delta", "agent.turn.completed"],
         )
+
+    def test_iter_sse_ignores_malformed_json(self):
+        raw = (
+            ": keep-alive\n\n"
+            'data: not-json\n\n'
+            'data: {"type":"agent.turn.created"}\n\n'
+        ).encode()
+        frames = list(transport.iter_sse(FakeResponse(raw)))
+        self.assertEqual([f["type"] for f in frames], ["agent.turn.created"])
+
+
+class RunnerMaxTurnsTest(unittest.TestCase):
+    def _fake(self, frames=None):
+        captured = {}
+
+        def fake_request(client, method, path, body=None, stream=False):
+            captured["path"] = path
+            if path.endswith("/v1/agents/sessions"):
+                return FakeResponse(json.dumps({"id": "sess_1"}).encode())
+            return FakeResponse(sse_payload(frames or []))
+
+        return fake_request, captured
+
+    def test_run_rejects_max_turns_zero_before_request(self):
+        agent = Agent(name="tutor", client=ClientOptions(base_url="http://aria.test"))
+        with mock.patch.object(transport, "_request", side_effect=self._fake()[0]):
+            with self.assertRaises(AriaError) as ctx:
+                asyncio.run(Runner.run(agent, "hi", max_turns=0))
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.CONFIG)
+
+    def test_run_streamed_caps_max_turns(self):
+        frames = [
+            {"type": "agent.turn.created", "turn_id": "t1", "sequence_number": 1},
+            {"type": "agent.turn.output_text.done", "text": "first", "sequence_number": 2},
+            {"type": "agent.turn.completed", "turn": {"id": "t1"}, "sequence_number": 3},
+            {"type": "agent.turn.created", "turn_id": "t2", "sequence_number": 4},
+        ]
+        fake_request, _ = self._fake(frames)
+        agent = Agent(name="tutor", client=ClientOptions(base_url="http://aria.test"))
+
+        async def main():
+            with mock.patch.object(transport, "_request", side_effect=fake_request):
+                streamed = await Runner.run_streamed(agent, "go", max_turns=1)
+                await streamed.completed
+
+        with self.assertRaises(AriaError) as ctx:
+            asyncio.run(main())
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.CONFIG)
+
+    def test_failed_frame_surfaces_typed_api_error(self):
+        frames = [{"type": "agent.turn.failed", "error": {"message": "boom"}}]
+        fake_request, _ = self._fake(frames)
+        agent = Agent(name="tutor", client=ClientOptions(base_url="http://aria.test"))
+
+        async def main():
+            with mock.patch.object(transport, "_request", side_effect=fake_request):
+                streamed = await Runner.run_streamed(agent, "go")
+                await streamed.completed
+
+        with self.assertRaises(AriaError) as ctx:
+            asyncio.run(main())
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.API)
+
+
+class TransportErrorTest(unittest.TestCase):
+    def test_maps_http_status_to_auth_or_api(self):
+        base = ClientOptions(base_url="http://aria.test", api_key="k")
+        for code, kind in ((401, AriaErrorKind.AUTH), (404, AriaErrorKind.API)):
+            err = urllib.error.HTTPError(
+                url="http://aria.test/x", code=code, msg="", hdrs=None, fp=None
+            )
+            with mock.patch.object(transport.urllib.request, "urlopen", side_effect=err):
+                with self.assertRaises(AriaError) as ctx:
+                    transport.post_json(base, "/x", {"a": 1})
+            self.assertEqual(ctx.exception.kind, kind)
+            self.assertEqual(ctx.exception.status, code)
+
+    def test_maps_url_error_to_network(self):
+        base = ClientOptions(base_url="http://aria.test", api_key="k")
+        err = urllib.error.URLError(reason="conn reset")
+        with mock.patch.object(transport.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(AriaError) as ctx:
+                transport.get_json(base, "/x")
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.NETWORK)
 
 
 class SessionMemoryTest(unittest.TestCase):

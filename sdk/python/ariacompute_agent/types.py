@@ -9,6 +9,7 @@ quickstart transfers unchanged: ``Agent``, ``Runner.run``,
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, AsyncIterator, Callable, Iterable, Optional, Sequence, Union
 
 Role = str
@@ -87,3 +88,31 @@ class StreamedRunResult:
 
     events: AsyncIterator[dict[str, Any]]
     completed: Any  # Awaitable[RunResult]
+
+
+class AriaErrorKind(str, Enum):
+    """Category of an :class:`AriaError`, so callers branch on ``kind`` rather than text."""
+
+    AUTH = "auth"
+    NETWORK = "network"
+    API = "api"
+    CONFIG = "config"
+    UNKNOWN = "unknown"
+
+
+class AriaError(Exception):
+    """Typed error surfaced by the SDK.
+
+    Every transport failure is normalized to an ``AriaError`` carrying a
+    :class:`AriaErrorKind` (and the HTTP ``status`` for ``api``/``auth`` errors).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        kind: AriaErrorKind = AriaErrorKind.UNKNOWN,
+        status: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
