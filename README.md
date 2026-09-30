@@ -32,7 +32,7 @@ submodule at `codex/`. The upstream `codex` workspace lives at `codex/codex-rs/`
 and has **no manifest at the repo root**, so a git dependency (`package =
 "codex-*"`) cannot resolve without a patch.
 
-`patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch` promotes the
+`patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch` promotes the
 `codex-rs` workspace definition up to the repo root (and prefixes internal
 `path` dependencies with `codex-rs/`). This is exactly what the
 `ariacompute/codex` fork (branch `main`) does. Apply it **inside the
@@ -43,7 +43,7 @@ and has **no manifest at the repo root**, so a git dependency (`package =
 git submodule update --init --depth 1 codex
 
 # 2. apply the root-workspace patch inside the submodule
-git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
+git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
 ```
 
 After this, `codex/Cargo.toml` exists at the repo root and cargo can resolve
@@ -64,7 +64,7 @@ git -C codex checkout -- . && git -C codex clean -fd
 ```bash
 # 1. codex submodule + root-workspace patch (see "codex submodule" above)
 git submodule update --init --depth 1 codex
-git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
+git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
 
 # 2. build everything
 cargo build --workspace

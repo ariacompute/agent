@@ -31,7 +31,7 @@
 Rust 工作区位于 `codex/codex-rs/`，**仓库根目录没有 `Cargo.toml`**，因此通过
 git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
 
-`patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch` 把
+`patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch` 把
 `codex-rs` 的工作区定义提升到仓库根目录（并把内部的 `path` 依赖统一加上
 `codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（branch `main`）
 所做的改动。在检出后，于 **`codex/` 子模块内部**应用该补丁：
@@ -41,7 +41,7 @@ git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
 git submodule update --init --depth 1 codex
 
 # 2. 在子模块内部应用根工作区补丁
-git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
+git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
 ```
 
 应用后，`codex/Cargo.toml` 会出现在仓库根目录，cargo 即可传递性地解析
@@ -61,7 +61,7 @@ git -C codex checkout -- . && git -C codex clean -fd
 ```bash
 # 1. codex 子模块 + 根工作区补丁（见上文「codex 子模块」）
 git submodule update --init --depth 1 codex
-git -C codex apply ../patch/0001-Make-codex-a-root-cargo-workspace-edition-2024.patch
+git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
 
 # 2. 构建
 cargo build --workspace
