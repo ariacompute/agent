@@ -12,11 +12,13 @@ uniffi::setup_scaffolding!();
 
 mod cloud_context;
 
+use agent_browser::{BrowserCatalog, BrowserSandbox, BrowserToolHandler};
 use agent_core::context::{
     CompositeContextStore, ContextFragment, ContextStore, FragmentKind, MemoryBackend,
 };
-use agent_core::{Agent, AgentConfig, AgentEvent, Tool};
+use agent_core::{Agent, AgentConfig, AgentEvent, Tool, ToolHandler};
 use agent_memo::MemoContextStore;
+use agent_sandbox::DockerSandbox;
 use futures::StreamExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -300,14 +302,35 @@ fn make_agent(
     let (context, local, cloud, backend) = build_stores(&memory)?;
     let cfg = AgentConfig {
         session: next_session(),
-        agent_name,
-        sandbox_provider,
-        model,
-        instructions,
+        agent_name: agent_name.clone(),
+        sandbox_provider: sandbox_provider.clone(),
+        model: model.clone(),
+        instructions: instructions.clone(),
     };
-    let agent = Agent::new(cfg, context.clone()).map_err(|e| SdkError::Core(e.to_string()))?;
+
+    // The browser sandbox is a tool-handler family (not a shell sandbox): when the
+    // caller selects `sandbox_provider: "browser"` we build a `BrowserSandbox`
+    // (which manages its own browser container) and inject it as a `ToolHandler`,
+    // while the agent's shell fallback stays on the regular Docker sandbox.
+    let inner: Arc<Agent> = if sandbox_provider.trim().eq_ignore_ascii_case("browser") {
+        let browser = Arc::new(BrowserSandbox::with_catalog(
+            Box::new(DockerSandbox::new()),
+            BrowserCatalog::builtin(),
+            BrowserCatalog::default_kind(),
+        ));
+        let handler: Arc<dyn ToolHandler> = Arc::new(BrowserToolHandler::new(browser.clone()));
+        let sandbox: Arc<dyn agent_sandbox::Sandbox> = Arc::new(DockerSandbox::new());
+        let model = agent_core::default_model(&cfg);
+        Arc::new(
+            Agent::with_handlers(cfg, model, context.clone(), sandbox, vec![handler])
+                .map_err(|e| SdkError::Core(e.to_string()))?,
+        )
+    } else {
+        Arc::new(Agent::new(cfg, context.clone()).map_err(|e| SdkError::Core(e.to_string()))?)
+    };
+
     Ok(Arc::new(SdkAgent {
-        inner: Arc::new(agent),
+        inner,
         context,
         local,
         cloud,
@@ -430,9 +453,11 @@ pub trait SdkAgentListener: Send + Sync {
 
 /// The frozen toolset exposed by the SDK runtime: a single `shell` exec tool
 /// whose `command` is a `[program, ...args]` array, matching the cloud's
-/// `agent_tools()`.
+/// `agent_tools()`. The browser tool family is appended (active only when the
+/// agent is created with `sandbox_provider: "browser"`). The FFI export surface
+/// is unchanged (ADR-0002): only this internal tool list grows.
 fn sdk_tools() -> Vec<Tool> {
-    vec![Tool {
+    let mut tools = vec![Tool {
         name: "shell".into(),
         description:
             "Execute a shell command given as a [program, ...args] array; runs in the configured sandbox."
@@ -448,7 +473,9 @@ fn sdk_tools() -> Vec<Tool> {
             },
             "required": ["command"],
         }),
-    }]
+    }];
+    tools.extend(agent_browser::browser_tools());
+    tools
 }
 
 /// Translate a core [`AgentEvent`] into the SDK event shape. Pure and free of
@@ -614,8 +641,25 @@ mod tests {
     #[test]
     fn sdk_tools_is_the_shell_exec_tool() {
         let tools = sdk_tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "shell");
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // `shell` remains first; the browser tool family is appended.
+        assert!(
+            names.len() >= 9,
+            "expected shell + 8 browser tools, got {names:?}"
+        );
+        assert_eq!(names[0], "shell");
+        for n in [
+            "browser_navigate",
+            "browser_extract",
+            "browser_click",
+            "browser_fill",
+            "browser_screenshot",
+            "browser_evaluate",
+            "browser_solve_captcha",
+            "browser_use",
+        ] {
+            assert!(names.contains(&n), "missing browser tool: {n}");
+        }
         assert!(tools[0].parameters.is_object());
     }
 }

@@ -186,9 +186,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aria-agent-browser"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-sandbox",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "aria-agent-cloud"
 version = "0.1.0"
 dependencies = [
+ "aria-agent-browser",
  "aria-agent-core",
  "aria-agent-sandbox",
  "async-stream",
@@ -293,8 +308,10 @@ dependencies = [
 name = "ariacompute-agent"
 version = "0.1.0"
 dependencies = [
+ "aria-agent-browser",
  "aria-agent-core",
  "aria-agent-memo",
+ "aria-agent-sandbox",
  "async-trait",
  "futures",
  "reqwest",

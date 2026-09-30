@@ -7,7 +7,9 @@ language (JS/Python) SDKs.
 ## Workspace layout
 
 * `crates/aria-agent-core`, `aria-agent-sandbox`, `aria-agent-memo` (aria memo),
-  `ariacompute-agent`, `aria-agent-cloud`, `aria-agent-ffigen`
+  `ariacompute-agent`, `aria-agent-cloud`, `aria-agent-ffigen`,
+  `aria-agent-browser` (browser sandbox: six-image `BrowserCatalog` +
+  `BrowserSandbox` + browser tool family)
 * `bindings/swift` (`Package.swift` SwiftPM + `AriaComputeAgent.podspec` CocoaPods),
   `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
   Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
@@ -43,8 +45,11 @@ language (JS/Python) SDKs.
    and registering them in `from_provider`. Docker is the default. The cloud
    selects the **codex** backend (`sandbox_provider = "codex"`), resolved by this
    runtime to `codex_sandbox::CodexSandbox` (ADR-0005); Docker/Kata/Cube remain
-   available through `from_provider`. See `docs/adr/0003-sandbox-providers.md`
-   and `docs/adr/0005-codex-integration.md`.
+   available through `from_provider`. The **browser** provider
+   (`sandbox_provider = "browser"`) is backed by `aria-agent-browser`'s
+   `BrowserSandbox`, which reuses the same Docker/Kata container path and
+   `SandboxResourceLimits`. See `docs/adr/0003-sandbox-providers.md`,
+   `docs/adr/0005-codex-integration.md`, and `docs/adr/0012-browser-sandbox.md`.
 4. **Submodule discipline.** Keep `codex` out of the workspace member list;
    reference codex crate shapes by design. See `docs/adr/0001-submodule-strategy.md`.
 5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key, raw user content,
@@ -87,6 +92,24 @@ language (JS/Python) SDKs.
 11. **Downstream migrations are follow-ups, not in-repo edits.** The playground,
     serve and cockpit adaptations are tracked in `docs/followups/*.md`; do not
     edit those repositories as part of an agent-repo change.
+12. **Browser sandbox (sandbox-embedded browser).** The `aria-agent-browser`
+    crate provides a pluggable `BrowserEngine` and a `BrowserSandbox` that
+    reuses the existing Docker/Kata container path and `SandboxResourceLimits`.
+    A `BrowserCatalog` registers six browser images — `servo`, `obscura`,
+    `chromium`, `gosub`, `camoufox`, `lightpanda` — each a separate sandbox
+    container image (Playwright-family Chromium/Camoufox/Lightpanda share a base
+    image + per-engine runner; Obscura is a Chromium stealth layer; Servo/Gosub
+    are minimal native-engine images). Images are overridable per kind via
+    `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`. The agent can **dynamically
+    select/switch** the active browser image at runtime (`sandbox_provider =
+    "browser"`, default kind `chromium`) and via the `browser_use` tool, which
+    tears down the current container and re-pulls the chosen image, rolling back
+    safely on failure (no panic / no dropped connection). Browser capabilities
+    (navigate / extract / click / fill / screenshot / evaluate / solve_captcha)
+    are exposed as a browser tool family routed through a `ToolHandler` before
+    the shell fallback; native engines (servo, gosub) gracefully degrade
+    unsupported ops to `BrowserError::Unsupported`. See
+    `docs/adr/0012-browser-sandbox.md`.
 
 ## SDK（js / python）
 

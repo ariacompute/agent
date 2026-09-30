@@ -379,7 +379,8 @@ pub trait ContextStore: Send + Sync {
 
     /// Bounded graph expansion from `query.seeds` across `query.views`. Returns
     /// the reached scored fragments plus an inspectable [`RetrieveTrace`].
-    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError>;
+    async fn expand(&self, query: &GraphRetrieveQuery)
+        -> Result<GraphRetrieveResult, ContextError>;
 }
 
 /// Embed a fragment's content when it carries no vector yet. Shared by every
@@ -718,8 +719,14 @@ impl ContextStore for CompositeContextStore {
         kind: Option<RelationKind>,
         top_k: usize,
     ) -> Result<Vec<Relation>, ContextError> {
-        let local = self.local.get_relations(session, from, to, kind, top_k).await;
-        let cloud = self.cloud.get_relations(session, from, to, kind, top_k).await;
+        let local = self
+            .local
+            .get_relations(session, from, to, kind, top_k)
+            .await;
+        let cloud = self
+            .cloud
+            .get_relations(session, from, to, kind, top_k)
+            .await;
         let (local, cloud) = match (local, cloud) {
             (Ok(l), Ok(c)) => (l, c),
             (Ok(l), Err(e)) => {
@@ -736,7 +743,12 @@ impl ContextStore for CompositeContextStore {
         let mut index: HashMap<(String, String, String, RelationKind), usize> = HashMap::new();
         let mut out: Vec<Relation> = Vec::new();
         for r in local.into_iter().chain(cloud) {
-            let key = (r.session.clone(), r.from_id.clone(), r.to_id.clone(), r.kind);
+            let key = (
+                r.session.clone(),
+                r.from_id.clone(),
+                r.to_id.clone(),
+                r.kind,
+            );
             match index.get(&key).copied() {
                 Some(i) if r.created_at > out[i].created_at => out[i] = r,
                 Some(_) => {}
@@ -776,7 +788,10 @@ impl ContextStore for CompositeContextStore {
         Ok(local + cloud)
     }
 
-    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+    async fn expand(
+        &self,
+        query: &GraphRetrieveQuery,
+    ) -> Result<GraphRetrieveResult, ContextError> {
         // Gather edges from both sides, merge by (session, from, to, kind) keeping
         // the freshest, then run a single bounded traversal.
         let all = self
@@ -877,7 +892,11 @@ impl RelationScorer for LocalRelationScorer {
             }
             RelationKind::Entity => token_jaccard(&a.content, &b.content),
             RelationKind::Causal => {
-                let adj = if a.created_at <= b.created_at { 0.5 } else { 0.0 };
+                let adj = if a.created_at <= b.created_at {
+                    0.5
+                } else {
+                    0.0
+                };
                 let overlap = token_jaccard(&a.content, &b.content);
                 (adj + 0.5 * overlap).min(1.0)
             }
@@ -912,7 +931,12 @@ impl ContextController {
 
     /// Convenience constructor with the offline default scorer and config.
     pub fn with_defaults(store: Arc<dyn ContextStore>, embedder: Arc<dyn embed::Embedder>) -> Self {
-        Self::new(store, embedder, Arc::new(LocalRelationScorer), RelationConfig::default())
+        Self::new(
+            store,
+            embedder,
+            Arc::new(LocalRelationScorer),
+            RelationConfig::default(),
+        )
     }
 
     /// Write→connect: after `frag` is persisted, pick bounded candidates and
@@ -1227,19 +1251,21 @@ impl ContextStore for MemoryContextStore {
         Ok(before - rels.len())
     }
 
-    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+    async fn expand(
+        &self,
+        query: &GraphRetrieveQuery,
+    ) -> Result<GraphRetrieveResult, ContextError> {
         query.validate()?;
-        let (rels_snapshot, frags_snapshot) = {
-            let rels = self
-                .relations
-                .read()
-                .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
-            let frags = self
-                .inner
-                .read()
-                .map_err(|e| ContextError::Storage(format!("memory store lock poisoned: {e}")))?;
-            (rels.clone(), frags.clone())
-        };
+        let (rels_snapshot, frags_snapshot) =
+            {
+                let rels = self.relations.read().map_err(|e| {
+                    ContextError::Storage(format!("memory store lock poisoned: {e}"))
+                })?;
+                let frags = self.inner.read().map_err(|e| {
+                    ContextError::Storage(format!("memory store lock poisoned: {e}"))
+                })?;
+                (rels.clone(), frags.clone())
+            };
         let mut edges: HashMap<String, Vec<(String, f32, RelationKind)>> = HashMap::new();
         for r in rels_snapshot.iter() {
             if r.session != query.session {
@@ -1848,17 +1874,31 @@ mod tests {
     async fn memory_store_relation_crud_and_expand() {
         let store = MemoryContextStore::new();
         store
-            .memorize(ContextFragment::new("s1", FragmentKind::LongTerm, "user likes rust programming"))
+            .memorize(ContextFragment::new(
+                "s1",
+                FragmentKind::LongTerm,
+                "user likes rust programming",
+            ))
             .await
             .unwrap();
         store
-            .memorize(ContextFragment::new("s1", FragmentKind::LongTerm, "rust is used for systems programming"))
+            .memorize(ContextFragment::new(
+                "s1",
+                FragmentKind::LongTerm,
+                "rust is used for systems programming",
+            ))
             .await
             .unwrap();
         // Capture the generated ids.
         let frags = store.list_session("s1", 10).await.unwrap();
-        let a = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
-        let b = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+        let a = frags
+            .iter()
+            .find(|f| f.content.contains("user likes"))
+            .unwrap();
+        let b = frags
+            .iter()
+            .find(|f| f.content.contains("rust is used"))
+            .unwrap();
 
         // Missing endpoint rejected.
         assert!(store
@@ -1913,7 +1953,11 @@ mod tests {
         assert_eq!(res.trace.hits, 2);
 
         // Wrong session returns nothing.
-        assert!(store.get_relations("other", None, None, None, 10).await.unwrap().is_empty());
+        assert!(store
+            .get_relations("other", None, None, None, 10)
+            .await
+            .unwrap()
+            .is_empty());
 
         // Delete by from.
         let removed = store
@@ -1931,8 +1975,16 @@ mod tests {
     #[tokio::test]
     async fn context_controller_write_connect_and_retrieve() {
         let store = MemoryContextStore::new();
-        let a = ContextFragment::new("s1", FragmentKind::LongTerm, "user likes rust programming language");
-        let b = ContextFragment::new("s1", FragmentKind::LongTerm, "user likes rust systems programming");
+        let a = ContextFragment::new(
+            "s1",
+            FragmentKind::LongTerm,
+            "user likes rust programming language",
+        );
+        let b = ContextFragment::new(
+            "s1",
+            FragmentKind::LongTerm,
+            "user likes rust systems programming",
+        );
         store.memorize(a.clone()).await.unwrap();
         store.memorize(b.clone()).await.unwrap();
 
@@ -1964,7 +2016,10 @@ mod tests {
             store.clone(),
             Arc::new(embed::LocalEmbedder::new(EMBED_DIM)),
         );
-        assert!(matches!(ctrl.connect(&ghost).await, Err(ContextError::NotFound(_))));
+        assert!(matches!(
+            ctrl.connect(&ghost).await,
+            Err(ContextError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
@@ -1975,11 +2030,19 @@ mod tests {
 
         // Store fragments through the composite so they exist on both sides.
         composite
-            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "alpha node"))
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::LongTerm,
+                "alpha node",
+            ))
             .await
             .unwrap();
         composite
-            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "beta node"))
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::LongTerm,
+                "beta node",
+            ))
             .await
             .unwrap();
         let frags = composite.list_session("s", 10).await.unwrap();
@@ -1999,11 +2062,28 @@ mod tests {
             .await
             .unwrap();
         // The edge must be visible from both sides (writes to both).
-        assert_eq!(local.get_relations("s", None, None, None, 10).await.unwrap().len(), 1);
-        assert_eq!(cloud.get_relations("s", None, None, None, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            local
+                .get_relations("s", None, None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            cloud
+                .get_relations("s", None, None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         // get_relations via composite returns a single merged edge.
-        let merged = composite.get_relations("s", None, None, None, 10).await.unwrap();
+        let merged = composite
+            .get_relations("s", None, None, None, 10)
+            .await
+            .unwrap();
         assert_eq!(merged.len(), 1);
 
         // expand across the composite reaches both nodes.
@@ -2041,7 +2121,10 @@ mod tests {
         // Self-loop rejected (NotFound, never a valid edge).
         let mut self_loop = ok.clone();
         self_loop.to_id = "a".into();
-        assert!(matches!(self_loop.validate(), Err(ContextError::NotFound(_))));
+        assert!(matches!(
+            self_loop.validate(),
+            Err(ContextError::NotFound(_))
+        ));
 
         // Score out of [0,1] rejected (Storage).
         let mut bad = ok.clone();

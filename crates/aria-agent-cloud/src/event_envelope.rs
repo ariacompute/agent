@@ -541,7 +541,9 @@ mod tests {
         // The streaming path calls `ensure_closed` (not `finish`) to terminate a
         // turn without `Done`, so the extra field must survive that path too.
         let mut env = envelope();
-        env.push(&AgentEvent::Token { text: "partial".into() });
+        env.push(&AgentEvent::Token {
+            text: "partial".into(),
+        });
         env.set_memory_relations(vec![serde_json::json!({
             "session": "sess-1",
             "from_id": "frag-a",
@@ -551,9 +553,7 @@ mod tests {
             "provenance": "rest",
         })]);
         let frames = env.ensure_closed();
-        let completed = frames
-            .last()
-            .expect("terminal completed frame present");
+        let completed = frames.last().expect("terminal completed frame present");
         assert_eq!(completed["type"], json!(event_type::TURN_COMPLETED));
         let rels = completed["memory_relations"]
             .as_array()

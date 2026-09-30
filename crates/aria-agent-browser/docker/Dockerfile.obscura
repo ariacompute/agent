@@ -1,0 +1,17 @@
+# Browser image for `obscura` — a stealth / anti-bot Chromium layer.
+#
+# Reuses the Playwright Chromium base and enables fingerprint-evasion launch
+# arguments inside runner.mjs (engine="obscura"). Optionally layer an external
+# stealth patch by setting STEALTH_PATCH_URL at build time.
+ARG PLAYWRIGHT_TAG=1.47.0
+FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_TAG}-noble
+
+WORKDIR /runner
+COPY runner.mjs /runner/runner.mjs
+
+ENV STEALTH_PATCH_URL=
+RUN if [ -n "$STEALTH_PATCH_URL" ]; then \
+      curl -fsSL "$STEALTH_PATCH_URL" -o /runner/stealth.js || true ; \
+    fi
+
+ENTRYPOINT ["sleep", "infinity"]

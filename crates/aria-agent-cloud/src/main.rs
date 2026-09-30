@@ -186,6 +186,7 @@ use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agent_browser::{BrowserCatalog, BrowserSandbox, BrowserToolHandler};
 use agent_core::{Agent, AgentConfig, CoreError, ModelClient, OpenAiModel, Tool};
 use agent_sandbox::{Sandbox, SandboxProvider};
 use async_trait::async_trait;
@@ -408,12 +409,14 @@ enum AppError {
 
 /// The frozen agentic toolset handed to every cloud run.
 ///
-/// A single `shell` exec tool whose `command` is a `[program, ...args]` array —
+/// A `shell` exec tool whose `command` is a `[program, ...args]` array —
 /// exactly the shape `Agent::run_event_stream` feeds to the sandbox. Execution
 /// is delegated to the codex sandbox backend (ADR-0005), which is selected via
-/// [`agent_config`].
+/// [`agent_config`]. The browser tool family is appended (no‑op unless the run
+/// selects `sandbox_provider: "browser"` and the runtime injects the
+/// `BrowserToolHandler`).
 fn agent_tools() -> Vec<Tool> {
-    vec![Tool {
+    let mut tools = vec![Tool {
         name: "shell".into(),
         description:
             "Execute a shell command inside the agent sandbox and return its combined output."
@@ -430,7 +433,9 @@ fn agent_tools() -> Vec<Tool> {
             "required": ["command"],
             "additionalProperties": false
         }),
-    }]
+    }];
+    tools.extend(agent_browser::browser_tools());
+    tools
 }
 
 /// Bearer / ApiKey auth gate.
@@ -575,21 +580,40 @@ async fn build_agent(
     );
     // Select the sandbox backend. `codex` is provided by this runtime
     // (publish = false); the published `agent-sandbox` returns `NotConfigured`
-    // for it, so we construct `CodexSandbox` directly and inject it.
+    // for it, so we construct `CodexSandbox` directly and inject it. `browser`
+    // is likewise resolved here: a `BrowserSandbox` (browser container manager +
+    // engine) is built and wrapped as a `BrowserToolHandler`, while the agent's
+    // regular shell sandbox stays the default Docker backend.
     let provider = SandboxProvider::parse(&cfg.sandbox_provider).ok_or_else(|| {
         AppError::Core(CoreError::Config(format!(
             "unknown sandbox: {}",
             cfg.sandbox_provider
         )))
     })?;
-    let sandbox: Arc<dyn Sandbox> = match provider {
-        SandboxProvider::Codex => Arc::new(codex_sandbox::CodexSandbox::new()),
-        other => Arc::from(
-            agent_sandbox::from_provider(other)
-                .map_err(|e| AppError::Core(CoreError::Config(e.to_string())))?,
-        ),
-    };
-    Agent::with_sandbox(cfg, (state.make_model)(), context, sandbox).map_err(AppError::Core)
+    let (sandbox, handlers): (Arc<dyn Sandbox>, Vec<Arc<dyn agent_core::ToolHandler>>) =
+        match provider {
+            SandboxProvider::Codex => (Arc::new(codex_sandbox::CodexSandbox::new()), Vec::new()),
+            SandboxProvider::Browser => {
+                let browser = Arc::new(BrowserSandbox::with_catalog(
+                    Box::new(agent_sandbox::DockerSandbox::new()),
+                    BrowserCatalog::builtin(),
+                    BrowserCatalog::default_kind(),
+                ));
+                let handler: Arc<dyn agent_core::ToolHandler> =
+                    Arc::new(BrowserToolHandler::new(browser.clone()));
+                // Shell fallback keeps using the default Docker sandbox.
+                (Arc::new(agent_sandbox::DockerSandbox::new()), vec![handler])
+            }
+            other => (
+                Arc::from(
+                    agent_sandbox::from_provider(other)
+                        .map_err(|e| AppError::Core(CoreError::Config(e.to_string())))?,
+                ),
+                Vec::new(),
+            ),
+        };
+    Agent::with_handlers(cfg, (state.make_model)(), context, sandbox, handlers)
+        .map_err(AppError::Core)
 }
 
 /// Wrap a translated frame stream into an SSE response.
@@ -1519,7 +1543,10 @@ mod tests {
         )
         .await
         .expect("delete relations");
-        assert!(deleted.deleted >= 1, "at least the explicit edge is removed");
+        assert!(
+            deleted.deleted >= 1,
+            "at least the explicit edge is removed"
+        );
 
         // Tenant isolation: tenant B's own session has no relations, and tenant
         // B cannot even resolve tenant A's session (principal_id scoping).

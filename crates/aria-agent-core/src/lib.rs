@@ -78,6 +78,22 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// Pluggable tool dispatch point.
+///
+/// Implementations decide whether they own a given tool `name` and, if so,
+/// execute it. The agentic loop consults handlers *before* falling back to the
+/// default shell sandbox execution ([`sandbox_exec`]), so new tool families
+/// (e.g. the browser) can be added without touching this crate's frozen event
+/// contract (AGENTS.md rule 9).
+#[async_trait]
+pub trait ToolHandler: Send + Sync {
+    /// Whether this handler owns the tool named `name`.
+    fn handles(&self, name: &str) -> bool;
+    /// Execute the tool and return its result. Implementations are responsible for
+    /// persisting the result to the context store when desired.
+    async fn run(&self, call: &ToolCall, ctx: &Arc<dyn ContextStore>, session: &str) -> ToolResult;
+}
+
 /// A model reply that may request one or more tool calls (agentic loop).
 #[derive(Debug, Clone, Default)]
 pub struct ModelTurn {
@@ -552,14 +568,34 @@ impl Default for AgentConfig {
     }
 }
 
+/// Construct the default model backend for `config`: the OpenAI model when the
+/// `openai` feature is enabled, otherwise the deterministic [`StubModel`]. Exposed
+/// so callers that build an [`Agent`] through [`Agent::with_handlers`] (which
+/// requires an explicit model) can share the same default-selection logic as
+/// [`Agent::new`].
+pub fn default_model(config: &AgentConfig) -> Box<dyn ModelClient> {
+    #[cfg(feature = "openai")]
+    {
+        Box::new(OpenAiModel::new(&config.model))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = &config.model;
+        Box::new(StubModel::new(&config.agent_name))
+    }
+}
+
 /// The unified agent. Holds the model client, context store and sandbox.
 ///
 /// The system prompt is static: the agent name plus optional `instructions`.
+/// `handlers` provides pluggable tool dispatch (see [`ToolHandler`]) consulted
+/// before the default shell sandbox execution.
 pub struct Agent {
     config: AgentConfig,
     model: Arc<dyn ModelClient>,
     context: Arc<dyn ContextStore>,
     sandbox: Arc<dyn Sandbox>,
+    handlers: Vec<Arc<dyn ToolHandler>>,
 }
 
 impl Agent {
@@ -577,6 +613,26 @@ impl Agent {
             model: Arc::from(model),
             context,
             sandbox,
+            handlers: Vec::new(),
+        })
+    }
+
+    /// Build with an explicit sandbox backend **and** a set of pluggable tool
+    /// handlers (e.g. the browser tool family). Handlers are consulted before the
+    /// default shell sandbox execution during the agentic loop.
+    pub fn with_handlers(
+        config: AgentConfig,
+        model: Box<dyn ModelClient>,
+        context: Arc<dyn ContextStore>,
+        sandbox: Arc<dyn Sandbox>,
+        handlers: Vec<Arc<dyn ToolHandler>>,
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
+            config,
+            model: Arc::from(model),
+            context,
+            sandbox,
+            handlers,
         })
     }
 
@@ -602,17 +658,7 @@ impl Agent {
 
     /// Build using the default model (stub unless `openai` feature is on).
     pub fn new(config: AgentConfig, context: Arc<dyn ContextStore>) -> Result<Self, CoreError> {
-        let model: Box<dyn ModelClient> = {
-            #[cfg(feature = "openai")]
-            {
-                Box::new(OpenAiModel::new(&config.model))
-            }
-            #[cfg(not(feature = "openai"))]
-            {
-                let _ = &config.model;
-                Box::new(StubModel::new(&config.agent_name))
-            }
-        };
+        let model = default_model(&config);
         Self::with_model(config, model, context)
     }
 
@@ -770,7 +816,14 @@ impl Agent {
     /// of strings); the result is persisted to memo as a `ToolResult` fragment
     /// so subsequent turns can recall it.
     pub async fn exec_tool_call(&self, call: &ToolCall) -> Result<ToolResult, CoreError> {
-        sandbox_exec(&self.sandbox, &self.context, &self.config.session, call).await
+        Ok(dispatch_tool(
+            &self.sandbox,
+            &self.handlers,
+            call,
+            &self.context,
+            &self.config.session,
+        )
+        .await)
     }
 
     /// Run an agentic turn as an event stream: recall memo context → call the
@@ -791,6 +844,7 @@ impl Agent {
         let memo = self.context.clone();
         let model = self.model.clone();
         let sandbox = self.sandbox.clone();
+        let handlers = self.handlers.clone();
         let system = self.system_text();
         let session = self.config.session.clone();
         let tools: Vec<Tool> = tools.to_vec();
@@ -867,14 +921,7 @@ impl Agent {
                         phase: "tool_exec".into(),
                         label: Some(call.name.clone()),
                     });
-                    let result = match sandbox_exec(&sandbox, &memo, &session, call).await {
-                        Ok(r) => r,
-                        Err(e) => ToolResult {
-                            call_id: call.id.clone(),
-                            content: e.to_string(),
-                            is_error: true,
-                        },
-                    };
+                    let result = dispatch_tool(&sandbox, &handlers, call, &memo, &session).await;
                     tool_log.push_str(&format!(
                         "\n\nTOOL_RESULT[{}]: {}",
                         call.name, result.content
@@ -953,6 +1000,32 @@ async fn sandbox_exec(
         content,
         is_error: false,
     })
+}
+
+/// Route a tool call to the first handler that claims it, falling back to the
+/// default shell sandbox execution ([`sandbox_exec`]). Errors from the fallback
+/// are encoded as an `is_error` [`ToolResult`] rather than propagated, so a bad
+/// tool call never aborts the agentic turn.
+async fn dispatch_tool(
+    sandbox: &Arc<dyn Sandbox>,
+    handlers: &[Arc<dyn ToolHandler>],
+    call: &ToolCall,
+    context: &Arc<dyn ContextStore>,
+    session: &str,
+) -> ToolResult {
+    for h in handlers {
+        if h.handles(&call.name) {
+            return h.run(call, context, session).await;
+        }
+    }
+    match sandbox_exec(sandbox, context, session, call).await {
+        Ok(r) => r,
+        Err(e) => ToolResult {
+            call_id: call.id.clone(),
+            content: e.to_string(),
+            is_error: true,
+        },
+    }
 }
 
 /// Convenience: an in-process context store for quick local use.
@@ -1330,8 +1403,11 @@ mod tests {
             name: "shell".into(),
             arguments: serde_json::json!({}),
         };
-        let res = agent.exec_tool_call(&call).await;
-        assert!(matches!(res, Err(CoreError::Model(_))));
+        // `dispatch_tool` surfaces a bad shell call as an error `ToolResult`
+        // (is_error=true) rather than aborting the turn.
+        let res = agent.exec_tool_call(&call).await.unwrap();
+        assert!(res.is_error);
+        assert!(res.content.contains("missing `command`"));
     }
 
     /// Returns a tool call on the first turn, then a final reply afterwards.

@@ -1,0 +1,16 @@
+# Browser image for `gosub` — the Rust browser engine (WIP).
+#
+# Like Servo, Gosub only supports navigate + extract via its headless CLI; the
+# runner returns `unsupported` for interactive ops. Pin a gosub revision or COPY
+# a prebuilt binary into PATH as `gosub`.
+FROM rust:1-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git cmake ninja-build python3 pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/gosub
+RUN echo "build gosub here or COPY a prebuilt gosub binary into PATH" > /opt/gosub/README
+
+COPY runner.mjs /runner/runner.mjs
+ENTRYPOINT ["sleep", "infinity"]

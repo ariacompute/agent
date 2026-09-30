@@ -10,7 +10,8 @@
 |------|------|
 | **codex submodule** | `openai/codex`，位于 `codex/`（harness、sandboxing、memories）。 |
 | **aria-agent-memo** | 端侧/嵌入式**上下文存储**（sled），实现 `aria-agent-core::context` 契约。 |
-| **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube。 |
+| **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube / Browser。 |
+| **aria-agent-browser** | 浏览器 sandbox：六镜像 `BrowserCatalog` + `BrowserSandbox`（复用 Docker/Kata）+ 浏览器工具族。 |
 | **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`，工具在 sandbox 中执行。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
 | **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
@@ -146,6 +147,7 @@ cp .env.example .env
 | `SANDBOX_MEMORY` | `512m` | 每个工具的 sandbox 内存上限，可读单位（`512m`、`1g` …）。作用于 Docker 与 Kata；Cube 为 best-effort。 |
 | `SANDBOX_PIDS_LIMIT` | `256` | sandbox 内最大进程数（pids cgroup）。作用于 Docker 与 Kata；Cube 为 best-effort。 |
 | `NGINX_PORT` | `80` | `nginx` 反向代理对外暴露的主机端口（转发到 `cloud:3000`）。 |
+| `ARIACOMPUTE_BROWSER_IMAGE_<KIND>` | _(未设置)_ | 浏览器 sandbox 按引擎的镜像覆盖；`<KIND>` ∈ `SERVO` / `OBSCURA` / `CHROMIUM` / `GOSUB` / `CAMOUFOX` / `LIGHTPANDA`（如 `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM=my/playwright:latest`）。缺省回退内置默认值。 |
 
 > `.env` 已被 git 忽略；`.env.example` 是提交到仓库的模板。Compose 会自动加载
 > `.env` 做变量替换，且 `cloud` 服务通过 `env_file` 直接读取它，因此容器进程能
@@ -234,6 +236,47 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | 卷 | 对应路径 | 用途 |
 |----|----------|------|
 | `pgdata` | Postgres（pgvector） | `agents` / `runs` 元数据 **与** `context_fragments`（上下文记忆）。 |
+
+## 浏览器 sandbox
+
+`aria-agent-browser` 把一台真实的、隔离的浏览器嵌入到 agent 运行时中。它与命令
+执行复用同一套 `Sandbox` trait 与 Docker/Kata 容器路径，因此每个浏览器容器同样
+受 `SANDBOX_CPUS`、`SANDBOX_MEMORY`、`SANDBOX_PIDS_LIMIT` 限制，并经由
+`DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 访问守护进程，与 shell 工具完全一致。
+
+`BrowserCatalog` 登记了 **六** 种浏览器镜像，每种各自作为一个独立的 sandbox 容器
+启动：
+
+| Kind | 引擎 | 说明 |
+|------|------|------|
+| `chromium` | Playwright + Chromium | 默认。完整自动化：navigate / extract / click / fill / screenshot / evaluate，并集成 `playwright-captcha` 处理验证码。 |
+| `camoufox` | Camoufox（基于 Firefox） | 反检测 / 反爬画像；Playwright 兼容。 |
+| `lightpanda` | Lightpanda | 面向 AI 的原生无头浏览器；轻量抽取。 |
+| `obscura` | Chromium 隐身层 | 在 Chromium 之上叠加指纹对抗 / 反机器人层（`obscura`）。 |
+| `servo` | Servo（Rust） | 原生引擎；仅 navigate + extract，其余操作降级为 `Unsupported`。 |
+| `gosub` | Gosub engine（Rust） | 原生引擎；仅 navigate + extract，其余操作降级为 `Unsupported`。 |
+
+用 `sandbox_provider = "browser"`（默认 kind `chromium`）开启。可在启动时选择
+引擎，**也可在运行时切换**——`browser_use` 工具会销毁当前容器、按 catalog 拉起新
+镜像；若镜像不可用则安全回退（不 panic、不掉线）：
+
+```json
+{ "name": "browser_use", "arguments": { "engine": "camoufox" } }
+```
+
+浏览器能力以工具族形式暴露，并优先经 `ToolHandler` 分派（未命中再回退 shell）：
+`browser_navigate`、`browser_extract`、`browser_click`、`browser_fill`、
+`browser_screenshot`、`browser_evaluate`、`browser_solve_captcha`，以及用于切换的
+`browser_use`。示例工具调用：
+
+```json
+{ "name": "browser_navigate", "arguments": { "url": "https://example.com" } }
+{ "name": "browser_extract",   "arguments": { "mode": "markdown" } }
+```
+
+镜像标签可按引擎经 `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`（如
+`ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`）覆盖，缺省回退内置默认值。详见
+`docs/adr/0012-browser-sandbox.md`。
 
 ## SDK 示例
 

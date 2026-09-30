@@ -374,10 +374,9 @@ impl ContextStore for CloudContextStore {
         items
             .into_iter()
             .map(|i| {
-                let kind: RelationKind = i
-                    .kind
-                    .parse()
-                    .map_err(|e: String| ContextError::Storage(format!("bad relation kind: {e}")))?;
+                let kind: RelationKind = i.kind.parse().map_err(|e: String| {
+                    ContextError::Storage(format!("bad relation kind: {e}"))
+                })?;
                 Ok(Relation {
                     session: i.session,
                     from_id: i.from_id,
@@ -439,7 +438,10 @@ impl ContextStore for CloudContextStore {
         Ok(parsed.deleted)
     }
 
-    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+    async fn expand(
+        &self,
+        query: &GraphRetrieveQuery,
+    ) -> Result<GraphRetrieveResult, ContextError> {
         let seeds = query
             .seeds
             .iter()

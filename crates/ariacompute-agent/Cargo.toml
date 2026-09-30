@@ -19,6 +19,8 @@ futures = "0.3"
 async-trait = "0.1"
 aria-agent-core = { workspace = true, features = ["openai"] }
 aria-agent-memo.workspace = true
+aria-agent-sandbox.workspace = true
+aria-agent-browser.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [features]

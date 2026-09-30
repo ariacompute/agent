@@ -1,0 +1,19 @@
+# Browser image for `servo` — the Rust browser engine (WIP).
+#
+# Servo's automation protocol is incomplete, so the runner only supports
+# navigate + extract (via the `servo` headless CLI) and returns `unsupported`
+# for interactive ops. Build the engine from source or pin a published binary.
+FROM rust:1-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git cmake ninja-build python3 pkg-config libfreetype6-dev \
+      libssl-dev libbz2-dev libx11-dev libxcb1-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/servo
+# Pin a servo revision (adjust as needed). Build is left to the CI that consumes
+# this image; the entrypoint keeps the container alive for the Rust sandbox.
+RUN echo "build servo here (./mach build --release) or COPY a prebuilt binary" > /opt/servo/README
+
+COPY runner.mjs /runner/runner.mjs
+ENTRYPOINT ["sleep", "infinity"]

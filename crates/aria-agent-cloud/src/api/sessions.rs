@@ -13,11 +13,11 @@ use std::sync::Arc;
 use crate::api::agents::{fetch_agent, new_id, now_ms};
 use crate::api::error_response;
 use crate::types::{
-    AgentSession, CreateRelationRequest, CreateSessionRequest, GraphRetrieveResponse,
-    ListResponse, MemoryItem, PutMemoryRequest, RelationDeleted, RelationGraphQuery,
-    RelationItem, RelationListParams, RetrieveTraceWire, ScoredMemoryItem, SessionAgent,
-    SessionDeleted, SessionInputEvent, SessionItem, SessionTurn, Subagent, UpdateSessionRequest,
-    ITEM_OBJECT, SESSION_OBJECT, SUBAGENT_OBJECT, TURN_OBJECT,
+    AgentSession, CreateRelationRequest, CreateSessionRequest, GraphRetrieveResponse, ListResponse,
+    MemoryItem, PutMemoryRequest, RelationDeleted, RelationGraphQuery, RelationItem,
+    RelationListParams, RetrieveTraceWire, ScoredMemoryItem, SessionAgent, SessionDeleted,
+    SessionInputEvent, SessionItem, SessionTurn, Subagent, UpdateSessionRequest, ITEM_OBJECT,
+    SESSION_OBJECT, SUBAGENT_OBJECT, TURN_OBJECT,
 };
 use crate::{agent_tools, AppError, AppState, Principal, PrincipalKind};
 use agent_core::context::embed::LocalEmbedder;
@@ -446,10 +446,8 @@ pub async fn put_session_memory(
 /// fragments (Jev-Mem write→connect). Errors are logged and swallowed so they
 /// never break the primary memory write.
 async fn relate_on_memorize<S: ContextStore + 'static>(store: &Arc<S>, frag: &ContextFragment) {
-    let ctrl = ContextController::with_defaults(
-        store.clone(),
-        Arc::new(LocalEmbedder::new(EMBED_DIM)),
-    );
+    let ctrl =
+        ContextController::with_defaults(store.clone(), Arc::new(LocalEmbedder::new(EMBED_DIM)));
     match ctrl.connect(frag).await {
         Ok(n) if n > 0 => {
             tracing::debug!("memory write→connect inferred {n} relation edge(s)");
@@ -566,7 +564,10 @@ pub async fn create_session_memory_relation(
     fetch_session(&state, &principal, &session_id).await?;
     let kind = parse_relation_kind(&body.kind)?;
     let score = body.score.unwrap_or(0.8);
-    let provenance = body.provenance.clone().unwrap_or_else(|| "rest".to_string());
+    let provenance = body
+        .provenance
+        .clone()
+        .unwrap_or_else(|| "rest".to_string());
     let rel = Relation {
         session: session_id.clone(),
         from_id: body.from_id.clone(),
@@ -715,7 +716,12 @@ pub async fn graph_session_memory_relations(
         })
         .collect();
     let trace = RetrieveTraceWire {
-        views: res.trace.views.iter().map(|v| v.as_str().to_string()).collect(),
+        views: res
+            .trace
+            .views
+            .iter()
+            .map(|v| v.as_str().to_string())
+            .collect(),
         budget: res.trace.budget,
         stop_reason: res.trace.stop_reason,
         hits: res.trace.hits,

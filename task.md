@@ -186,10 +186,51 @@ see `docs/followups/*` for the downstream cleanups.
 - [x] 文档同步：AGENTS.md 新增「SDK（js/python）」章节、requirements.md §3.1 行为
       契约、本里程碑条目。
 
+## Milestone 15 — Browser sandbox (six-image catalog + dynamic switching)
+- [x] `aria-agent-browser` (new workspace crate): `BrowserKind`
+      (`servo` / `obscura` / `chromium` / `gosub` / `camoufox` / `lightpanda`),
+      `BrowserCatalog` (six default images + `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`
+      overrides + default-engine fallback), `BrowserEngine` trait, op/response
+      protocol, graceful `Unsupported` degradation for native engines.
+- [x] `aria-agent-browser/src/sandbox.rs`: `BrowserSandbox` implements both
+      `Sandbox` and `BrowserEngine`; reuses the existing Docker/Kata bollard path
+      and `SandboxResourceLimits` (`build_host_config`); `switch_to(kind, image?)`
+      tears down the current container and re-pulls the chosen image with safe
+      rollback (no panic / no dropped connection, no daemon ⇒ not panicking).
+- [x] `aria-agent-browser/docker`: uniform `runner.mjs` driver across all six
+      engines + `Dockerfile.playwright` (Chromium / Camoufox / Lightpanda base),
+      `Dockerfile.obscura` (Chromium stealth layer), `Dockerfile.servo` /
+      `Dockerfile.gosub` (minimal native-engine images).
+- [x] `aria-agent-core`: new `ToolHandler` trait (`handles` + `run`) and
+      `Agent::with_handlers`; `run_event_stream` / `exec_tool_call` route a
+      `ToolCall` through registered handlers before falling back to the shell
+      `sandbox_exec`. Frozen `AgentEvent` streaming contract (rule 9) unchanged.
+- [x] `aria-agent-browser/src/tools.rs`: `browser_tools()` family
+      (`browser_navigate` / `browser_extract` / `browser_click` / `browser_fill`
+      / `browser_screenshot` / `browser_evaluate` / `browser_solve_captcha` /
+      `browser_use`) + `BrowserToolHandler`; `browser_use` drives
+      `BrowserSandbox::switch_to` for runtime engine switching.
+- [x] `aria-agent-sandbox`: `SandboxProvider::Browser` variant (parse / as_str),
+      `from_provider` returns `NotConfigured` (mirrors `Codex`, no heavy dep).
+- [x] `aria-agent-cloud`: `build_agent` special-cases `sandbox_provider =
+      "browser"` to inject `BrowserSandbox` as a `ToolHandler` while the shell
+      fallback stays on Docker; `agent_tools()` appends `browser_tools()`.
+- [x] `ariacompute-agent`: `sdk_tools()` appends `browser_tools()`; exported FFI
+      surface unchanged (no `just ffi` regeneration needed).
+- [x] `docs/adr/0012-browser-sandbox.md`: six-image catalog, container reuse,
+      dynamic selection/switching, graceful degradation decision.
+- [x] Tests: per-kind engine normal + abnormal paths (empty url / unreachable /
+      bad selector / screenshot timeout / switch failure → rollback), sandbox
+      no-daemon non-panic, `ToolHandler` routing, `browser_use` switch success +
+      safe fallback; `cargo test --workspace` green.
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.
+* Publish the six browser images and wire `runner.mjs` into the release pipeline
+  (currently image-build artifacts only; runtime orchestration is tested without
+  a daemon).
 * Downstream migrations (not in this repo): `docs/followups/playground-migration.md`,
   `docs/followups/serve-copy-migration.md`, `docs/followups/cockpit-client-migration.md`.

@@ -41,6 +41,9 @@ async-trait = "0.1"
 # unpublished git dependencies (crates.io requires every published dep to
 # resolve from the registry). See `codex_sandbox::CodexSandbox` in `src/main.rs`.
 aria-agent-sandbox.workspace = true
+# Browser capability: provides `BrowserSandbox` (sandbox + engine) and
+# `BrowserToolHandler`, injected by `build_agent` when `sandbox_provider=Browser`.
+aria-agent-browser.workspace = true
 
 # Deep codex integration (ADR-0005 §Decision): tool execution is delegated to
 # codex's real `SandboxManager` / `SandboxType` primitives. Pulled as a git

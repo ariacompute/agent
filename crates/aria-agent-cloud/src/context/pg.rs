@@ -400,7 +400,10 @@ impl ContextStore for PgContextStore {
         Ok(n as usize)
     }
 
-    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+    async fn expand(
+        &self,
+        query: &GraphRetrieveQuery,
+    ) -> Result<GraphRetrieveResult, ContextError> {
         query.validate()?;
         // Load all edges for the session/tenant into memory, then traverse.
         let rows = sqlx::query(
@@ -548,16 +551,30 @@ mod tests {
         let store = PgContextStore::new(pool, tenant);
 
         store
-            .memorize(ContextFragment::new(&session, FragmentKind::LongTerm, "user likes rust programming"))
+            .memorize(ContextFragment::new(
+                &session,
+                FragmentKind::LongTerm,
+                "user likes rust programming",
+            ))
             .await
             .unwrap();
         store
-            .memorize(ContextFragment::new(&session, FragmentKind::LongTerm, "rust is used for systems programming"))
+            .memorize(ContextFragment::new(
+                &session,
+                FragmentKind::LongTerm,
+                "rust is used for systems programming",
+            ))
             .await
             .unwrap();
         let frags = store.list_session(&session, 10).await.unwrap();
-        let a = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
-        let b = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+        let a = frags
+            .iter()
+            .find(|f| f.content.contains("user likes"))
+            .unwrap();
+        let b = frags
+            .iter()
+            .find(|f| f.content.contains("rust is used"))
+            .unwrap();
 
         // Missing endpoint rejected.
         assert!(store
@@ -656,7 +673,10 @@ mod tests {
             return;
         };
         let session = format!("s-{}", uuid::Uuid::new_v4());
-        let a = PgContextStore::new(pool.clone(), format!("rel-tenant-a-{}", uuid::Uuid::new_v4()));
+        let a = PgContextStore::new(
+            pool.clone(),
+            format!("rel-tenant-a-{}", uuid::Uuid::new_v4()),
+        );
         let b = PgContextStore::new(pool, format!("rel-tenant-b-{}", uuid::Uuid::new_v4()));
 
         a.memorize(ContextFragment::new(
@@ -674,8 +694,14 @@ mod tests {
         .await
         .unwrap();
         let frags = a.list_session(&session, 10).await.unwrap();
-        let fa = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
-        let fb = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+        let fa = frags
+            .iter()
+            .find(|f| f.content.contains("user likes"))
+            .unwrap();
+        let fb = frags
+            .iter()
+            .find(|f| f.content.contains("rust is used"))
+            .unwrap();
 
         // Tenant A relates fa -> fb.
         a.relate(Relation {

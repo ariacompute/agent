@@ -74,13 +74,29 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   覆盖正常 + 异常路径；不改 `event_envelope.rs`（冻结 SSE 契约），不引入 memo
   记忆内部实现。
 
-## 4. Pluggable Sandbox (docker / kata / cubesandbox / codex)
+## 4. Pluggable Sandbox (docker / kata / cubesandbox / codex / browser)
 * `Sandbox` trait (`spawn` / `exec` / `destroy`) with `ExecSpec` / `ExecOutput`
   mirroring codex's `sandboxing`.
 * Providers: `DockerSandbox` (default), `KataSandbox`, `CubeSandbox`;
   config-driven selection.
 * **`CodexSandbox`** is provided by the `aria-agent-cloud` runtime (ADR-0005) and
   is the backend the cloud selects for agentic tool execution.
+* **Browser sandbox** (`aria-agent-browser`): reuses the same Docker/Kata
+  container path and `SandboxResourceLimits` via a `BrowserSandbox` that
+  implements both `Sandbox` and `BrowserEngine`. A `BrowserCatalog` registers six
+  browser images — `servo`, `obscura`, `chromium`, `gosub`, `camoufox`,
+  `lightpanda` — each a separate sandbox container image: the Playwright family
+  (Chromium / Camoufox / Lightpanda) shares a base image plus a per-engine runner
+  (Chromium wires up `playwright-captcha`; Obscura is a Chromium stealth layer),
+  while Servo / Gosub are minimal native-engine images. Images are overridable by
+  `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`. The agent can **dynamically select /
+  switch** the active browser image at runtime via `sandbox_provider = "browser"`
+  (default kind `chromium`) and the `browser_use` tool (destroys the current
+  container, re-pulls the chosen image, safe rollback on failure). Browser
+  capabilities (navigate / extract / click / fill / screenshot / evaluate /
+  solve_captcha) are exposed as a browser tool family routed through a
+  `ToolHandler` before the shell fallback; native engines degrade unsupported ops
+  to `BrowserError::Unsupported` (ADR-0012).
 
 ## 5. Context memory (shared contract)
 * Contract in `aria-agent-core::context`: `ContextStore` (`memorize`, `recall`,

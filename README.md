@@ -11,7 +11,8 @@ SDK, and (c) **native SDKs for Swift / Kotlin**.
 |--------|------------|
 | **codex submodule** | `openai/codex` at `codex/` (harness, sandboxing, memories). |
 | **aria-agent-memo** | On-device / embedded **context store** (sled) implementing `aria-agent-core::context`. |
-| **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube. |
+| **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube / Browser. |
+| **aria-agent-browser** | Browser sandbox: six-image `BrowserCatalog` + `BrowserSandbox` (reuses Docker/Kata) + browser tool family. |
 | **aria-agent-core** | Unified agent runtime: `recall → model → memorize`, tools in a sandbox. |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent` / `SdkSession` / `create_agent`. |
 | **aria-agent-cloud** | axum service: Postgres + pgvector (metadata **and** context), OpenAI beta Agents API. `/v1/agents`, `/v1/agents/sessions`, SSE `/v1/agents/sessions/{id}/events/stream`. |
@@ -151,6 +152,7 @@ cp .env.example .env
 | `SANDBOX_MEMORY` | `512m` | Per-tool sandbox memory cap, human-readable units (`512m`, `1g`, …). Applied to Docker & Kata; best-effort for Cube. |
 | `SANDBOX_PIDS_LIMIT` | `256` | Max processes inside the sandbox (pids cgroup). Applied to Docker & Kata; best-effort for Cube. |
 | `NGINX_PORT` | `80` | Host port published by the `nginx` reverse proxy (forwards to `cloud:3000`). |
+| `ARIACOMPUTE_BROWSER_IMAGE_<KIND>` | _(unset)_ | Per-browser image override for the browser sandbox; `<KIND>` ∈ `SERVO` / `OBSCURA` / `CHROMIUM` / `GOSUB` / `CAMOUFOX` / `LIGHTPANDA` (e.g. `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM=my/playwright:latest`). Falls back to the built-in default. |
 
 > `.env` is git-ignored; `.env.example` is the committed template. Compose
 > auto-loads `.env` for variable substitution and the `cloud` service also reads
@@ -250,6 +252,49 @@ warning, so the service always boots.
 | Volume | Backed by | Purpose |
 |--------|-----------|---------|
 | `pgdata` | Postgres (pgvector) | `agents` / `runs` metadata **and** `context_fragments` (context memory). |
+
+## Browser sandbox
+
+`aria-agent-browser` embeds a real, sandboxed browser into the agent runtime. It
+reuses the same `Sandbox` trait and Docker/Kata container path as command
+execution, so every browser container is capped by `SANDBOX_CPUS`,
+`SANDBOX_MEMORY`, and `SANDBOX_PIDS_LIMIT` and reaches the daemon through
+`DOCKER_HOST` / `ARIA_DOCKER_SOCKET` exactly like a shell tool.
+
+A `BrowserCatalog` registers **six** browser images, each launched as its own
+sandbox container:
+
+| Kind | Engine | Notes |
+|------|--------|-------|
+| `chromium` | Playwright + Chromium | Default. Full automation: navigate / extract / click / fill / screenshot / evaluate, plus `playwright-captcha` for captcha handling. |
+| `camoufox` | Camoufox (Firefox-based) | Anti-detect / anti-bot profile; Playwright-compatible. |
+| `lightpanda` | Lightpanda | AI-native headless browser; lightweight extraction. |
+| `obscura` | Chromium stealth layer | Fingerprint / bot-mitigation layer over Chromium (`obscura`). |
+| `servo` | Servo (Rust) | Native engine; navigate + extract only, other ops degrade to `Unsupported`. |
+| `gosub` | Gosub engine (Rust) | Native engine; navigate + extract only, other ops degrade to `Unsupported`. |
+
+Enable it with `sandbox_provider = "browser"` (default kind `chromium`). Choose
+a different engine either at startup or **at runtime** — the `browser_use` tool
+tears down the current container and re-pulls the selected image, rolling back
+safely if the image is unavailable (no panic, no dropped connection):
+
+```json
+{ "name": "browser_use", "arguments": { "engine": "camoufox" } }
+```
+
+Browser capabilities are exposed as a tool family routed through a `ToolHandler`
+before the shell fallback: `browser_navigate`, `browser_extract`, `browser_click`,
+`browser_fill`, `browser_screenshot`, `browser_evaluate`, `browser_solve_captcha`,
+and `browser_use` (switch). Example tool calls:
+
+```json
+{ "name": "browser_navigate", "arguments": { "url": "https://example.com" } }
+{ "name": "browser_extract",   "arguments": { "mode": "markdown" } }
+```
+
+Image tags are overridable per engine via `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`
+(e.g. `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`), falling back to the built-in
+defaults. See `docs/adr/0012-browser-sandbox.md`.
 
 ## SDK examples
 

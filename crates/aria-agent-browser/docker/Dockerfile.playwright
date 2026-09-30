@@ -1,0 +1,28 @@
+# Browser image for the Playwright-based engines: chromium, camoufox, lightpanda.
+#
+# Build a specific engine variant with:
+#   docker build -f Dockerfile.playwright --build-arg ENGINE=chromium -t browser-playwright:chromium .
+#   docker build -f Dockerfile.playwright --build-arg ENGINE=camoufox   -t browser-playwright:camoufox .
+#   docker build -f Dockerfile.playwright --build-arg ENGINE=lightpanda -t browser-playwright:lightpanda .
+#
+# The runner is engine-agnostic; only the installed browser binaries differ.
+ARG PLAYWRIGHT_TAG=1.47.0
+FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_TAG}-noble
+ARG ENGINE=chromium
+
+WORKDIR /runner
+COPY runner.mjs /runner/runner.mjs
+
+# camoufox support (firefox-based anti-detect) — optional, falls back to firefox.
+RUN if [ "$ENGINE" = "camoufox" ]; then \
+      pip3 install --no-cache-dir camoufox && \
+      python3 -m camoufox install 2>/dev/null || true ; \
+    fi
+
+# lightpanda ships a binary; install it when building that variant.
+RUN if [ "$ENGINE" = "lightpanda" ]; then \
+      echo "set BROWSER_BIN to the lightpanda binary at runtime for direct use" ; \
+    fi
+
+# Keep the container alive so the Rust side can reuse it across tool calls.
+ENTRYPOINT ["sleep", "infinity"]

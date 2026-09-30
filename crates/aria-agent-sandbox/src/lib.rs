@@ -220,6 +220,12 @@ pub enum SandboxProvider {
     /// Deep codex integration: run tool commands through codex's `SandboxManager`
     /// (ADR-0005). This is the production backend for the agent runtime.
     Codex,
+    /// Browser sandbox: the agent's tool calls are served by an embedded browser
+    /// running in a dedicated container. The `BrowserSandbox` backend lives in the
+    /// `aria-agent-browser` crate (publish = false concerns aside, it is selected
+    /// by the cloud/FFI runtimes and injected via `Agent::with_handlers`), so
+    /// `from_provider` returns `NotConfigured` here — mirroring `Codex`.
+    Browser,
 }
 
 impl SandboxProvider {
@@ -229,6 +235,7 @@ impl SandboxProvider {
             "kata" => Some(SandboxProvider::Kata),
             "cube" => Some(SandboxProvider::Cube),
             "codex" => Some(SandboxProvider::Codex),
+            "browser" => Some(SandboxProvider::Browser),
             _ => None,
         }
     }
@@ -239,6 +246,7 @@ impl SandboxProvider {
             SandboxProvider::Kata => "kata",
             SandboxProvider::Cube => "cube",
             SandboxProvider::Codex => "codex",
+            SandboxProvider::Browser => "browser",
         }
     }
 }
@@ -746,6 +754,14 @@ pub fn from_provider(provider: SandboxProvider) -> Result<Box<dyn Sandbox>, Sand
         SandboxProvider::Codex => Err(SandboxError::NotConfigured(
             "codex sandbox backend is provided by the aria-agent-cloud runtime; \
              construct it there and inject via Agent::with_sandbox"
+                .into(),
+        )),
+        // The browser backend lives in the `aria-agent-browser` crate; the cloud/FFI
+        // runtimes construct `BrowserSandbox` and inject it as a `ToolHandler`
+        // (via `Agent::with_handlers`) alongside the regular shell sandbox.
+        SandboxProvider::Browser => Err(SandboxError::NotConfigured(
+            "browser sandbox backend is provided by the aria-agent-browser crate; \
+             construct it and inject via Agent::with_handlers"
                 .into(),
         )),
     }
