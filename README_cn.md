@@ -598,6 +598,7 @@ fun main() {
     // 3) 流式运行 —— 事件交给监听器处理
     agent.runStream("讲一个冷知识", Printer())
 }
+```
 
 #### 编译 Android AAR
 

@@ -628,6 +628,7 @@ fun main() {
     // 3) Streaming run — events are delivered to the listener.
     agent.runStream("Tell me something surprising", Printer())
 }
+```
 
 #### Building the Android AAR
 
