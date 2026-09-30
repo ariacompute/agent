@@ -22,8 +22,8 @@ use agent_core::context::{
     RetrieveTrace, ScoredFragment, EMBED_DIM,
 };
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -459,16 +459,17 @@ impl ContextStore for MemoContextStore {
         Ok(removed)
     }
 
-    async fn expand(&self, query: &GraphRetrieveQuery) -> Result<GraphRetrieveResult, ContextError> {
+    async fn expand(
+        &self,
+        query: &GraphRetrieveQuery,
+    ) -> Result<GraphRetrieveResult, ContextError> {
         query.validate()?;
         let conn = self
             .conn
             .lock()
             .map_err(|e| ContextError::Storage(format!("memo db lock poisoned: {e}")))?;
         let mut edges_stmt = conn
-            .prepare(
-                "SELECT from_id, to_id, kind, score FROM context_relations WHERE session = ?1",
-            )
+            .prepare("SELECT from_id, to_id, kind, score FROM context_relations WHERE session = ?1")
             .map_err(|e| ContextError::Storage(e.to_string()))?;
         let edges_iter = edges_stmt
             .query_map([query.session.clone()], |row| {
@@ -476,13 +477,13 @@ impl ContextStore for MemoContextStore {
                 let to_id: String = row.get(1)?;
                 let kind: String = row.get(2)?;
                 let score: f64 = row.get(3)?;
-                let kind = kind
-                    .parse::<RelationKind>()
-                    .map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(
+                let kind = kind.parse::<RelationKind>().map_err(|e: String| {
+                    rusqlite::Error::FromSqlConversionFailure(
                         2,
                         rusqlite::types::Type::Text,
                         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-                    ))?;
+                    )
+                })?;
                 Ok((from_id, to_id, kind, score as f32))
             })
             .map_err(|e| ContextError::Storage(e.to_string()))?;
@@ -504,10 +505,7 @@ impl ContextStore for MemoContextStore {
         let mut items: Vec<ScoredFragment> = Vec::new();
         for (id, score) in reached.into_iter().take(query.top_k) {
             if let Some(f) = self.get(&id)? {
-                items.push(ScoredFragment {
-                    fragment: f,
-                    score,
-                });
+                items.push(ScoredFragment { fragment: f, score });
             }
         }
         let trace = RetrieveTrace {
@@ -529,8 +527,13 @@ fn row_to_relation(row: &rusqlite::Row) -> rusqlite::Result<Relation> {
     let score: f64 = row.get(4)?;
     let provenance: String = row.get(5)?;
     let created_at: i64 = row.get(6)?;
-    let kind = RelationKind::from_str(&kind)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
+    let kind = RelationKind::from_str(&kind).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
     Ok(Relation {
         session,
         from_id,
@@ -714,16 +717,30 @@ mod tests {
     async fn relation_crud_and_expand_on_context_table() {
         let store = store();
         store
-            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "user likes rust programming"))
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::LongTerm,
+                "user likes rust programming",
+            ))
             .await
             .unwrap();
         store
-            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "rust is used for systems programming"))
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::LongTerm,
+                "rust is used for systems programming",
+            ))
             .await
             .unwrap();
         let frags = store.list_session("s", 10).await.unwrap();
-        let a = frags.iter().find(|f| f.content.contains("user likes")).unwrap();
-        let b = frags.iter().find(|f| f.content.contains("rust is used")).unwrap();
+        let a = frags
+            .iter()
+            .find(|f| f.content.contains("user likes"))
+            .unwrap();
+        let b = frags
+            .iter()
+            .find(|f| f.content.contains("rust is used"))
+            .unwrap();
 
         // Missing endpoint rejected.
         assert!(store
@@ -751,7 +768,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let rels = store.get_relations("s", Some(&a.id), None, None, 10).await.unwrap();
+        let rels = store
+            .get_relations("s", Some(&a.id), None, None, 10)
+            .await
+            .unwrap();
         assert_eq!(rels.len(), 1);
         assert_eq!(rels[0].to_id, b.id);
 
@@ -784,10 +804,7 @@ mod tests {
             .unwrap();
         assert_eq!(removed, 1);
         // Empty filter rejected.
-        assert!(store
-            .delete_relations("s", None, None, None)
-            .await
-            .is_err());
+        assert!(store.delete_relations("s", None, None, None).await.is_err());
     }
 
     /// Skip helper: the interop tests need the real `aria-memo` binary.
