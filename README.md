@@ -662,9 +662,18 @@ library AAR that bundles the native `libaria_agent_ffi.so` for `arm64-v8a` and
    ```
    (Regenerate the Kotlin bindings with `just ffi` only if the FFI surface
    changed.)
-3. Install Gradle 8.9+ (this project ships no Gradle wrapper, so `gradle` must
-   be on `PATH`). If `gradle: command not found`, install a recent release —
-   note the apt package is an old 4.x and **will not work**:
+3. Install a JDK 17 and Gradle 8.9+ (this project ships no Gradle wrapper, so
+   both `java` and `gradle` must be on `PATH`). If you see
+   `JAVA_HOME is not set and no 'java' command could be found`, install a JDK
+   and export `JAVA_HOME`:
+   ```bash
+   # Ubuntu/Debian: OpenJDK 17 (AGP 8.5 requires JDK 17)
+   sudo apt install openjdk-17-jdk
+   export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+   # persist it, e.g. add the export above to ~/.bashrc
+   ```
+   Then install Gradle 8.9+ — note the apt package is an old 4.x and **will not
+   work**:
    ```bash
    # Ubuntu/Debian: the snap channel ships a current 8.x (e.g. 8.14.4)
    sudo snap install gradle            # add --classic if confinement blocks it

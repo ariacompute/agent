@@ -628,9 +628,16 @@ fun main() {
       bindings/kotlin/agent-sdk/src/main/jniLibs/x86_64/
    ```
    （仅当 FFI 接口发生变化时，才需要用 `just ffi` 重新生成 Kotlin 绑定。）
-3. 安装 Gradle 8.9+（本项目不含 Gradle wrapper，因此 `gradle` 必须在 `PATH` 中）。
-   若提示 `gradle: command not found`，请安装较新版本——注意 apt 源中的版本是旧的
-   4.x，**无法使用**：
+3. 安装 JDK 17 与 Gradle 8.9+（本项目不含 Gradle wrapper，因此 `java` 与
+   `gradle` 都必须在 `PATH` 中）。若提示 `JAVA_HOME is not set and no 'java'
+   command could be found`，请安装 JDK 并导出 `JAVA_HOME`：
+   ```bash
+   # Ubuntu/Debian：OpenJDK 17（AGP 8.5 要求 JDK 17）
+   sudo apt install openjdk-17-jdk
+   export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+   # 持久化（例如将上述 export 写入 ~/.bashrc）
+   ```
+   随后安装 Gradle 8.9+——注意 apt 源中的版本是旧的 4.x，**无法使用**：
    ```bash
    # Ubuntu/Debian：snap 渠道提供较新的 8.x（如 8.14.4）
    sudo snap install gradle            # 若受 confinement 限制可加 --classic
