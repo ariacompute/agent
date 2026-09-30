@@ -9,7 +9,13 @@ plugins {
 }
 
 group = "com.ariacompute"
-version = System.getenv("ARIA_VERSION") ?: "0.1.0"
+// AAR version follows the agent release tag (e.g. v1.2.0 -> 1.2.0). Override with
+// ARIA_VERSION, otherwise derive it from `git describe --tags`.
+val agentTag = runCatching {
+    providers.exec { commandLine("git", "describe", "--tags", "--abbrev=0") }
+        .standardOutput.asText.get().trim()
+}.getOrElse { "" }
+version = System.getenv("ARIA_VERSION") ?: agentTag.removePrefix("v").ifBlank { "0.0.0-SNAPSHOT" }
 
 android {
     namespace = "com.ariacompute.agent"

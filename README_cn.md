@@ -1,5 +1,7 @@
 # agent
 
+[English](README.md) | [中文](README_cn.md)
+
 基于 OpenAI [`codex`](https://github.com/openai/codex) harness 构建的分层 agent
 平台，向上提供 (a) **Rust + 云端 API**（对应 **OpenAI beta Agents** 资源面）、
 (b) **JS / Python SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK**。
@@ -596,7 +598,45 @@ fun main() {
     // 3) 流式运行 —— 事件交给监听器处理
     agent.runStream("讲一个冷知识", Printer())
 }
-```
+
+#### 编译 Android AAR
+
+`bindings/kotlin/agent-sdk` 中的 Kotlin 绑定以 Android library AAR 形式发布，
+其中打包了 `arm64-v8a` 与 `x86_64` 两种 ABI 的原生库 `libaria_agent_ffi.so`。
+从源码编译步骤：
+
+1. 前置条件：Android SDK + NDK（设置 `ANDROID_NDK`），以及 Rust 的 Android 目标：
+   ```bash
+   rustup target add aarch64-linux-android x86_64-linux-android
+   ```
+   新增 `agent/.cargo/config.toml`，让这两个目标使用 NDK 的 clang 链接器（API 24），例如：
+   ```toml
+   [target.aarch64-linux-android]
+   linker = "aarch64-linux-android24-clang"
+   [target.x86_64-linux-android]
+   linker = "x86_64-linux-android24-clang"
+   ```
+   （构建时须将 NDK 的 `toolchains/llvm/prebuilt/linux-x86_64/bin` 加入 `PATH`。）
+2. 为每个 ABI 编译并放置原生 cdylib：
+   ```bash
+   cargo build -p ariacompute-agent --target aarch64-linux-android --release
+   cargo build -p ariacompute-agent --target x86_64-linux-android --release
+   cp target/aarch64-linux-android/release/libaria_agent_ffi.so \
+      bindings/kotlin/agent-sdk/src/main/jniLibs/arm64-v8a/
+   cp target/x86_64-linux-android/release/libaria_agent_ffi.so \
+      bindings/kotlin/agent-sdk/src/main/jniLibs/x86_64/
+   ```
+   （仅当 FFI 接口发生变化时，才需要用 `just ffi` 重新生成 Kotlin 绑定。）
+3. 构建 AAR（Gradle 8.9+）：
+   ```bash
+   cd bindings/kotlin/agent-sdk
+   gradle assembleRelease
+   ```
+   产物为 `bindings/kotlin/agent-sdk/build/outputs/aar/agent-sdk-release.aar`。
+   AAR 版本跟随 agent 的 git tag（如 `v1.2.0` → `1.2.0`），可用 `ARIA_VERSION`
+   环境变量覆盖。
+
+消费方可通过 `flatDir` 仓库或 Maven 仓库解析该 AAR（示例见 `cockpit/app` README）。
 
 ## OpenAI Agents API 兼容性
 

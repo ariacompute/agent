@@ -11,3 +11,7 @@
 node_modules/
 sdk/js/dist/
 benches/results/
+# Kotlin/Android SDK build artifacts
+bindings/kotlin/agent-sdk/.gradle/
+bindings/kotlin/agent-sdk/build/
+bindings/kotlin/agent-sdk/src/main/jniLibs/

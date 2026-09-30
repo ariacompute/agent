@@ -1,0 +1,8 @@
+# Android cross-compile linker config for the agent native SDK (UniFFI cdylib).
+# The NDK `toolchains/llvm/prebuilt/linux-x86_64/bin` directory must be on PATH
+# when building, so cargo can locate these clang wrappers.
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android24-clang"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android24-clang"

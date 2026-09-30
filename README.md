@@ -1,5 +1,7 @@
 # agent
 
+[English](README.md) | [中文](README_cn.md)
+
 A layered agent platform built on OpenAI's [`codex`](https://github.com/openai/codex)
 harness, exposing agents as (a) a **Rust + Cloud API** speaking the **OpenAI beta
 Agents** resource surface, (b) **JS / Python SDKs** mirroring the OpenAI Agents
@@ -626,7 +628,50 @@ fun main() {
     // 3) Streaming run — events are delivered to the listener.
     agent.runStream("Tell me something surprising", Printer())
 }
-```
+
+#### Building the Android AAR
+
+The Kotlin binding in `bindings/kotlin/agent-sdk` is published as an Android
+library AAR that bundles the native `libaria_agent_ffi.so` for `arm64-v8a` and
+`x86_64`. To build it from source:
+
+1. Prerequisites: the Android SDK + NDK (set `ANDROID_NDK`), plus the Rust
+   Android targets:
+   ```bash
+   rustup target add aarch64-linux-android x86_64-linux-android
+   ```
+   Add an `agent/.cargo/config.toml` that points those two targets at the NDK
+   clang linker (API 24), e.g.
+   ```toml
+   [target.aarch64-linux-android]
+   linker = "aarch64-linux-android24-clang"
+   [target.x86_64-linux-android]
+   linker = "x86_64-linux-android24-clang"
+   ```
+   (the NDK `toolchains/llvm/prebuilt/linux-x86_64/bin` dir must be on `PATH`
+   when building).
+2. Compile and stage the native cdylib for each ABI:
+   ```bash
+   cargo build -p ariacompute-agent --target aarch64-linux-android --release
+   cargo build -p ariacompute-agent --target x86_64-linux-android --release
+   cp target/aarch64-linux-android/release/libaria_agent_ffi.so \
+      bindings/kotlin/agent-sdk/src/main/jniLibs/arm64-v8a/
+   cp target/x86_64-linux-android/release/libaria_agent_ffi.so \
+      bindings/kotlin/agent-sdk/src/main/jniLibs/x86_64/
+   ```
+   (Regenerate the Kotlin bindings with `just ffi` only if the FFI surface
+   changed.)
+3. Assemble the AAR (Gradle 8.9+):
+   ```bash
+   cd bindings/kotlin/agent-sdk
+   gradle assembleRelease
+   ```
+   The output is `bindings/kotlin/agent-sdk/build/outputs/aar/agent-sdk-release.aar`.
+   The AAR version follows the agent git tag (e.g. `v1.2.0` → `1.2.0`); override
+   it with the `ARIA_VERSION` environment variable.
+
+Consumers resolve the AAR from a `flatDir` repo or a Maven repository (see the
+`cockpit/app` README for an example).
 
 ## OpenAI Agents API compatibility
 
