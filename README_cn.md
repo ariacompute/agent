@@ -628,7 +628,21 @@ fun main() {
       bindings/kotlin/agent-sdk/src/main/jniLibs/x86_64/
    ```
    （仅当 FFI 接口发生变化时，才需要用 `just ffi` 重新生成 Kotlin 绑定。）
-3. 构建 AAR（Gradle 8.9+）：
+3. 安装 Gradle 8.9+（本项目不含 Gradle wrapper，因此 `gradle` 必须在 `PATH` 中）。
+   若提示 `gradle: command not found`，请安装较新版本——注意 apt 源中的版本是旧的
+   4.x，**无法使用**：
+   ```bash
+   # Ubuntu/Debian：snap 渠道提供较新的 8.x（如 8.14.4）
+   sudo snap install gradle            # 若受 confinement 限制可加 --classic
+   # 备选 —— 官方压缩包（固定任意 8.9+ 版本）：
+   #   curl -L https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+   #   unzip /tmp/gradle.zip -d /opt && export PATH="/opt/gradle-8.9/bin:$PATH"
+   # 备选 —— SDKMAN：
+   #   sdk install gradle 8.9
+   ```
+   （**不要**执行 `sudo apt install gradle`，它提供的是 Gradle 4.4.1，对当前 AGP/Kotlin
+   插件版本而言过旧。）
+4. 构建 AAR：
    ```bash
    cd bindings/kotlin/agent-sdk
    gradle assembleRelease

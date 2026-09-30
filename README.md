@@ -662,7 +662,21 @@ library AAR that bundles the native `libaria_agent_ffi.so` for `arm64-v8a` and
    ```
    (Regenerate the Kotlin bindings with `just ffi` only if the FFI surface
    changed.)
-3. Assemble the AAR (Gradle 8.9+):
+3. Install Gradle 8.9+ (this project ships no Gradle wrapper, so `gradle` must
+   be on `PATH`). If `gradle: command not found`, install a recent release —
+   note the apt package is an old 4.x and **will not work**:
+   ```bash
+   # Ubuntu/Debian: the snap channel ships a current 8.x (e.g. 8.14.4)
+   sudo snap install gradle            # add --classic if confinement blocks it
+   # Alternative — official tarball (pin any 8.9+):
+   #   curl -L https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+   #   unzip /tmp/gradle.zip -d /opt && export PATH="/opt/gradle-8.9/bin:$PATH"
+   # Alternative — SDKMAN:
+   #   sdk install gradle 8.9
+   ```
+   (Do **not** run `sudo apt install gradle` — it provides Gradle 4.4.1, too old
+   for this project's AGP/Kotlin plugin versions.)
+4. Assemble the AAR:
    ```bash
    cd bindings/kotlin/agent-sdk
    gradle assembleRelease
