@@ -110,6 +110,20 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 * Covered by unit tests for normal paths (roundtrip, kind/session filtering,
   embedding population, semantic ranking, tenant isolation) and abnormal paths
   (empty query, missing session → `NotFound`, empty embedding text).
+* **Run-loop memo integration** (`aria-agent-core`): the agentic loop now goes
+  beyond `recall`/`memorize`. Each turn (a) supplements vector recall with bounded
+  graph `expand` from the recalled fragment seeds, (b) relates the turn's
+  user↔assistant fragments with `RelationKind::Temporal` edges, and (c) auto-`compact`s
+  the session once its fragment count exceeds `AgentConfig::memory_compact_threshold`.
+  A long-term-memory tool family — `memo_store` / `memo_get` / `memo_search` /
+  `memo_related` — is exposed via `MemoToolHandler` (a `ToolHandler` routed before
+  the shell fallback), so the model can actively read/write its own memory. Both the
+  graph and auto-compact are gated by `AgentConfig::memory_graph` (off by default in
+  core for hermetic tests; the SDK enables it, `memory_graph = true`,
+  `threshold = 32`). `aria-agent-core` keeps a hard dependency-inversion boundary: it
+  depends only on the `ContextStore` trait, never on `aria-agent-memo`, so the local
+  (aria memo / SQLite) and cloud (pgvector) backends stay interchangeable. See
+  `docs/adr/0013-agent-memo-integration.md`.
 
 ## 6. Release & publishing
 * On `release: created`, `.github/workflows/release.yml` builds/tests/packages

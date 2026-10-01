@@ -110,6 +110,19 @@ language (JS/Python) SDKs.
     the shell fallback; native engines (servo, gosub) gracefully degrade
     unsupported ops to `BrowserError::Unsupported`. See
     `docs/adr/0012-browser-sandbox.md`.
+13. **Memo is fully wired into the run loop.** The `aria-agent-memo` store is not
+    just a recall/memorize backend — the agent (a) supplements vector `recall`
+    with bounded graph `expand` (`RelationKind::Temporal` edges between each
+    turn's user↔assistant fragments), (b) auto-`compact`s a session once its
+    fragment count exceeds `AgentConfig::memory_compact_threshold`, and (c) exposes
+    a long-term-memory tool family `memo_store` / `memo_get` / `memo_search` /
+    `memo_related` via `MemoToolHandler` (a `ToolHandler` routed before the shell
+    fallback). The graph + auto-compact are gated by `AgentConfig::memory_graph`
+    (default **off** in `aria-agent-core` so its unit tests stay hermetic; the SDK
+    enables both, `memory_graph = true`, `threshold = 32`). `aria-agent-core` must
+    **not** depend on `aria-agent-memo` — it only depends on the `ContextStore`
+    trait, so local (SQLite) and cloud (pgvector) backends are interchangeable.
+    See `docs/adr/0013-agent-memo-integration.md`.
 
 ## SDK（js / python）
 

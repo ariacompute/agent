@@ -646,6 +646,10 @@ fn agent_config(name: &str, instructions: &str, session: &str) -> AgentConfig {
         // `agent_sandbox::from_provider` for non-tool (`/v1/sessions/:id/runs`) traffic.
         sandbox_provider: "codex".into(),
         model: DEFAULT_MODEL.into(),
+        // The cloud keeps the memory graph off by default (its `PgContextStore`
+        // supports it; enable per-deployment if desired). The SDK enables it.
+        memory_graph: false,
+        memory_compact_threshold: 0,
     }
 }
 

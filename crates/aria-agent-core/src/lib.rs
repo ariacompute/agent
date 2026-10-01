@@ -16,10 +16,15 @@
 //! `openai` feature to use the real OpenAI Responses/Chat API.
 
 pub mod context;
+pub mod tools;
+pub use tools::memo::{memo_tools, MemoToolHandler};
 
 use agent_sandbox::{default_sandbox, Sandbox, SandboxProvider};
 use async_trait::async_trait;
-use context::{ContextFragment, ContextStore, FragmentKind, RecallQuery};
+use context::{
+    now_ms, ContextFragment, ContextStore, FragmentKind, GraphRetrieveQuery, RecallQuery, Relation,
+    RelationKind,
+};
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -550,6 +555,14 @@ pub struct AgentConfig {
     /// Extra instructions appended to the static system prompt.
     #[serde(default)]
     pub instructions: String,
+    /// Build the multi-relational memory graph (relate/expand) in the run loop.
+    /// Off by default so core's own tests stay hermetic; the SDK enables it.
+    #[serde(default)]
+    pub memory_graph: bool,
+    /// Auto-compact a session once its fragment count exceeds this threshold
+    /// (0 = disabled). Only meaningful when `memory_graph` is also enabled.
+    #[serde(default)]
+    pub memory_compact_threshold: usize,
 }
 
 impl Default for AgentConfig {
@@ -564,6 +577,8 @@ impl Default for AgentConfig {
             // with a local `Sandbox` too.
             sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
+            memory_graph: false,
+            memory_compact_threshold: 0,
         }
     }
 }
@@ -682,29 +697,59 @@ impl Agent {
         self.context.clone()
     }
 
+    /// Supplement vector recall with bounded graph expansion from `seeds`.
+    /// Returns fragments not already present in `fragments`. No-op when the
+    /// memory graph is disabled or there are no seeds, so the frozen recall
+    /// contract is unchanged by default.
+    async fn graph_expand(&self, seeds: Vec<String>, top_k: usize) -> Vec<ContextFragment> {
+        if !self.config.memory_graph || seeds.is_empty() {
+            return Vec::new();
+        }
+        match self
+            .context
+            .expand(&GraphRetrieveQuery {
+                session: self.config.session.clone(),
+                seeds,
+                views: Vec::new(),
+                budget: 32,
+                max_hops: 2,
+                top_k,
+            })
+            .await
+        {
+            Ok(res) => res.items.into_iter().map(|s| s.fragment).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Run one turn. Injects recalled context, calls the model, persists both turns.
     pub async fn run(&self, input: &str) -> Result<String, CoreError> {
-        // 1) recall context from memo (the ONLY context source)
-        let fragments = self
+        let session = self.config.session.clone();
+        // 1) recall context from memo (+ optional graph expansion).
+        let mut fragments = self
             .context
-            .recall(&RecallQuery::new(&self.config.session, input))
+            .recall(&RecallQuery::new(&session, input))
             .await?;
+        let extra = self
+            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
+            .await;
+        for f in extra {
+            if !fragments.iter().any(|x| x.id == f.id) {
+                fragments.push(f);
+            }
+        }
         let context = fragments
             .iter()
             .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
             .collect::<Vec<_>>()
             .join("\n");
 
-        // 2) persist the user turn
-        self.context
-            .memorize(ContextFragment::new(
-                &self.config.session,
-                FragmentKind::Message,
-                input,
-            ))
-            .await?;
+        // 2) persist the user turn.
+        let user = ContextFragment::new(&session, FragmentKind::Message, input);
+        let user_id = user.id.clone();
+        self.context.memorize(user).await?;
 
-        // 3) call the model
+        // 3) call the model.
         let system = self.system_text();
         let req = ModelRequest {
             system,
@@ -713,14 +758,24 @@ impl Agent {
         };
         let resp = self.model.complete(&req).await?;
 
-        // 4) persist the assistant reply
-        self.context
-            .memorize(ContextFragment::new(
-                &self.config.session,
-                FragmentKind::Message,
-                resp.text.clone(),
-            ))
-            .await?;
+        // 4) persist the assistant reply (+ graph edge + maybe compact).
+        let asst = ContextFragment::new(&session, FragmentKind::Message, resp.text.clone());
+        let asst_id = asst.id.clone();
+        self.context.memorize(asst).await?;
+        graph_relate_store(
+            &self.context,
+            &session,
+            &user_id,
+            &asst_id,
+            RelationKind::Temporal,
+        )
+        .await;
+        maybe_compact_store(
+            &self.context,
+            &session,
+            self.config.memory_compact_threshold,
+        )
+        .await;
 
         Ok(resp.text)
     }
@@ -753,25 +808,30 @@ impl Agent {
         &self,
         input: &str,
     ) -> Result<BoxStream<'static, Result<String, CoreError>>, CoreError> {
-        // 1) recall context from memo (the ONLY context source)
-        let fragments = self
+        let session = self.config.session.clone();
+        // 1) recall context from memo (+ optional graph expansion).
+        let mut fragments = self
             .context
-            .recall(&RecallQuery::new(&self.config.session, input))
+            .recall(&RecallQuery::new(&session, input))
             .await?;
+        let extra = self
+            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
+            .await;
+        for f in extra {
+            if !fragments.iter().any(|x| x.id == f.id) {
+                fragments.push(f);
+            }
+        }
         let context = fragments
             .iter()
             .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
             .collect::<Vec<_>>()
             .join("\n");
 
-        // 2) persist the user turn
-        self.context
-            .memorize(ContextFragment::new(
-                &self.config.session,
-                FragmentKind::Message,
-                input,
-            ))
-            .await?;
+        // 2) persist the user turn.
+        let user = ContextFragment::new(&session, FragmentKind::Message, input);
+        let user_id = user.id.clone();
+        self.context.memorize(user).await?;
 
         // 3) call the model (streaming). The returned stream is owned / 'static.
         let system = self.system_text();
@@ -782,9 +842,11 @@ impl Agent {
         };
         let upstream = self.model.stream(&req).await?;
 
-        // 4) wrap so we can collect + persist the assistant reply at the end.
+        // 4) wrap so we can collect + persist the assistant reply (and graph it).
         let memo = self.context.clone();
-        let session = self.config.session.clone();
+        let graph_enabled = self.config.memory_graph;
+        let threshold = self.config.memory_compact_threshold;
+        let session_for_relate = session.clone();
         let wrapped = async_stream::stream! {
             let mut collected = String::new();
             let mut upstream = upstream;
@@ -800,10 +862,14 @@ impl Agent {
                     }
                 }
             }
-            // persist the assistant reply as a single memo fragment
-            let _ = memo
-                .memorize(ContextFragment::new(&session, FragmentKind::Message, collected))
-                .await;
+            // persist the assistant reply as a single memo fragment.
+            let asst = ContextFragment::new(&session_for_relate, FragmentKind::Message, collected.clone());
+            let asst_id = asst.id.clone();
+            let _ = memo.memorize(asst).await;
+            if graph_enabled {
+                graph_relate_store(&memo, &session_for_relate, &user_id, &asst_id, RelationKind::Temporal).await;
+                maybe_compact_store(&memo, &session_for_relate, threshold).await;
+            }
         };
         Ok(Box::pin(wrapped))
     }
@@ -849,21 +915,28 @@ impl Agent {
         let session = self.config.session.clone();
         let tools: Vec<Tool> = tools.to_vec();
         let input = input.to_string();
+        let graph_enabled = self.config.memory_graph;
+        let threshold = self.config.memory_compact_threshold;
 
-        // 1) recall context from memo (the ONLY context source).
-        let fragments = memo.recall(&RecallQuery::new(&session, &input)).await?;
+        // 1) recall context from memo (+ optional graph expansion).
+        let mut fragments = memo.recall(&RecallQuery::new(&session, &input)).await?;
+        let extra = self
+            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
+            .await;
+        for f in extra {
+            if !fragments.iter().any(|x| x.id == f.id) {
+                fragments.push(f);
+            }
+        }
         let initial_context = fragments
             .iter()
             .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
             .collect::<Vec<_>>()
             .join("\n");
         // 2) persist the user turn.
-        memo.memorize(ContextFragment::new(
-            &session,
-            FragmentKind::Message,
-            input.clone(),
-        ))
-        .await?;
+        let user = ContextFragment::new(&session, FragmentKind::Message, input.clone());
+        let user_id = user.id.clone();
+        memo.memorize(user).await?;
 
         let wrapped = async_stream::stream! {
             yield Ok(AgentEvent::Step { phase: "recall".into(), label: None });
@@ -904,13 +977,24 @@ impl Agent {
                 if turn.tool_calls.is_empty() {
                     // 3) final reply: stream the token then terminate.
                     yield Ok(AgentEvent::Token { text: turn.text.clone() });
-                    let _ = memo
-                        .memorize(ContextFragment::new(
+                    let asst = ContextFragment::new(
+                        &session,
+                        FragmentKind::Message,
+                        turn.text.clone(),
+                    );
+                    let asst_id = asst.id.clone();
+                    let _ = memo.memorize(asst).await;
+                    if graph_enabled {
+                        graph_relate_store(
+                            &memo,
                             &session,
-                            FragmentKind::Message,
-                            turn.text.clone(),
-                        ))
+                            &user_id,
+                            &asst_id,
+                            RelationKind::Temporal,
+                        )
                         .await;
+                        maybe_compact_store(&memo, &session, threshold).await;
+                    }
                     yield Ok(AgentEvent::Done { text: turn.text });
                     break;
                 }
@@ -1036,6 +1120,40 @@ pub fn in_memory_context() -> Arc<dyn ContextStore> {
 /// Re-export the default sandbox constructor for callers that don't need config.
 pub fn default_sandbox_box() -> Box<dyn Sandbox> {
     default_sandbox()
+}
+
+/// Persist a temporal edge between two fragments when the memory graph is on.
+/// Any error (missing endpoint, unsupported backend) is silently ignored so it
+/// never breaks the agentic turn.
+async fn graph_relate_store(
+    context: &Arc<dyn ContextStore>,
+    session: &str,
+    from_id: &str,
+    to_id: &str,
+    kind: RelationKind,
+) {
+    let rel = Relation {
+        session: session.to_string(),
+        from_id: from_id.to_string(),
+        to_id: to_id.to_string(),
+        kind,
+        score: 1.0,
+        provenance: "core:turn".into(),
+        created_at: now_ms(),
+    };
+    let _ = context.relate(rel).await;
+}
+
+/// Compact a session once its fragment count exceeds `threshold` (0 = disabled).
+async fn maybe_compact_store(context: &Arc<dyn ContextStore>, session: &str, threshold: usize) {
+    if threshold == 0 {
+        return;
+    }
+    if let Ok(frags) = context.list_session(session, usize::MAX).await {
+        if frags.len() > threshold {
+            let _ = context.compact(session).await;
+        }
+    }
 }
 
 #[cfg(test)]

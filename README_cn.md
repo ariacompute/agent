@@ -11,7 +11,7 @@
 | 模块 | 说明 |
 |------|------|
 | **codex submodule** | `openai/codex`，位于 `codex/`（harness、sandboxing、memories）。 |
-| **aria-agent-memo** | 端侧/嵌入式**上下文存储**（sled），实现 `aria-agent-core::context` 契约。 |
+| **aria-agent-memo** | 端侧/嵌入式**上下文存储**（aria memo / SQLite，与 `aria-memo` CLI 同款 `memories` 表结构），实现 `aria-agent-core::context` 契约。 |
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube / Browser。 |
 | **aria-agent-browser** | 浏览器 sandbox：六镜像 `BrowserCatalog` + `BrowserSandbox`（复用 Docker/Kata）+ 浏览器工具族。 |
 | **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`，工具在 sandbox 中执行。 |
@@ -279,6 +279,30 @@ echo "DOCKER_GID set to $DOCKER_GID"
 镜像标签可按引擎经 `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`（如
 `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`）覆盖，缺省回退内置默认值。详见
 `docs/adr/0012-browser-sandbox.md`。
+
+## 记忆图与 memo 工具族
+
+agent 不只是读/写 `aria-agent-memo` 存储——它会在**运行过程中主动管理自己的记忆**：
+
+* **记忆图（memory graph）。** 每一轮在向量 `recall` 之外，用受界的图 `expand`
+  （以召回片段为种子）补充上下文，并把该轮 user↔assistant 片段用 `Temporal`
+  关系相连；后续轮次可沿对话图检索上下文，而不仅依赖嵌入相似度。
+* **自动压缩（auto-compact）。** 当某会话片段数超过配置阈值（SDK 默认 `32`）时，
+  运行循环将其 `compact` 为单条笔记（幂等——多次压缩复用同一笔记 id，历史有界）。
+* **memo 工具族。** 模型可调用四个长期记忆工具，经 `ToolHandler` 在 shell 回退之前
+  分派：
+
+  | 工具 | 用途 |
+  |------|------|
+  | `memo_store` | 按 key 持久化一条长期记忆（如用户偏好）。 |
+  | `memo_get` | 按 key 读回一条长期记忆。 |
+  | `memo_search` | 对会话记忆做语义（向量）检索。 |
+  | `memo_related` | 检视记忆图：列出 `from`/`to`/`kind`/`score` 各边。 |
+
+记忆图与自动压缩都由 `AgentConfig::memory_graph` 控制（在 `aria-agent-core` 中默认
+关闭以保证其单测封闭；SDK 默认开启）。`aria-agent-core` 只依赖 `ContextStore` trait、
+绝不依赖 `aria-agent-memo`，因此本地（aria memo / SQLite）与云端（pgvector）后端可互换。
+详见 `docs/adr/0013-agent-memo-integration.md`。
 
 ## SDK 示例
 

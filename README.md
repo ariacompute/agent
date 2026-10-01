@@ -12,7 +12,7 @@ SDK, and (c) **native SDKs for Swift / Kotlin**.
 | Module | What it is |
 |--------|------------|
 | **codex submodule** | `openai/codex` at `codex/` (harness, sandboxing, memories). |
-| **aria-agent-memo** | On-device / embedded **context store** (sled) implementing `aria-agent-core::context`. |
+| **aria-agent-memo** | On-device / embedded **context store** (aria memo / SQLite, the same `memories` schema as the `aria-memo` CLI) implementing `aria-agent-core::context`. |
 | **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube / Browser. |
 | **aria-agent-browser** | Browser sandbox: six-image `BrowserCatalog` + `BrowserSandbox` (reuses Docker/Kata) + browser tool family. |
 | **aria-agent-core** | Unified agent runtime: `recall → model → memorize`, tools in a sandbox. |
@@ -297,6 +297,35 @@ and `browser_use` (switch). Example tool calls:
 Image tags are overridable per engine via `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`
 (e.g. `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`), falling back to the built-in
 defaults. See `docs/adr/0012-browser-sandbox.md`.
+
+## Memory graph & memo tools
+
+The agent doesn't just read/write the `aria-agent-memo` store — it **actively
+manages its own memory** during a run:
+
+* **Memory graph.** On every turn the run loop supplements vector `recall` with a
+  bounded graph `expand` (seeded from the recalled fragments) and links the turn's
+  user↔assistant fragments with a `Temporal` relation, so later turns retrieve
+  context along the conversation graph, not just by embedding similarity.
+* **Auto-compact.** When a session's fragment count exceeds the configured
+  threshold (default `32` in the SDK) the run loop `compact`s it into a single
+  note (idempotent — repeated compactions reuse the same note id, so history stays
+  bounded).
+* **Memo tool family.** The model can call four long-term-memory tools, routed
+  through a `ToolHandler` before the shell fallback:
+
+  | Tool | Purpose |
+  |------|---------|
+  | `memo_store` | Persist a keyed long-term memory (e.g. a user preference). |
+  | `memo_get` | Read a long-term memory back by key. |
+  | `memo_search` | Semantic (vector) search over the session's memory. |
+  | `memo_related` | Inspect the memory graph: list the `from`/`to`/`kind`/`score` edges. |
+
+Both the memory graph and auto-compact are gated by `AgentConfig::memory_graph`
+(off by default in `aria-agent-core` so its unit tests stay hermetic; the SDK
+enables it). `aria-agent-core` depends only on the `ContextStore` trait — never on
+`aria-agent-memo` — so the local (aria memo / SQLite) and cloud (pgvector)
+backends are interchangeable. See `docs/adr/0013-agent-memo-integration.md`.
 
 ## SDK examples
 

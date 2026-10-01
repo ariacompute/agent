@@ -224,6 +224,33 @@ see `docs/followups/*` for the downstream cleanups.
       no-daemon non-panic, `ToolHandler` routing, `browser_use` switch success +
       safe fallback; `cargo test --workspace` green.
 
+## Milestone 16 — agent × memo full integration
+- [x] `aria-agent-core/src/lib.rs`: `AgentConfig` gains `memory_graph: bool`
+      (default false) + `memory_compact_threshold: usize` (default 0); `run` /
+      `run_stream` / `run_event_stream` supplement vector `recall` with bounded
+      `expand` (graph), relate each turn's user↔assistant with `RelationKind::
+      Temporal`, and `compact` once the session exceeds the threshold. Graph/compact
+      calls are best-effort (`let _ =` / `if let Ok`) so a backend without graph
+      support degrades silently.
+- [x] `aria-agent-core/src/tools/memo.rs`: `memo_tools()` (`memo_store` / `memo_get`
+      / `memo_search` / `memo_related`) + `MemoToolHandler` (`ToolHandler`); tool
+      results persisted as `ToolResult`. Re-exported at crate root.
+- [x] `aria-agent-core/src/context/mod.rs` + `aria-agent-memo/src/lib.rs`:
+      `compact` reuses the existing `__compact__{session}` note id (idempotent), so
+      repeated compactions overwrite instead of accumulating.
+- [x] `ariacompute-agent/src/lib.rs`: `make_agent` always builds via
+      `Agent::with_handlers`, injecting `MemoToolHandler` (and `BrowserToolHandler`
+      for `sandbox_provider = "browser"`); sets `memory_graph = true`,
+      `threshold = 32`; `sdk_tools()` appends `memo_tools()`. FFI export unchanged.
+- [x] `aria-agent-cloud/src/main.rs`: keep `memory_graph = false` (PgContextStore
+      supports it; enable per-deployment).
+- [x] `docs/adr/0013-agent-memo-integration.md`: graph memory + default backend +
+      tool family decision.
+- [x] Tests: `ariacompute-agent` end-to-end with a real `MemoContextStore` —
+      cross-turn recall, memory-graph edges, memo tools persist/query, idempotent
+      compaction; plus `sdk_tools()` asserts 4 memo tools. `cargo test --workspace`
+      green; `cargo fmt` + `clippy` clean.
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.

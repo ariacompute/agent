@@ -16,7 +16,7 @@ use agent_browser::{BrowserCatalog, BrowserSandbox, BrowserToolHandler};
 use agent_core::context::{
     CompositeContextStore, ContextFragment, ContextStore, FragmentKind, MemoryBackend,
 };
-use agent_core::{Agent, AgentConfig, AgentEvent, Tool, ToolHandler};
+use agent_core::{memo_tools, Agent, AgentConfig, AgentEvent, MemoToolHandler, Tool, ToolHandler};
 use agent_memo::MemoContextStore;
 use agent_sandbox::DockerSandbox;
 use futures::StreamExt;
@@ -300,34 +300,40 @@ fn make_agent(
     memory: SdkMemoryConfig,
 ) -> Result<Arc<SdkAgent>, SdkError> {
     let (context, local, cloud, backend) = build_stores(&memory)?;
+
+    // The memory graph + auto-compact are the SDK's default (full integration);
+    // core leaves them off so its own unit tests stay hermetic.
     let cfg = AgentConfig {
         session: next_session(),
         agent_name: agent_name.clone(),
         sandbox_provider: sandbox_provider.clone(),
         model: model.clone(),
         instructions: instructions.clone(),
+        memory_graph: true,
+        memory_compact_threshold: 32,
     };
 
-    // The browser sandbox is a tool-handler family (not a shell sandbox): when the
-    // caller selects `sandbox_provider: "browser"` we build a `BrowserSandbox`
-    // (which manages its own browser container) and inject it as a `ToolHandler`,
+    // Always wire the long-term-memory tool family as a `ToolHandler` so the agent
+    // can actively read/write its own memory during a run. The `browser` sandbox is
+    // an additional tool-handler family (not a shell sandbox): when selected we
+    // build a `BrowserSandbox` (managing its own container) and inject it too,
     // while the agent's shell fallback stays on the regular Docker sandbox.
-    let inner: Arc<Agent> = if sandbox_provider.trim().eq_ignore_ascii_case("browser") {
+    let mut handlers: Vec<Arc<dyn ToolHandler>> =
+        vec![Arc::new(MemoToolHandler::new(context.clone()))];
+    if sandbox_provider.trim().eq_ignore_ascii_case("browser") {
         let browser = Arc::new(BrowserSandbox::with_catalog(
             Box::new(DockerSandbox::new()),
             BrowserCatalog::builtin(),
             BrowserCatalog::default_kind(),
         ));
-        let handler: Arc<dyn ToolHandler> = Arc::new(BrowserToolHandler::new(browser.clone()));
-        let sandbox: Arc<dyn agent_sandbox::Sandbox> = Arc::new(DockerSandbox::new());
-        let model = agent_core::default_model(&cfg);
-        Arc::new(
-            Agent::with_handlers(cfg, model, context.clone(), sandbox, vec![handler])
-                .map_err(|e| SdkError::Core(e.to_string()))?,
-        )
-    } else {
-        Arc::new(Agent::new(cfg, context.clone()).map_err(|e| SdkError::Core(e.to_string()))?)
-    };
+        handlers.push(Arc::new(BrowserToolHandler::new(browser.clone())));
+    }
+    let sandbox: Arc<dyn agent_sandbox::Sandbox> = Arc::new(DockerSandbox::new());
+    let model = agent_core::default_model(&cfg);
+    let inner: Arc<Agent> = Arc::new(
+        Agent::with_handlers(cfg, model, context.clone(), sandbox, handlers)
+            .map_err(|e| SdkError::Core(e.to_string()))?,
+    );
 
     Ok(Arc::new(SdkAgent {
         inner,
@@ -475,6 +481,7 @@ fn sdk_tools() -> Vec<Tool> {
         }),
     }];
     tools.extend(agent_browser::browser_tools());
+    tools.extend(memo_tools());
     tools
 }
 
@@ -642,10 +649,10 @@ mod tests {
     fn sdk_tools_is_the_shell_exec_tool() {
         let tools = sdk_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        // `shell` remains first; the browser tool family is appended.
+        // `shell` remains first; the browser and memory tool families are appended.
         assert!(
-            names.len() >= 9,
-            "expected shell + 8 browser tools, got {names:?}"
+            names.len() >= 13,
+            "expected shell + 8 browser + 4 memo tools, got {names:?}"
         );
         assert_eq!(names[0], "shell");
         for n in [
@@ -660,6 +667,132 @@ mod tests {
         ] {
             assert!(names.contains(&n), "missing browser tool: {n}");
         }
+        for n in ["memo_store", "memo_get", "memo_search", "memo_related"] {
+            assert!(names.contains(&n), "missing memo tool: {n}");
+        }
         assert!(tools[0].parameters.is_object());
+    }
+}
+
+/// End-to-end integration for the memo integration: a real `MemoContextStore`
+/// (aria memo, SQLite) backs the agent, which must (a) recall across turns,
+/// (b) build memory-graph edges between turns, and (c) compact without unbounded
+/// growth. Mirrors the SDK's default config (`memory_graph = true`, threshold 32).
+#[cfg(test)]
+mod memo_integration_tests {
+    use agent_core::context::{ContextStore, RecallQuery};
+    use agent_core::{
+        Agent as CoreAgent, AgentConfig as CoreAgentConfig, MemoToolHandler, ModelClient,
+        StubModel, ToolCall, ToolHandler,
+    };
+    use agent_memo::MemoContextStore;
+    use agent_sandbox::DockerSandbox;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn make_agent(
+        session: &str,
+        graph: bool,
+        threshold: usize,
+    ) -> (Arc<CoreAgent>, Arc<MemoContextStore>) {
+        let memo = MemoContextStore::memory().unwrap();
+        let cfg = CoreAgentConfig {
+            session: session.to_string(),
+            memory_graph: graph,
+            memory_compact_threshold: threshold,
+            ..Default::default()
+        };
+        let sandbox = Arc::new(DockerSandbox::new());
+        let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
+        let handler: Arc<dyn ToolHandler> = Arc::new(MemoToolHandler::new(memo.clone()));
+        let agent = Arc::new(
+            CoreAgent::with_handlers(cfg, model, memo.clone(), sandbox, vec![handler]).unwrap(),
+        );
+        (agent, memo)
+    }
+
+    #[tokio::test]
+    async fn cross_turn_recall_and_graph_edges() {
+        let (agent, memo) = make_agent("memo-int", true, 1000);
+
+        // First turn plants a fact; second turn should recall it via vector recall
+        // (and the graph expansion seeded from the recalled fragment).
+        let _ = agent.run("remember: the sky is blue").await.unwrap();
+        let _ = agent.run("what color is the sky?").await.unwrap();
+
+        let frags = memo
+            .recall(&RecallQuery::new("memo-int", "sky blue"))
+            .await
+            .unwrap();
+        assert!(
+            frags.iter().any(|f| f.content.contains("sky is blue")),
+            "expected cross-turn recall of the planted fact"
+        );
+
+        // The run loop must have related the user turn to the assistant turn.
+        let rels = memo
+            .get_relations("memo-int", None, None, None, 50)
+            .await
+            .unwrap();
+        assert!(!rels.is_empty(), "expected memory-graph edges after turns");
+    }
+
+    #[tokio::test]
+    async fn memo_tools_persist_then_query() {
+        let memo = MemoContextStore::memory().unwrap();
+        let handler = MemoToolHandler::new(memo.clone());
+
+        let store = handler
+            .run(
+                &ToolCall {
+                    id: "1".into(),
+                    name: "memo_store".into(),
+                    arguments: json!({ "key": "pref", "value": "likes rust" }),
+                },
+                &(memo.clone() as Arc<dyn ContextStore>),
+                "s",
+            )
+            .await;
+        assert!(!store.is_error, "memo_store failed: {}", store.content);
+
+        let got = handler
+            .run(
+                &ToolCall {
+                    id: "2".into(),
+                    name: "memo_get".into(),
+                    arguments: json!({ "key": "pref" }),
+                },
+                &(memo.clone() as Arc<dyn ContextStore>),
+                "s",
+            )
+            .await;
+        assert!(got.content.contains("likes rust"), "got: {}", got.content);
+    }
+
+    #[tokio::test]
+    async fn compact_is_idempotent_and_bounded() {
+        let (agent, memo) = make_agent("memo-compact", true, 4);
+
+        for i in 0..5 {
+            let _ = agent.run(&format!("turn {i}")).await.unwrap();
+        }
+
+        // The compaction note is idempotent: repeated triggers reuse the same id
+        // instead of accumulating a new note each turn.
+        let compact = memo
+            .get_by_key("memo-compact", "__compact__memo-compact")
+            .await
+            .unwrap();
+        assert!(
+            compact.is_some(),
+            "expected a single idempotent compaction note"
+        );
+
+        let all = memo.list_session("memo-compact", usize::MAX).await.unwrap();
+        let notes = all
+            .iter()
+            .filter(|f| f.key.as_deref() == Some("__compact__memo-compact"))
+            .count();
+        assert_eq!(notes, 1, "compaction note must be idempotent (got {notes})");
     }
 }

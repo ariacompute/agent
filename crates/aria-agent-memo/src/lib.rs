@@ -299,8 +299,15 @@ impl ContextStore for MemoContextStore {
         if parts.is_empty() {
             return Err(ContextError::NotFound(session.to_string()));
         }
-        let merged = ContextFragment::new(session, FragmentKind::Note, parts.join("\n---\n"))
-            .with_key(format!("__compact__{session}"));
+        // Reuse the existing compaction note's id so repeated compactions
+        // overwrite rather than accumulate, keeping history bounded.
+        let key = format!("__compact__{session}");
+        let existing_id = self.get_by_key(session, &key).await?.map(|f| f.id);
+        let mut merged =
+            ContextFragment::new(session, FragmentKind::Note, parts.join("\n---\n")).with_key(key);
+        if let Some(id) = existing_id {
+            merged.id = id;
+        }
         self.memorize(merged.clone()).await?;
         Ok(merged)
     }
