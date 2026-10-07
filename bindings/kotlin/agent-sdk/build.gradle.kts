@@ -21,6 +21,25 @@ android {
     namespace = "com.ariacompute.agent"
     compileSdk = 34
 
+    // Point AGP at the NDK so the release `strip` task can locate the per-ABI
+    // `strip` tool (without this it warns "Unable to strip ... libaria_agent_ffi.so"
+    // and packages the unstripped .so). Resolved from ANDROID_NDK / ANDROID_NDK_HOME.
+    val ndkHome = System.getenv("ANDROID_NDK") ?: System.getenv("ANDROID_NDK_HOME")
+    if (ndkHome != null) {
+        ndkPath = ndkHome
+        // Derive the NDK revision from its source.properties so ndkVersion matches
+        // ndkPath. A mismatch (e.g. default 26.x vs installed 27.x) triggers CXX1100
+        // and disables the `strip` task, shipping unstripped native libs.
+        val rev = runCatching {
+            File(ndkHome, "source.properties").readLines()
+                .firstOrNull { it.startsWith("Pkg.Revision") }
+                ?.substringAfter('=')?.trim()
+        }.getOrNull()
+        if (rev != null) {
+            ndkVersion = rev
+        }
+    }
+
     defaultConfig {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
@@ -53,7 +72,7 @@ dependencies {
     // UniFFI Kotlin bindings are JNA-based: the generated aria_agent_ffi.kt
     // references com.sun.jna.* (Structure/Pointer/Library/Native/Cleaner...).
     // Use the AAR so libjnidispatch.so for the configured ABIs is bundled.
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("net.java.dev.jna:jna:5.16.0@aar")
 }
 
 mavenPublishing {
