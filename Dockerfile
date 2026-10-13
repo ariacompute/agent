@@ -46,7 +46,7 @@
 
 
 # ---- Build stage ----
-FROM rust:1-slim AS builder
+FROM rust:1-bookworm AS builder
 
 # Outbound network proxy so cargo/git can reach GitHub to fetch the
 # `ariacompute/codex` fork (the `codex-protocol` / `codex-sandboxing` git deps).
