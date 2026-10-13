@@ -160,7 +160,44 @@ cp .env.example .env
 > auto-loads `.env` for variable substitution and the `cloud` service also reads
 > it via `env_file`, so the container process receives every variable directly.
 
-### 2. Run
+### 2. Build
+
+The `cloud` service uses the `aria-agent-cloud` image. You can build it either
+manually or let compose build it for you — both paths produce the same image.
+
+**Method A — manual build, then `up` (reuses the pre-built image):**
+
+```bash
+docker build \
+  --network=host \
+  --build-arg BUILD_PROXY=http://127.0.0.1:7897 \
+  --build-arg DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) \
+  -f Dockerfile -t aria-agent-cloud .
+docker compose up
+```
+
+**Method B — one-shot compose build + run:**
+
+```bash
+export BUILD_PROXY=http://127.0.0.1:7897   # optional; unset = direct internet
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+docker compose up --build
+```
+
+Build-time args (all optional):
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `BUILD_PROXY` | _(empty)_ | HTTP(S) proxy for `apt`/`cargo`/`git` **during the build**. Empty ⇒ direct internet. Use `--network=host` (or the compose `build.network: host`) so the build container's `127.0.0.1` reaches a host-side proxy (e.g. Clash on `127.0.0.1:7897`). |
+| `DOCKER_GID` | `998` | GID of the host `docker` group owning `/var/run/docker.sock`; the non-root `aria` user joins this group so the mounted socket is reachable. |
+| `APT_MIRROR` | `mirrors.aliyun.com` | apt archive mirror *host* (e.g. `mirrors.tuna.tsinghua.edu.cn`, `mirrors.ustc.edu.cn`). |
+
+> `network: host` for the build is a **Linux** requirement to reach a
+> `127.0.0.1` proxy. On Docker Desktop (Mac/Windows) build host networking is
+> unsupported — listen the proxy on `0.0.0.0`, or drop `network: host` and pass
+> the proxy as a routable host address instead.
+
+### 3. Run
 
 ```bash
 docker compose up --build
@@ -179,7 +216,7 @@ init scripts are needed. The API is then reachable through **either** endpoint:
 A `GET /healthz` endpoint (served by nginx itself) can be used for liveness
 checks.
 
-### 3. Context storage (PostgreSQL + pgvector)
+### 4. Context storage (PostgreSQL + pgvector)
 
 Conversational / long-term context lives in Postgres (`context_fragments`,
 `vector(256)` with an HNSW cosine index), sharded per principal. The compose
@@ -190,7 +227,7 @@ extension is unavailable (no silent keyword-only fallback).
 The on-device SDK keeps its own embedded sled store
 (`aria-agent-memo`) and is not affected by this requirement.
 
-### 4. Sandbox via the Docker socket
+### 5. Sandbox via the Docker socket
 
 When an agent invokes a tool that needs isolation, the cloud service spawns a
 short-lived container through the Docker **Engine API** (the default
@@ -249,7 +286,7 @@ runs under the `kata` runtime. The **Cube** provider maps them to best-effort
 deployed Cube runtime. Invalid values fall back to the defaults and log a
 warning, so the service always boots.
 
-### Volumes
+### 6. Volumes
 
 | Volume | Backed by | Purpose |
 |--------|-----------|---------|

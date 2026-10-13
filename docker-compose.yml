@@ -17,7 +17,27 @@
 # the `cloud` service also reads it via `env_file` so the container process gets
 # every variable directly.
 #
-# Run:  docker compose up --build
+# Build & run — two equivalent flows (the `cloud` service keeps `image:
+# aria-agent-cloud`, so both share the same image name):
+#
+#   A) Build manually, then `up` (reuses the pre-built image):
+#        docker build --network=host \
+#          --build-arg BUILD_PROXY=http://127.0.0.1:7897 \
+#          --build-arg DOCKER_GID=998 \
+#          -f Dockerfile -t aria-agent-cloud .
+#        docker compose up
+#
+#   B) Let compose build + run in one shot:
+#        export BUILD_PROXY=http://127.0.0.1:7897   # optional; empty = direct
+#        export DOCKER_GID=998
+#        docker compose up --build
+#
+# `BUILD_PROXY` / `DOCKER_GID` are passed as build args (see the `cloud` service
+# `build:` block) and may come from the shell environment or the `.env` file.
+# `BUILD_PROXY` is empty by default => the build uses a direct internet
+# connection. `network: host` (Linux only) lets the build container reach a
+# host-side proxy on 127.0.0.1.
+#
 # Then (pick one entrypoint):
 #   * Direct:        POST http://localhost:3000/v1/agents  (CLOUD_PORT)
 #   * Via nginx:     POST http://localhost:80/v1/agents     (NGINX_PORT)
@@ -42,14 +62,20 @@ services:
     restart: unless-stopped
 
   cloud:
+    image: aria-agent-cloud
+    # Build the image with the same args as a manual `docker build`. `network:
+    # host` lets the build container reach a host-side proxy on 127.0.0.1 (e.g.
+    # Clash on 127.0.0.1:7897); `BUILD_PROXY` (via env / .env) is empty => direct
+    # internet. Keeping `image:` means `docker compose up` (no --build) reuses a
+    # pre-built `aria-agent-cloud` image, while `docker compose up --build`
+    # rebuilds it. On Mac/Windows Docker Desktop, build host networking is
+    # unsupported — instead listen the proxy on 0.0.0.0 or drop `network: host`.
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
       args:
-        # GID of the host `docker` group that owns /var/run/docker.sock. The
-        # runtime image creates a group with this GID and adds the non-root
-        # `aria` user to it so the socket is reachable without running as root.
-        # Check on the host: `stat -c '%g' /var/run/docker.sock` (often 998/999).
+        BUILD_PROXY: ${BUILD_PROXY:-}
         DOCKER_GID: ${DOCKER_GID:-998}
     depends_on:
       postgres:

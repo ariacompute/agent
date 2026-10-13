@@ -155,7 +155,43 @@ cp .env.example .env
 > `.env` 做变量替换，且 `cloud` 服务通过 `env_file` 直接读取它，因此容器进程能
 > 拿到每一个变量。
 
-### 2. 运行
+### 2. 构建
+
+`cloud` 服务使用 `aria-agent-cloud` 镜像。你可以手动构建，也可以让 compose 帮你
+构建——两种方式生成的是同一个镜像。
+
+**方式 A — 手动构建，再 `up`（复用已构建镜像）：**
+
+```bash
+docker build \
+  --network=host \
+  --build-arg BUILD_PROXY=http://127.0.0.1:7897 \
+  --build-arg DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) \
+  -f Dockerfile -t aria-agent-cloud .
+docker compose up
+```
+
+**方式 B — 一条命令由 compose 构建并运行：**
+
+```bash
+export BUILD_PROXY=http://127.0.0.1:7897   # 可选；不设置则直连公网
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+docker compose up --build
+```
+
+构建参数（均为可选）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `BUILD_PROXY` | _(空)_ | 构建期内 `apt`/`cargo`/`git` 使用的 HTTP(S) 代理。留空 ⇒ 直连公网。配合 `--network=host`（或 compose 的 `build.network: host`），使构建容器内 `127.0.0.1` 即宿主机侧代理（如 `127.0.0.1:7897` 的 Clash）。 |
+| `DOCKER_GID` | `998` | 拥有 `/var/run/docker.sock` 的宿主机 `docker` 组 GID；非 root 的 `aria` 用户加入该组后即可访问挂载的 socket。 |
+| `APT_MIRROR` | `mirrors.aliyun.com` | apt 镜像源 *主机名*（如 `mirrors.tuna.tsinghua.edu.cn`、`mirrors.ustc.edu.cn`）。 |
+
+> 构建使用 `network: host` 是 **Linux** 下访问 `127.0.0.1` 代理的要求。在 Docker
+> Desktop（Mac/Windows）上构建阶段不支持 host 网络——请将代理监听在 `0.0.0.0`，
+> 或不加 `network: host` 而改用可路由的宿主机地址作为代理。
+
+### 3. 运行
 
 ```bash
 docker compose up --build
@@ -171,7 +207,7 @@ docker compose up --build
 
 `nginx` 自身提供 `GET /healthz` 健康检查端点（直接由 nginx 返回 `ok`）。
 
-### 3. 上下文存储（PostgreSQL + pgvector）
+### 4. 上下文存储（PostgreSQL + pgvector）
 
 对话/长期上下文保存在 Postgres 的 `context_fragments` 表（`vector(256)` +
 HNSW 余弦索引），按 `principal_id` 分片。compose 使用
@@ -181,7 +217,7 @@ HNSW 余弦索引），按 `principal_id` 分片。compose 使用
 
 端侧 SDK 继续使用自己的嵌入式 sled 存储（`aria-agent-memo`），不受此约束。
 
-### 4. 通过 Docker socket 的 sandbox
+### 5. 通过 Docker socket 的 sandbox
 
 当 agent 调用需要隔离的工具时，云端服务通过 Docker **Engine API**（默认的
 `docker` sandbox provider）拉起一个短生命周期容器来执行。该方式对齐 playground：
@@ -233,7 +269,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
 （`--cpus` / `--memory`），可能需要按你部署的 Cube 运行时调整。取值非法时会回退
 默认值并记录告警，因此服务总能正常启动。
 
-### 数据卷
+### 6. 数据卷
 
 | 卷 | 对应路径 | 用途 |
 |----|----------|------|
