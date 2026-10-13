@@ -203,6 +203,28 @@ Build-time args (all optional):
 docker compose up --build
 ```
 
+#### Smoke-test the API
+
+Once the service is up, run the one-shot HTTP smoke test (no build / no
+start / no stop — it only probes the running instance). It loads the **same**
+`.env` that `docker compose up` used (or `.env.example` as a fallback) for
+`AGENT_CLOUD_API_KEY`, but `BASE_URL` and `EVENTS_TEST` are supplied on the
+command line or as environment variables:
+
+```bash
+bash scripts/run-api-tests.sh --base-url http://localhost:3000
+# or:
+BASE_URL=http://localhost:3000 bash scripts/run-api-tests.sh
+# optional: also exercise the model-backed /events and /events/stream endpoints
+bash scripts/run-api-tests.sh -u http://localhost:3000 --events-test
+```
+
+The script asserts status codes + key JSON fields across every route (agents,
+sessions, memory, relations, subagents, api-keys, and the recognised-but-501
+stubs), prints `TOTAL / PASS / FAIL / SKIP`, and exits with the failure count.
+`/events` and `/events/stream` are **skipped** (not failed) unless
+`EVENTS_TEST=1` (or `--events-test`) and a model gateway is configured.
+
 The cloud service waits for a healthy Postgres before starting; the schema
 (`agents` / `runs`) is created automatically on boot (`ensure_schema`), so no
 init scripts are needed. The API is then reachable through **either** endpoint:
