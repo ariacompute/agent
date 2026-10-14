@@ -142,6 +142,7 @@ RUN if [ -n "${BUILD_PROXY}" ]; then \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -161,6 +162,11 @@ ENV RUST_LOG=info
 USER aria
 
 EXPOSE 3000
+
+# Liveness probe (also used by `docker compose`, which overrides it with the
+# same command). `curl -f` turns any non-2xx into a non-zero exit.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:3000/healthz || exit 1
 
 # The binary binds 0.0.0.0:3000 and reads env vars at startup.
 ENTRYPOINT ["aria-agent"]

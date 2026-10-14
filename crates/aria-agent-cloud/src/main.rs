@@ -1191,6 +1191,24 @@ fn build_router(state: AppState) -> Router {
         // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
         // `from_fn_with_state` threads `AppState` into the middleware closure.
         .layer(from_fn_with_state(state, require_auth))
+        // Liveness probe for container orchestration. Registered *after* the
+        // auth layer on purpose: `layer` only wraps the routes added before it,
+        // so `/healthz` answers 200 without credentials (see `healthz`).
+        .route(HEALTH_PATH, get(healthz))
+}
+
+/// Path of the unauthenticated liveness probe (see [`healthz`]).
+const HEALTH_PATH: &str = "/healthz";
+
+/// Unauthenticated liveness probe used by Docker/Compose health checks and
+/// upstream load balancers.
+///
+/// Returns `200 ok` as soon as the process accepts HTTP. It deliberately does
+/// **not** touch Postgres: a transient DB blip must not flap the container
+/// (Postgres has its own healthcheck and `cloud` already waits for it via
+/// `depends_on`).
+async fn healthz() -> Response {
+    (StatusCode::OK, "ok\n").into_response()
 }
 
 async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
@@ -1256,8 +1274,38 @@ mod tests {
     use agent_core::StubModel;
     use axum::extract::{Path, Query, State};
     use axum::Json;
+    use http_body_util::BodyExt;
     use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
     use uuid::Uuid;
+
+    /// Serialises the tests that read/mutate `AGENT_CLOUD_API_KEY`: env vars are
+    /// process-global and `cargo test` runs tests in parallel threads. Async
+    /// mutex on purpose — the guard is held across `await` (clippy
+    /// `await_holding_lock` rejects a `std::sync` guard here).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Send one request through the router without binding a port.
+    async fn call(app: Router, uri: &str) -> (StatusCode, Vec<u8>) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router should respond");
+        let status = resp.status();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("read body")
+            .to_bytes()
+            .to_vec();
+        (status, body)
+    }
 
     use crate::api::sessions::{
         create_session_memory_relation, delete_session_memory_relations,
@@ -1306,6 +1354,7 @@ mod tests {
     #[tokio::test]
     async fn open_mode_resolves_default_principal() {
         // No AGENT_CLOUD_API_KEY and no token → default tenant, no pg needed.
+        let _guard = ENV_LOCK.lock().await;
         std::env::remove_var("AGENT_CLOUD_API_KEY");
         let state = test_state();
         let p = resolve_principal(&state, None).await.unwrap();
@@ -1354,6 +1403,21 @@ mod tests {
         cache.put("h", "tenantA", ApiKeyScopes::all(), PrincipalKind::Admin);
         // TTL already elapsed (0s) → entry evicted and not returned.
         assert!(cache.get("h").is_none());
+    }
+
+    #[tokio::test]
+    async fn healthz_is_unauthenticated_and_ok() {
+        // Regression guard for the Compose health check: with auth *on*, gated
+        // routes answer 401 while /healthz must still answer 200 without a key,
+        // otherwise `docker compose up` never sees `cloud` become healthy.
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("AGENT_CLOUD_API_KEY", "health-check-key");
+        let (gated, _) = call(build_router(test_state()), "/v1/agents").await;
+        let (health, body) = call(build_router(test_state()), HEALTH_PATH).await;
+        std::env::remove_var("AGENT_CLOUD_API_KEY");
+        assert_eq!(gated, StatusCode::UNAUTHORIZED);
+        assert_eq!(health, StatusCode::OK);
+        assert_eq!(body, b"ok\n");
     }
 
     #[tokio::test]

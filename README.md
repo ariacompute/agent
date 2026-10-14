@@ -235,8 +235,11 @@ init scripts are needed. The API is then reachable through **either** endpoint:
   `nginx` reverse proxy, which forwards to `cloud:3000` (recommended entrypoint;
   adds `X-Forwarded-*` headers and streams SSE without buffering).
 
-A `GET /healthz` endpoint (served by nginx itself) can be used for liveness
-checks.
+`GET /healthz` is the liveness probe: it is served by the `cloud` service itself
+(unauthenticated, no API key needed) and nginx forwards `/healthz` upstream, so
+the answer reflects real backend health. The compose health check for `cloud`
+issues `curl -fsS http://localhost:3000/healthz`; `nginx` only starts once
+`cloud` reports healthy.
 
 ### 4. Context storage (PostgreSQL + pgvector)
 

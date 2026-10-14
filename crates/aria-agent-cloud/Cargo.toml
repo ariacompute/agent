@@ -76,6 +76,11 @@ rama-udp = "=0.3.0-alpha.4"
 rama-unix = "=0.3.0-alpha.4"
 rama-utils = "=0.3.0-alpha.4"
 
+[dev-dependencies]
+# Drive the axum router in unit tests without binding a port (`oneshot`).
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http-body-util = "0.1"
+
 # Windows-only build fix for the codex dependency above: `codex-utils-pty`'s
 # conpty code mixes `winapi::ctypes::c_void` with `std::ffi::c_void`, and the
 # two are the same type **only** when winapi's `std` feature is on (winapi

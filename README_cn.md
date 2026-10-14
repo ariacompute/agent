@@ -219,7 +219,9 @@ bash scripts/run-api-tests.sh -u http://localhost:3000 --events-test
 - **经 nginx：** `http://localhost:80`（或 `http://localhost:${NGINX_PORT}`）——`nginx`
   反向代理，转发到 `cloud:3000`（推荐入口，会附带 `X-Forwarded-*` 头且不缓冲 SSE 流式响应）。
 
-`nginx` 自身提供 `GET /healthz` 健康检查端点（直接由 nginx 返回 `ok`）。
+`GET /healthz` 是存活探针：由 `cloud` 服务自身提供（无需 API key），`nginx` 将 `/healthz`
+转发到上游，因此结果反映真实后端健康状态。`cloud` 的 compose 健康检查执行
+`curl -fsS http://localhost:3000/healthz`，`nginx` 仅在 `cloud` 健康后才启动。
 
 ### 4. 上下文存储（PostgreSQL + pgvector）
 
