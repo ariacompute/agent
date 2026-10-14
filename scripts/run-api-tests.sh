@@ -222,10 +222,10 @@ if [ -n "$SESSION_ID" ]; then
     check POST "/v1/agents/sessions/$SESSION_ID/memory/relations" 200 '.from_id' \
       "{\"from_id\":\"$MEM_A\",\"to_id\":\"$MEM_B\",\"kind\":\"temporal\",\"score\":0.9}"
     check GET "/v1/agents/sessions/$SESSION_ID/memory/relations" 200 '.data'
-    check GET "/v1/agents/sessions/$SESSION_ID/memory/relations/graph" 200 '.items' \
-      "?seeds=$MEM_A"
-    check DELETE "/v1/agents/sessions/$SESSION_ID/memory/relations" 200 '.deleted' \
-      "?from=$MEM_A"
+    # Query strings belong in the URL (the 5th `check` argument is a request
+    # BODY, so passing "?seeds=…" there would send it as a GET payload).
+    check GET "/v1/agents/sessions/$SESSION_ID/memory/relations/graph?seeds=$MEM_A" 200 '.items'
+    check DELETE "/v1/agents/sessions/$SESSION_ID/memory/relations?from=$MEM_A" 200 '.deleted'
   else
     skip "memory/relations" "no memory fragment ids captured"
   fi

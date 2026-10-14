@@ -155,7 +155,10 @@ fn row_to_relation(r: &sqlx::postgres::PgRow) -> Result<Relation, ContextError> 
         from_id: r.get("from_id"),
         to_id: r.get("to_id"),
         kind,
-        score: r.get::<f64, _>("score") as f32,
+        // `score` is `REAL` (float4) in `context_relations`: it must be read as
+        // `f32` — decoding it as `f64` (float8) is a type mismatch that aborts
+        // the request.
+        score: r.get::<f32, _>("score"),
         provenance: r.get("provenance"),
         created_at: r.get("created_at"),
     })
@@ -333,7 +336,9 @@ impl ContextStore for PgContextStore {
         .bind(&rel.from_id)
         .bind(&rel.to_id)
         .bind(rel.kind.as_str())
-        .bind(rel.score as f64)
+        // `score` is `REAL` — bind the `f32` directly (float4), not a widening
+        // cast to `f64`.
+        .bind(rel.score)
         .bind(&rel.provenance)
         .bind(rel.created_at)
         .execute(&self.pool)
@@ -423,7 +428,8 @@ impl ContextStore for PgContextStore {
             let kind: RelationKind = kind
                 .parse()
                 .map_err(|e: String| ContextError::Storage(format!("bad relation kind: {e}")))?;
-            let score = r.get::<f64, _>("score") as f32;
+            // `score` is `REAL` (float4) — decode as `f32`.
+            let score = r.get::<f32, _>("score");
             edges.entry(from_id).or_default().push((to_id, score, kind));
         }
         let (reached, stop) = graph_bfs(

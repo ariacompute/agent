@@ -741,9 +741,10 @@ pub async fn list_session_items(
         &state,
         &principal,
         &format!(
-            "SELECT {ITEM_COLS} FROM session_items WHERE session_id = $1 ORDER BY seq, created_at"
+            "SELECT {ITEM_COLS} FROM session_items \
+             WHERE session_id = $1 {SCOPE} ORDER BY seq, created_at"
         ),
-        &session_id,
+        &[&session_id],
     )
     .await?;
     Ok(Json(ListResponse::new(
@@ -760,8 +761,11 @@ pub async fn list_session_turns(
     let rows = tenant_query(
         &state,
         &principal,
-        &format!("SELECT {TURN_COLS} FROM session_turns WHERE session_id = $1 ORDER BY created_at"),
-        &session_id,
+        &format!(
+            "SELECT {TURN_COLS} FROM session_turns \
+             WHERE session_id = $1 {SCOPE} ORDER BY created_at"
+        ),
+        &[&session_id],
     )
     .await?;
     Ok(Json(ListResponse::new(
@@ -778,12 +782,14 @@ pub async fn get_session_turn(
     let rows = tenant_query(
         &state,
         &principal,
-        &format!("SELECT {TURN_COLS} FROM session_turns WHERE id = $1 AND session_id = $2"),
-        &turn_id,
+        &format!(
+            "SELECT {TURN_COLS} FROM session_turns \
+             WHERE id = $1 AND session_id = $2 {SCOPE}"
+        ),
+        &[&turn_id, &session_id],
     )
     .await?;
-    rows.iter()
-        .find(|r| r.get::<String, _>("session_id") == session_id)
+    rows.first()
         .map(row_to_turn)
         .map(Json)
         .ok_or(AppError::NotFound)
@@ -897,27 +903,44 @@ async fn fetch_session(
     row.ok_or(AppError::NotFound)
 }
 
-/// Run a scoped read (`$1` = the resource id, `$2` = principal when tenanted).
+/// Marker inside the read queries below that [`tenant_query`] replaces with the
+/// per-tenant filter. It always sits **after** the `WHERE` predicates and
+/// **before** any `ORDER BY` — appending the filter at the end of the statement
+/// would land inside `ORDER BY` and produce invalid SQL.
+const SCOPE: &str = "/*scope*/";
+
+/// Substitute the [`SCOPE`] marker with the tenant filter.
+///
+/// Admins read across tenants, so the marker is simply removed for them.
+/// `bound` is the number of positional parameters already bound by the caller:
+/// the principal id is appended as `$(bound + 1)`.
+fn scope_sql(base: &str, principal: &Principal, bound: usize) -> String {
+    if principal.kind == PrincipalKind::Admin {
+        base.replace(SCOPE, "")
+    } else {
+        base.replace(SCOPE, &format!("AND principal_id = ${}", bound + 1))
+    }
+}
+
+/// Run a tenant-scoped read.
+///
+/// `base` is a full `SELECT` carrying the [`SCOPE`] marker; `params` are bound
+/// in order and the principal id is appended last (only for non-admins).
 async fn tenant_query(
     state: &AppState,
     principal: &Principal,
     base: &str,
-    id: &str,
+    params: &[&str],
 ) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
-    if principal.kind == PrincipalKind::Admin {
-        sqlx::query(base)
-            .bind(id)
-            .fetch_all(&state.pool)
-            .await
-            .map_err(AppError::Db)
-    } else {
-        sqlx::query(&format!("{base} AND principal_id = $2"))
-            .bind(id)
-            .bind(&principal.id)
-            .fetch_all(&state.pool)
-            .await
-            .map_err(AppError::Db)
+    let sql = scope_sql(base, principal, params.len());
+    let mut q = sqlx::query(&sql);
+    for p in params {
+        q = q.bind(p);
     }
+    if principal.kind != PrincipalKind::Admin {
+        q = q.bind(&principal.id);
+    }
+    q.fetch_all(&state.pool).await.map_err(AppError::Db)
 }
 
 async fn insert_turn(
@@ -1104,6 +1127,56 @@ mod tests {
         assert_eq!(s.id, "agent_1");
         assert_eq!(s.name.as_deref(), Some("demo"));
         assert_eq!(s.service_tier, "auto");
+    }
+
+    fn principal(kind: PrincipalKind) -> Principal {
+        Principal {
+            id: "tenantA".into(),
+            kind,
+            scopes: crate::ApiKeyScopes::read_write(),
+        }
+    }
+
+    /// Regression: the tenant filter must land inside `WHERE`, never after
+    /// `ORDER BY` (that produced `argument of AND must be type boolean, not
+    /// type timestamp with time zone`).
+    #[test]
+    fn tenant_scope_is_injected_before_order_by() {
+        let base = format!(
+            "SELECT {ITEM_COLS} FROM session_items \
+             WHERE session_id = $1 {SCOPE} ORDER BY seq, created_at"
+        );
+        let sql = scope_sql(&base, &principal(PrincipalKind::User), 1);
+        assert!(sql.contains("WHERE session_id = $1 AND principal_id = $2 ORDER BY"));
+        assert!(!sql.contains(SCOPE));
+        // The `AND` binds a column, not the sort expression.
+        assert!(sql.find("AND principal_id").unwrap() < sql.find("ORDER BY").unwrap());
+    }
+
+    /// The principal id is appended *after* the caller's own params, so its
+    /// placeholder number depends on how many are already bound.
+    #[test]
+    fn tenant_scope_placeholder_follows_bound_params() {
+        let base = format!(
+            "SELECT {TURN_COLS} FROM session_turns \
+             WHERE id = $1 AND session_id = $2 {SCOPE}"
+        );
+        let sql = scope_sql(&base, &principal(PrincipalKind::User), 2);
+        assert!(sql.ends_with("AND principal_id = $3"));
+        assert!(sql.contains("WHERE id = $1 AND session_id = $2 AND principal_id = $3"));
+    }
+
+    /// Admins read across tenants: the marker is removed, no dangling `AND`.
+    #[test]
+    fn admin_scope_is_removed_without_leaving_a_dangling_and() {
+        let base = format!(
+            "SELECT {TURN_COLS} FROM session_turns \
+             WHERE id = $1 AND session_id = $2 {SCOPE}"
+        );
+        let sql = scope_sql(&base, &principal(PrincipalKind::Admin), 2);
+        assert!(!sql.contains(SCOPE));
+        assert!(!sql.contains("principal_id"));
+        assert!(sql.ends_with("WHERE id = $1 AND session_id = $2 "));
     }
 
     #[test]
