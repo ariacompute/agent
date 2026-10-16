@@ -160,6 +160,14 @@ cp .env.example .env
 > auto-loads `.env` for variable substitution and the `cloud` service also reads
 > it via `env_file`, so the container process receives every variable directly.
 
+> **Client key consistency.** Every client (e.g. the cockpit Android app built
+> with `-PagentCloudApiKey=...`) sends `AGENT_CLOUD_API_KEY` (or a key minted via
+> `POST /v1/api-keys`) verbatim as `Authorization: Bearer <key>`. It must be a key
+> **valid on this server**, or the client must send **no key** when this is empty
+> (open mode). A key the server does not recognize (e.g. a placeholder like
+> `ak_live_x`) gets `401`. Keep this server key and every client's key
+> **consistent (same valid key) or both empty.**
+
 ### 2. Build
 
 The `cloud` service uses the `aria-agent-cloud` image. You can build it either

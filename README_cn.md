@@ -155,6 +155,13 @@ cp .env.example .env
 > `.env` 做变量替换，且 `cloud` 服务通过 `env_file` 直接读取它，因此容器进程能
 > 拿到每一个变量。
 
+> **客户端密钥一致性。** 每个客户端（例如用 `-PagentCloudApiKey=...` 构建的 cockpit
+> Android App）会把 `AGENT_CLOUD_API_KEY`（或经 `POST /v1/api-keys` 发放的密钥）原样
+> 作为 `Authorization: Bearer <key>` 发送。该密钥必须是**本服务端有效**的密钥，**或者**
+> 当本项为**空**（开放模式）时，客户端也**完全不发送**密钥。服务端不认识的密钥（例如
+> `ak_live_x` 这类占位值）会返回 `401`。请保证本服务端密钥与所有客户端的密钥
+> **保持一致（同一有效密钥）或同时留空。**
+
 ### 2. 构建
 
 `cloud` 服务使用 `aria-agent-cloud` 镜像。你可以手动构建，也可以让 compose 帮你
