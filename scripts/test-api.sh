@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run-api-tests.sh — one-shot HTTP smoke test for the aria-agent Cloud API.
+# test-api.sh — one-shot HTTP smoke test for the aria-agent Cloud API.
 #
 # The agent service is started SEPARATELY via `docker compose up` (postgres+pgvector
 # and the cloud/optional-nginx services). This script does NOT build, start, or stop
@@ -13,9 +13,9 @@
 # command line or from environment variables.
 #
 # Usage:
-#   bash scripts/run-api-tests.sh --base-url http://localhost:3000
-#   BASE_URL=http://localhost:80 EVENTS_TEST=1 bash scripts/run-api-tests.sh
-#   bash scripts/run-api-tests.sh -u http://localhost:3000 --events-test
+#   bash scripts/test-api.sh --base-url http://localhost:3000
+#   BASE_URL=http://localhost:80 EVENTS_TEST=1 bash scripts/test-api.sh
+#   bash scripts/test-api.sh -u http://localhost:3000 --events-test
 #   (also: -t/--ready-timeout SECONDS; -h/--help)
 #
 # Exit code = number of failed checks (0 == all passed).
@@ -67,8 +67,8 @@ READY_TIMEOUT="${READY_TIMEOUT:-60}"
 if [ -z "$BASE_URL" ]; then
   echo "ERROR: BASE_URL is not set." >&2
   echo "  Pass it as a CLI arg or environment variable, e.g.:" >&2
-  echo "    bash scripts/run-api-tests.sh --base-url http://localhost:3000" >&2
-  echo "    BASE_URL=http://localhost:3000 bash scripts/run-api-tests.sh" >&2
+  echo "    bash scripts/test-api.sh --base-url http://localhost:3000" >&2
+  echo "    BASE_URL=http://localhost:3000 bash scripts/test-api.sh" >&2
   echo "  Then make sure the service is up: docker compose up -d" >&2
   exit 1
 fi
