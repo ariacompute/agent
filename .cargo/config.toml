@@ -14,3 +14,9 @@ rustflags = [
     "-C", "link-arg=-Wl,-z,max-page-size=16384",
     "-C", "link-arg=-Wl,-z,common-page-size=16384",
 ]
+
+# Cargo git dependencies (e.g. the codex fork) check out the entire repo, which
+# includes files whose paths exceed Windows' 260-char MAX_PATH limit. Fetch with
+# the git CLI so git-for-Windows' `core.longpaths` support can write them.
+[net]
+git-fetch-with-cli = true
