@@ -251,6 +251,29 @@ see `docs/followups/*` for the downstream cleanups.
       compaction; plus `sdk_tools()` asserts 4 memo tools. `cargo test --workspace`
       green; `cargo fmt` + `clippy` clean.
 
+## eMudhra / emSign 证书私钥泄露响应（2026-10）
+
+背景：eMudhra(emSign) 8 张中间 CA 私钥极弱（P-384 私钥标量 <256），可被反推伪造任意域名证书；
+Rust(webpki-roots) / Bun / Node / Python 等自带信任库需升级。
+
+### 1. Rust（云服务端 / 所有 Rust 二进制）
+- `Cargo.lock`：`webpki-roots` 1.0.9 -> 1.0.10（`cargo update -p webpki-roots --precise 1.0.10`）。
+  1.0.10+ 在 rustls 信任库中移除 emSign 根；`aria-agent-cloud` 经 reqwest+rustls-tls 做服务端出向/上游 TLS 校验，依赖它。
+- `crates/aria-agent-cloud/Cargo.toml`：显式钉住 `webpki-roots = "1.0.10"`，防止锁漂移回受影响版本。
+- 核验：`cargo tree -i webpki-roots` 须 >= 1.0.10（二进制信任库编译进产物，不走系统 bundle；本仓 `--locked` 构建已锁定）。
+
+### 2. JS SDK（bun）
+- `sdk/js/package.json`：`engines` 新增 `bun >=1.4.4`（Bun 1.4.4 修复其 TLS 信任库；SDK 用 `bun test` 构建/测试）。
+
+### 3. Python SDK / 容器
+- `sdk/python/pyproject.toml`：`dependencies = []`，不自带信任库，依赖主机/容器 `ca-certificates`。
+- `Dockerfile`：构建(`rust:1-bookworm`)与运行时(`debian:bookworm-slim`)均 `apt-get install ca-certificates`（已具备），重建镜像即更新系统信任库。
+- 新增 `scripts/check-emudhra.sh`：离线扫描容器系统 bundle（以 emSign 根为信任锚），规避前向/拦截代理造成的在线探测假阳性。
+
+### 4. 范围说明
+- 本仓库**无 Go**；Node 仅作 JS SDK 运行/构建运行时（engines `node >=18`），其 TLS 信任库随 Node 发布更新（建议 >= 22.23.4 / 24.22.1 / 26.12.1）。
+- 站点证书（部署用 Let's Encrypt）不受影响，无需重签。
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.

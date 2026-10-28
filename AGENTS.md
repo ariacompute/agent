@@ -16,6 +16,10 @@ language (JS/Python) SDKs.
   regenerate via `just ffi`; the podspec and Gradle publishing config are hand-maintained.
 * `sdk/js` — npm package `@ariacompute/agent` (mirrors `@openai/agents`).
 * `sdk/python` — pip package `ariacompute-agent` (mirrors `openai-agents`).
+* **Trust stores (eMudhra/emSign CA key compromise, 2026-10)**: Rust outbound TLS
+  goes through `webpki-roots` (pinned `>=1.0.10` in `aria-agent-cloud` — removes the
+  compromised emSign roots); the JS SDK is built/tested with **bun >=1.4.4**; the
+  Python SDK bundles no trust store and relies on the host/container `ca-certificates`.
 * `codex/` is a **git submodule** (do not add it to the Cargo workspace).
 * `crates/aria-agent-cloud/src/event_envelope.rs` is the frozen SSE envelope:
   `AgentEvent` → OpenAI **beta Agents** streaming frames (see rule 9).
