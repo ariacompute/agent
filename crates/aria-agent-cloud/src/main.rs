@@ -36,6 +36,7 @@ mod codex_sandbox {
     use codex_sandboxing::SandboxType;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_path_uri::PathUri;
+    use codex_utils_pty::ChildFds;
     use std::collections::HashMap;
     use std::convert::TryFrom;
     use std::ffi::OsString;
@@ -107,7 +108,6 @@ mod codex_sandbox {
                 sandbox_exe: None,
                 use_legacy_landlock: false,
                 windows_sandbox_level: WindowsSandboxLevel::default(),
-                windows_sandbox_private_desktop: false,
             })
             .map_err(|e| SandboxError::Exec(e.to_string()))?;
 
@@ -124,7 +124,7 @@ mod codex_sandbox {
             windows_sandbox: None,
             tty: false,
             stdin_open: false,
-            inherited_fds: &[],
+            inherited_fds: ChildFds::Inherited(&[]),
         })
         .await
         .map_err(|e| SandboxError::Exec(e.to_string()))?;
