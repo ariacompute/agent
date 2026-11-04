@@ -950,11 +950,17 @@ mod storage_edge_tests {
 
     #[tokio::test]
     async fn open_reports_an_unusable_path() {
-        // `/dev/null` is a file, so the parent directory cannot be created.
-        let err = MemoContextStore::open(std::path::Path::new("/dev/null/nested/memo.db"))
+        // The parent is a regular file, so the directory cannot be created.
+        // (`/dev/null` would not work on Windows, where that path is creatable.)
+        let dir = std::env::temp_dir().join(format!("aria-memo-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let err = MemoContextStore::open(&blocker.join("memo.db"))
             .err()
             .unwrap();
         assert!(err.to_string().contains("create db dir"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

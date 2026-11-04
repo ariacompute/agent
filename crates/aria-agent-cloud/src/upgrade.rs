@@ -81,6 +81,22 @@ pub async fn upgrade_into(
     version: Option<&str>,
     current_version: &str,
 ) -> io::Result<()> {
+    upgrade_into_with_os(targets, org_url, api_base, version, current_version, None).await
+}
+
+/// [`upgrade_into`] with an explicit release-asset platform.
+///
+/// `asset_os` overrides [`detect_asset_os`] so tests can drive the Windows
+/// (`.zip`) pipeline from any host — otherwise those branches only ever run on
+/// the Windows runner.
+async fn upgrade_into_with_os(
+    targets: &InstallTargets,
+    org_url: &str,
+    api_base: Option<&str>,
+    version: Option<&str>,
+    current_version: &str,
+    asset_os: Option<&str>,
+) -> io::Result<()> {
     let org = org_url.trim_end_matches('/');
     let host = detect_host(org)?;
     let releases = fetch_releases(host, org, api_base).await?;
@@ -92,7 +108,10 @@ pub async fn upgrade_into(
         return Ok(());
     }
 
-    let asset_os = detect_asset_os()?;
+    let asset_os = match asset_os {
+        Some(os) => os,
+        None => detect_asset_os()?,
+    };
     let cli_name = agent_asset_name(&ver, asset_os);
     let ffi_name = format!("libaria-agent_ffi_{ver}_{asset_os}.tar.gz");
     let cli_asset = find_asset(&target.assets, &cli_name)?;
@@ -1041,6 +1060,24 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// The FFI asset is always a `.tar.gz`, even on Windows — `release.yml`
+    /// tars the DLLs there so both hosts publish the same archive type.
+    fn ffi_asset_name(ver: &str, os: &str) -> String {
+        format!("libaria-agent_ffi_{ver}_{os}.tar.gz")
+    }
+
+    /// Build the CLI archive in the format the platform asset name implies
+    /// (`.zip` on Windows, `.tar.gz` elsewhere) and return its bytes.
+    fn cli_payload(dir: &Path, ver: &str, os: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let name = agent_asset_name(ver, os);
+        let path = if name.ends_with(".zip") {
+            zip_file(dir, &name, entries)
+        } else {
+            tar_gz(dir, &name, entries)
+        };
+        fs::read(path).unwrap()
+    }
+
     /// A release body with both assets pointing at `base`.
     fn release_json(base: &str, ver: &str, os: &str) -> serde_json::Value {
         serde_json::json!([{
@@ -1049,11 +1086,11 @@ mod tests {
             "prerelease": false,
             "assets": [
                 {
-                    "name": format!("aria-agent_{ver}_{os}.tar.gz"),
+                    "name": agent_asset_name(ver, os),
                     "browser_download_url": format!("{base}/dl/cli"),
                 },
                 {
-                    "name": format!("libaria-agent_ffi_{ver}_{os}.tar.gz"),
+                    "name": ffi_asset_name(ver, os),
                     "browser_download_url": format!("{base}/dl/ffi"),
                 }
             ]
@@ -1066,16 +1103,16 @@ mod tests {
         let server = MockServer::start().await;
         let os = detect_asset_os().unwrap();
 
-        // The CLI archive, built up front so the body is static bytes.
+        // The CLI archive, built up front so the body is static bytes. The
+        // binary name inside it is platform specific (`aria-agent.exe`).
         let cli_dir = tmp.path().join("payload");
         fs::create_dir_all(&cli_dir).unwrap();
-        let cli_tar = tar_gz(&cli_dir, "cli.tar.gz", &[("aria-agent", b"new-binary")]);
+        let cli_bytes = cli_payload(&cli_dir, "9.9.9", os, &[(CLI_BIN, b"new-binary")]);
         let ffi_tar = tar_gz(
             &cli_dir,
             "ffi.tar.gz",
             &[("lib/libaria-agent_ffi.so", b"new-lib")],
         );
-        let cli_bytes = fs::read(&cli_tar).unwrap();
         let ffi_bytes = fs::read(&ffi_tar).unwrap();
 
         Mock::given(method("GET"))
@@ -1124,6 +1161,66 @@ mod tests {
         assert!(!staging.exists(), "staging directory is cleaned up");
     }
 
+    /// The Windows release pipeline uses `.zip` CLI assets; drive it from any
+    /// host so the zip branch is not Windows-runner-only.
+    #[tokio::test]
+    async fn windows_zip_assets_upgrade_on_any_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        let os = "windows_x86_64";
+        let dir = tmp.path().join("payload");
+        fs::create_dir_all(&dir).unwrap();
+
+        let cli_bytes = cli_payload(&dir, "7.0.0", os, &[(CLI_BIN, b"win-binary")]);
+        let ffi_bytes = fs::read(tar_gz(
+            &dir,
+            "ffi.tar.gz",
+            &[("lib/libaria-agent_ffi.so", b"win-lib")],
+        ))
+        .unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/repos/aci/agent/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(release_json(
+                &server.uri(),
+                "7.0.0",
+                os,
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/cli"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(cli_bytes))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/ffi"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(ffi_bytes))
+            .mount(&server)
+            .await;
+
+        let targets = InstallTargets {
+            staging_root: tmp.path().join("home"),
+            cli_dest: tmp.path().join("bin/aria-agent"),
+            lib_dir: tmp.path().join("lib"),
+        };
+        fs::create_dir_all(targets.cli_dest.parent().unwrap()).unwrap();
+
+        upgrade_into_with_os(
+            &targets,
+            "https://github.com/aci",
+            Some(&server.uri()),
+            None,
+            "1.0.0",
+            Some(os),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fs::read(&targets.cli_dest).unwrap(), b"win-binary");
+        assert!(targets.lib_dir.join("libaria-agent_ffi.so").exists());
+    }
+
     #[tokio::test]
     async fn upgrade_is_a_noop_at_the_current_version() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1165,7 +1262,7 @@ mod tests {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!([{
                     "tag_name": "v2.0.0",
                     "assets": [{
-                        "name": format!("aria-agent_2.0.0_{}.tar.gz", detect_asset_os().unwrap()),
+                        "name": agent_asset_name("2.0.0", detect_asset_os().unwrap()),
                         "browser_download_url": format!("{}/dl/cli", server.uri()),
                     }],
                 }])),
@@ -1224,8 +1321,13 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.raw_os_error().is_some() || err.kind() != io::ErrorKind::NotFound);
+        // POSIX reports `ENOTDIR`; Windows reports a bare `NotFound` while
+        // probing the path. Either way the upgrade must fail, install nothing,
+        // and leave the bad staging root untouched.
+        assert!(!err.to_string().is_empty(), "the failure is reported");
         assert!(!targets.cli_dest.exists());
+        assert!(!targets.lib_dir.exists());
+        assert!(targets.staging_root.is_file());
     }
 
     #[tokio::test]
@@ -1371,12 +1473,7 @@ mod tests {
         let os = detect_asset_os().unwrap();
         let cli_dir = tmp.path().join("payload");
         fs::create_dir_all(&cli_dir).unwrap();
-        let cli_bytes = fs::read(tar_gz(
-            &cli_dir,
-            "cli.tar.gz",
-            &[("aria-agent", b"new-binary")],
-        ))
-        .unwrap();
+        let cli_bytes = cli_payload(&cli_dir, "5.0.0", os, &[(CLI_BIN, b"new-binary")]);
         Mock::given(method("GET"))
             .and(path("/repos/aci/agent/releases"))
             .respond_with(ResponseTemplate::new(200).set_body_json(release_json(

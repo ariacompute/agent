@@ -994,9 +994,14 @@ mod tests {
     fn build_stores_reports_unusable_paths_and_urls() {
         let _env = EnvGuard::apply(&[("ARIA_MEMO_DB", None), ("ARIA_AGENT_BASE_URL", None)]);
 
-        // A database path under a non-directory can never be opened.
+        // A database path under a regular file can never be opened. A temp-dir
+        // blocker (not `/dev/null`) keeps this true on Windows as well.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
         let bad_path = SdkMemoryConfig {
-            local_db_path: "/dev/null/memo.db".into(),
+            local_db_path: blocker.join("memo.db").to_string_lossy().to_string(),
             ..SdkMemoryConfig::default()
         };
         let err = build_stores(&bad_path).err().unwrap();
