@@ -866,10 +866,13 @@ mod tests {
         let env = EnvGuard::clear(&["ARIA_MEMO_DIR"]);
         let scoped = tenant_memory("acme", SdkMemoryConfig::default());
         drop(env);
-        assert!(scoped
-            .local_db_path
-            .starts_with(&*std::env::temp_dir().to_string_lossy()));
-        assert!(scoped.local_db_path.ends_with("tenants/acme/memo.db"));
+        // Compare whole paths, not the rendered string: the separator differs
+        // between Windows (`\`) and Unix (`/`).
+        let expected = std::env::temp_dir()
+            .join("tenants")
+            .join("acme")
+            .join("memo.db");
+        assert_eq!(std::path::PathBuf::from(&scoped.local_db_path), expected);
     }
 
     #[test]
