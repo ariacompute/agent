@@ -149,6 +149,39 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 * The old `/v1/sessions/:id/runs[/stream]` routes and the `response.*` envelope
   are removed (strict switch to the beta Agents API, ADR-0009).
 
+## 9. Testing & coverage requirements
+
+### 9.1 Gate
+* `cargo test --workspace` must be green; new behaviour needs a normal-path and an
+  abnormal-path test.
+* `just cov-check` (`scripts/coverage.sh`) must report **100% line coverage** for
+  every file that is not on the exclusion list in `docs/coverage.md`; CI runs it as
+  a required job (`.github/workflows/ci.yml`).
+* Coverage is measured on lcov `DA:` records (one per source line), not on
+  `llvm-cov --fail-under-lines`, which also counts duplicate records emitted for
+  macro/generic instantiations.
+* `cargo fmt --all -- --check` and
+  `cargo clippy --workspace --all-targets -- -D warnings` must pass.
+
+### 9.2 No live dependencies in tests
+* No test may reach the public internet, a real Postgres/pgvector instance, or a
+  real Docker daemon: HTTP goes to `wiremock`/loopback stubs, the Docker Engine API
+  to the in-crate TCP stub, and the metadata store to `store/memory.rs`.
+* Tests that genuinely need an external system (the `DATABASE_URL`-gated Postgres
+  tests, the `cli-interop` memo tests) stay behind an explicit gate and are
+  excluded from the gate above. They must never report a fabricated pass.
+
+### 9.3 Refactor rules that keep the gate honest
+* Format error messages in **shared** helpers (`db_err`, `model_err`,
+  `prefixed`) instead of one `map_err(|e| ...)` closure per call site; per-site
+  closures are unreachable in practice and turn into permanent coverage debt.
+* Do not add `assert!(true)`, call-only-for-execution statements, or `#[ignore]`
+  to reach the target. An unreachable branch must be removed or listed in
+  `docs/coverage.md` with a reason.
+* Data access goes through the `AgentStore`/`SessionStore`/`ApiKeyStore` traits so
+  handlers stay testable without a database; production SQL stays in
+  `store/pg.rs`.
+
 ## 8. Downstream follow-ups (out of scope for this repo)
 Tracked in `docs/followups/`:
 * `playground-migration.md` — proxy routes + SSE parsing + sandbox env.

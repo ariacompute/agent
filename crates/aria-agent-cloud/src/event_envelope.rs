@@ -560,4 +560,33 @@ mod tests {
             .expect("memory_relations present on ensure_closed path");
         assert_eq!(rels[0]["kind"], json!("temporal"));
     }
+
+    #[test]
+    fn finish_without_output_emits_only_the_terminal_frame() {
+        // No token was ever streamed: `finish("")` closes the turn with just the
+        // completed frame (the `msg_open == false` branch).
+        let mut env = envelope();
+        let frames = env.finish("");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["type"], json!(event_type::TURN_COMPLETED));
+        assert_eq!(frames[0]["turn"]["status"], json!("completed"));
+
+        // A closed envelope never emits a second terminal frame via
+        // `ensure_closed` (the streaming path's terminator).
+        assert!(env.ensure_closed().is_empty());
+    }
+
+    #[test]
+    fn finish_after_done_does_not_duplicate_frames() {
+        let mut env = envelope();
+        env.push(&AgentEvent::Token { text: "hi".into() });
+        let mut frames = env.push(&AgentEvent::Done { text: "hi".into() });
+        assert_eq!(
+            frames.last().unwrap()["type"],
+            json!(event_type::TURN_COMPLETED)
+        );
+        // The turn is already closed.
+        frames = env.ensure_closed();
+        assert!(frames.is_empty());
+    }
 }

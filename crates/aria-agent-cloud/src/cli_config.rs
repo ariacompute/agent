@@ -103,15 +103,31 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_aria_home(dir: &Path, f: impl Fn()) {
+        with_aria_home_seeded(dir, None, f)
+    }
+
+    /// Run `f` with `ARIA_COMPUTE_HOME=dir`, restoring `seed` (or unsetting it)
+    /// afterwards. `seed` lets the restore path be exercised for both the
+    /// "previous value existed" and "previous value was absent" cases.
+    fn with_aria_home_seeded(dir: &Path, seed: Option<&str>, f: impl Fn()) {
         let _g = ENV_LOCK.lock().unwrap();
+        match seed {
+            Some(v) => std::env::set_var("ARIA_COMPUTE_HOME", v),
+            None => std::env::remove_var("ARIA_COMPUTE_HOME"),
+        }
         let prev = std::env::var("ARIA_COMPUTE_HOME").ok();
         std::env::set_var("ARIA_COMPUTE_HOME", dir);
         let _ = std::fs::remove_dir_all(dir);
         f();
         let _ = std::fs::remove_dir_all(dir);
+        restore_env("ARIA_COMPUTE_HOME", prev);
+    }
+
+    /// Restore one environment variable to its previous value (`None` = unset).
+    fn restore_env(key: &str, prev: Option<String>) {
         match prev {
-            Some(v) => std::env::set_var("ARIA_COMPUTE_HOME", v),
-            None => std::env::remove_var("ARIA_COMPUTE_HOME"),
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
         }
     }
 
@@ -152,6 +168,53 @@ mod tests {
             let loaded = load_cli_config().unwrap();
             assert!(loaded.upgrade_url.is_empty());
         });
+    }
+
+    #[test]
+    fn aria_home_falls_back_to_the_user_home() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev_override = std::env::var("ARIA_COMPUTE_HOME").ok();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::remove_var("ARIA_COMPUTE_HOME");
+        std::env::set_var("HOME", "/tmp/aria-home-fallback");
+        let home = aria_home().unwrap();
+        assert_eq!(home, PathBuf::from("/tmp/aria-home-fallback/.ariacompute"));
+        // An empty override is ignored (treated as unset).
+        std::env::set_var("ARIA_COMPUTE_HOME", "");
+        assert_eq!(aria_home().unwrap(), home);
+        // A non-empty override wins.
+        std::env::set_var("ARIA_COMPUTE_HOME", "/tmp/aria-home-override");
+        assert_eq!(
+            aria_home().unwrap(),
+            PathBuf::from("/tmp/aria-home-override")
+        );
+
+        restore_env("HOME", prev_home);
+        restore_env("ARIA_COMPUTE_HOME", prev_override);
+    }
+
+    #[test]
+    fn restore_env_covers_unset_and_set() {
+        let _g = ENV_LOCK.lock().unwrap();
+        restore_env("ARIA_TEST_RESTORE_ENV", Some("value".into()));
+        assert_eq!(std::env::var("ARIA_TEST_RESTORE_ENV").unwrap(), "value");
+        restore_env("ARIA_TEST_RESTORE_ENV", None);
+        assert!(std::env::var("ARIA_TEST_RESTORE_ENV").is_err());
+    }
+
+    #[test]
+    fn seeding_a_previous_override_is_restored() {
+        let dir = std::env::temp_dir().join(format!("aria_agent_cli_seed_{}", std::process::id()));
+        with_aria_home_seeded(&dir, Some("/tmp/aria-seeded-home"), || {
+            // Inside the scope the test directory wins.
+            assert_eq!(aria_home().unwrap(), dir);
+            let _ = save_cli_config(&AgentCliConfig::default());
+        });
+        assert_eq!(
+            std::env::var("ARIA_COMPUTE_HOME").unwrap(),
+            "/tmp/aria-seeded-home"
+        );
+        std::env::remove_var("ARIA_COMPUTE_HOME");
     }
 
     #[test]

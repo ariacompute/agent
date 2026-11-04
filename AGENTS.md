@@ -177,10 +177,31 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
   memo 记忆内部实现。
 - 日志沿用 `tracing`，不打印 OpenAI key / 原始用户输入 / 嵌入向量。
 
+## Testing & coverage (do not regress)
+
+* **Gate**: `just cov-check` (`scripts/coverage.sh`) must stay at 100% of lcov
+  `DA:` lines outside `docs/coverage.md`. CI runs fmt + `clippy -D warnings` +
+  `cargo test --workspace` + the gate.
+* **Exclusions are a budget, not a habit**: `codex/`, `aria-agent-ffigen`,
+  cloud `main.rs`, `store/pg.rs`, `context/pg.rs`. Adding business logic to that
+  list requires editing `docs/coverage.md` with a reason that is not "hard".
+* **No live dependencies**: `wiremock`/loopback for HTTP, an in-crate TCP stub for
+  the Docker Engine API (`DockerSandbox::with_client`), `store/memory.rs` for the
+  metadata store. `DATABASE_URL` tests and the memo `cli-interop` tests stay gated
+  and must never fake a pass.
+* **Coverage-friendly structure**: one shared error mapper (`db_err`,
+  `model_err`, `prefixed`) instead of a `map_err(|e| ...)` closure per call site;
+  handlers talk to the `*Store` traits, never to `sqlx` directly.
+* **Never** use `assert!(true)`, execution-only calls or `#[ignore]` to move the
+  number.
+
 ## Common commands
 
 * `just build` — build all crates
 * `just test` — `cargo test --workspace`
+* `just cov-check` — coverage gate: 100% of lcov line records outside the
+  exclusions in `docs/coverage.md` (CI job `coverage`)
+* `just cov` — report only (writes `lcov.info`)
 * `just sdk-js-test` / `just sdk-py-test` — SDK tests
 * `just ffi` — regenerate Swift/Kotlin bindings
 * `just cloud` — run the cloud service (needs Postgres **with pgvector**;
@@ -189,7 +210,7 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
 * `aria-agent setup` / `aria-agent upgrade [version] [--url <url>]` — CLI
   self-management (`~/.ariacompute/agent-cli.yml`).
 * `just migrate` — `sqlx database create` + `sqlx migrate run`
-* `just fmt` / `just lint` — formatting and clippy
+* `just fmt` / `just lint` — formatting and clippy (`-D warnings` in CI)
 * Release & publish: `.github/workflows/release.yml` (binary + cdylib assets),
   `publish-cargo.yml` (crates.io: sandbox → core → memo → ariacompute-agent),
   `publish-maven.yml` (Maven Central), `publish-npm.yml`, `publish-pypi.yml`;

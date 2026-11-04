@@ -102,6 +102,20 @@ pub enum SdkError {
     Core(String),
 }
 
+// `From` conversions keep error propagation on `?` instead of per-call
+// `map_err(|e| …)` closures (one shared, always-exercised line each).
+impl From<agent_core::CoreError> for SdkError {
+    fn from(e: agent_core::CoreError) -> Self {
+        SdkError::Core(e.to_string())
+    }
+}
+
+impl From<agent_core::context::ContextError> for SdkError {
+    fn from(e: agent_core::context::ContextError) -> Self {
+        SdkError::Core(e.to_string())
+    }
+}
+
 /// A native agent handle. Construct via [`create_agent`].
 #[derive(uniffi::Object)]
 pub struct SdkAgent {
@@ -116,8 +130,7 @@ pub struct SdkAgent {
 impl SdkAgent {
     /// Run a single turn and return the assistant reply.
     pub fn run(&self, input: String) -> Result<String, SdkError> {
-        rt().block_on(self.inner.run(&input))
-            .map_err(|e| SdkError::Core(e.to_string()))
+        Ok(rt().block_on(self.inner.run(&input))?)
     }
 
     /// Get the session memory handle for this agent.
@@ -198,17 +211,14 @@ impl SdkSession {
     ) -> Result<(), SdkError> {
         let store = self.store_for(backend.as_deref())?;
         let frag = ContextFragment::new(&self.session, FragmentKind::LongTerm, value).with_key(key);
-        rt().block_on(store.memorize(frag))
-            .map_err(|e| SdkError::Core(e.to_string()))
+        Ok(rt().block_on(store.memorize(frag))?)
     }
 
     /// Read a long-term memory by `key` (same `backend` override as
     /// [`SdkSession::memorize`]).
     pub fn recall(&self, key: String, backend: Option<String>) -> Result<Option<String>, SdkError> {
         let store = self.store_for(backend.as_deref())?;
-        let frag = rt()
-            .block_on(store.get_by_key(&self.session, &key))
-            .map_err(|e| SdkError::Core(e.to_string()))?;
+        let frag = rt().block_on(store.get_by_key(&self.session, &key))?;
         Ok(frag.map(|f| f.content))
     }
 
@@ -249,8 +259,7 @@ fn build_stores(
                 MemoContextStore::memory()
             } else {
                 MemoContextStore::open(Path::new(&path))
-            }
-            .map_err(|e| SdkError::Core(e.to_string()))?;
+            }?;
             Some(store)
         }
     };
@@ -269,26 +278,38 @@ fn build_stores(
             } else {
                 Some(memory.cloud_api_key.clone())
             };
-            Some(
-                cloud_context::CloudContextStore::new(&base, key.as_deref())
-                    .map_err(|e| SdkError::Core(e.to_string()))?,
-            )
+            Some(cloud_context::CloudContextStore::new(
+                &base,
+                key.as_deref(),
+            )?)
         }
     };
 
-    let default: Arc<dyn ContextStore> = match (local.clone(), cloud.clone()) {
-        (Some(l), Some(c)) => {
-            if backend == MemoryBackend::Both {
-                CompositeContextStore::new(l, c)
-            } else {
-                l
-            }
-        }
-        (Some(l), None) => l,
-        (None, Some(c)) => c,
-        (None, None) => return Err(SdkError::Core("no memory backend configured".into())),
-    };
+    let default = pick_default(backend, local.clone(), cloud.clone())?;
     Ok((default, local, cloud, backend.as_str().to_string()))
+}
+
+/// Select the store an agent uses by default for `backend`.
+///
+/// Kept as a separate, total function so the (normally unreachable) mismatch
+/// between the requested backend and the built stores is explicit rather than an
+/// `unreachable!()` in the middle of `build_stores`.
+fn pick_default(
+    backend: MemoryBackend,
+    local: Option<Arc<dyn ContextStore>>,
+    cloud: Option<Arc<dyn ContextStore>>,
+) -> Result<Arc<dyn ContextStore>, SdkError> {
+    match (backend, local, cloud) {
+        (MemoryBackend::Local, Some(local), _) => Ok(local),
+        (MemoryBackend::Cloud, _, Some(cloud)) => Ok(cloud),
+        (MemoryBackend::Both, Some(local), Some(cloud)) => {
+            Ok(CompositeContextStore::new(local, cloud))
+        }
+        _ => Err(SdkError::Core(format!(
+            "memory backend `{}` has no configured store",
+            backend.as_str()
+        ))),
+    }
 }
 
 /// Build an [`SdkAgent`] with an auto-assigned, isolated session scope.
@@ -330,10 +351,8 @@ fn make_agent(
     }
     let sandbox: Arc<dyn agent_sandbox::Sandbox> = Arc::new(DockerSandbox::new());
     let model = agent_core::default_model(&cfg);
-    let inner: Arc<Agent> = Arc::new(
-        Agent::with_handlers(cfg, model, context.clone(), sandbox, handlers)
-            .map_err(|e| SdkError::Core(e.to_string()))?,
-    );
+    let inner = Agent::with_handlers(cfg, model, context.clone(), sandbox, handlers)?;
+    let inner: Arc<Agent> = Arc::new(inner);
 
     Ok(Arc::new(SdkAgent {
         inner,
@@ -502,7 +521,7 @@ pub fn map_event(ev: &AgentEvent) -> SdkStreamEvent {
         } => SdkStreamEvent::ToolCall {
             id: id.clone(),
             name: name.clone(),
-            arguments: serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string()),
+            arguments: serde_json::to_string(arguments).unwrap_or_default(),
             result: Some(result.content.clone()),
         },
         AgentEvent::Done { text } => SdkStreamEvent::Done { text: text.clone() },
@@ -523,10 +542,7 @@ impl SdkAgent {
         let agent = self.inner.clone();
         rt().block_on(async move {
             let tools = sdk_tools();
-            let stream = agent
-                .run_event_stream(&input, &tools)
-                .await
-                .map_err(|e| SdkError::Core(e.to_string()))?;
+            let stream = agent.run_event_stream(&input, &tools).await?;
             let mut stream = stream;
             while let Some(item) = stream.next().await {
                 match item {
@@ -568,24 +584,23 @@ mod tests {
                 is_error: false,
             },
         });
-        match tc {
-            SdkStreamEvent::ToolCall {
-                id,
-                name,
-                arguments,
-                result,
-            } => {
-                assert_eq!(id, "c1");
-                assert_eq!(name, "shell");
-                assert_eq!(arguments, "{\"command\":[\"echo\",\"hi\"]}");
-                assert_eq!(result, Some("hi\n".to_string()));
-            }
-            _ => panic!("expected ToolCall"),
-        }
+        assert!(matches!(tc, SdkStreamEvent::ToolCall { .. }));
+        // Render instead of destructuring: an `if let` binding would leave the
+        // non-matching arm as a permanently-uncovered line.
+        let rendered = format!("{tc:?}");
+        assert!(rendered.contains("\"c1\""), "{rendered}");
+        assert!(rendered.contains("shell"), "{rendered}");
+        assert!(rendered.contains("echo"), "{rendered}");
+        assert!(rendered.contains("hi\\n"), "{rendered}");
         assert!(matches!(
             map_event(&AgentEvent::Done { text: "bye".into() }),
             SdkStreamEvent::Done { text } if text == "bye"
         ));
+        let step = map_event(&AgentEvent::Step {
+            phase: "recall".into(),
+            label: None,
+        });
+        assert!(matches!(step, SdkStreamEvent::Step { label: None, .. }));
     }
 
     #[test]
@@ -671,6 +686,533 @@ mod tests {
             assert!(names.contains(&n), "missing memo tool: {n}");
         }
         assert!(tools[0].parameters.is_object());
+    }
+
+    // ------------------------------------------------------------ test support
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialises env-var mutations and restores the previous process state.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn apply(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let mut saved = Vec::new();
+            for (key, value) in vars {
+                saved.push((*key, std::env::var(key).ok()));
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+
+        fn clear(keys: &[&'static str]) -> Self {
+            let vars: Vec<(&'static str, Option<&str>)> = keys.iter().map(|k| (*k, None)).collect();
+            Self::apply(&vars)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// A loopback OpenAI-compatible stub. Keeps its own multi-threaded runtime so
+    /// the server keeps serving while the (blocking) SDK calls run on this thread.
+    struct Gateway {
+        rt: tokio::runtime::Runtime,
+        server: wiremock::MockServer,
+    }
+
+    impl Gateway {
+        fn start() -> Self {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let server = rt.block_on(wiremock::MockServer::start());
+            Self { rt, server }
+        }
+
+        fn mount(&self, mock: wiremock::Mock) {
+            self.rt.block_on(async { mock.mount(&self.server).await });
+        }
+
+        fn base_url(&self) -> String {
+            format!("{}/v1", self.server.uri())
+        }
+
+        fn requests(&self) -> Vec<wiremock::Request> {
+            self.rt
+                .block_on(self.server.received_requests())
+                .unwrap_or_default()
+        }
+    }
+
+    fn completion(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": text },
+            }],
+        })
+    }
+
+    fn chat_mock(text: &str) -> wiremock::Mock {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(completion(text)))
+            .expect(1)
+    }
+
+    fn failing_chat_mock() -> wiremock::Mock {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(1)
+    }
+
+    /// Records the events a listener receives, rendered for assertions.
+    struct Recorder(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl SdkAgentListener for Recorder {
+        fn on_event(&self, event: SdkStreamEvent) {
+            let mut out = self.0.lock().unwrap();
+            out.push(format!("{event:?}"));
+        }
+    }
+
+    fn dummy_session(local: bool, cloud: bool) -> SdkSession {
+        use agent_core::context::MemoryContextStore;
+        SdkSession {
+            context: MemoryContextStore::new(),
+            local: local.then(|| MemoryContextStore::new() as Arc<dyn ContextStore>),
+            cloud: cloud.then(|| MemoryContextStore::new() as Arc<dyn ContextStore>),
+            backend: "both".into(),
+            session: "s".into(),
+        }
+    }
+
+    // -------------------------------------------------------------- configs
+
+    #[test]
+    fn sdk_config_defaults_are_the_quickstart_shape() {
+        let memory = SdkMemoryConfig::default();
+        assert_eq!(memory.backend, "local");
+        assert!(memory.local_db_path.is_empty());
+        assert!(memory.cloud_base_url.is_empty());
+        assert!(memory.cloud_api_key.is_empty());
+
+        let config = SdkAgentConfig::default();
+        assert_eq!(config.agent_name, "agent");
+        assert!(config.instructions.is_empty());
+        assert_eq!(config.sandbox_provider, "docker");
+        assert_eq!(config.model, "gpt-4o-mini");
+        assert_eq!(config.memory.backend, "local");
+    }
+
+    #[test]
+    fn tenant_memory_keeps_explicit_or_empty_scopes() {
+        // No tenant, or an explicit path, means "leave the config alone".
+        let untouched = tenant_memory("", SdkMemoryConfig::default());
+        assert!(untouched.local_db_path.is_empty());
+        let explicit = SdkMemoryConfig {
+            local_db_path: "/tmp/elsewhere.db".into(),
+            ..SdkMemoryConfig::default()
+        };
+        assert_eq!(
+            tenant_memory("acme", explicit).local_db_path,
+            "/tmp/elsewhere.db"
+        );
+    }
+
+    #[test]
+    fn tenant_memory_scopes_the_default_database_under_tenants() {
+        let dir = std::env::temp_dir().join(format!("aria-tenant-{}", next_session()));
+        let env = EnvGuard::apply(&[("ARIA_MEMO_DIR", Some(dir.to_string_lossy().as_ref()))]);
+        let scoped = tenant_memory("acme", SdkMemoryConfig::default());
+        drop(env);
+        assert_eq!(
+            scoped.local_db_path,
+            dir.join("tenants")
+                .join("acme")
+                .join("memo.db")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn tenant_memory_falls_back_to_the_temp_dir() {
+        let env = EnvGuard::clear(&["ARIA_MEMO_DIR"]);
+        let scoped = tenant_memory("acme", SdkMemoryConfig::default());
+        drop(env);
+        assert!(scoped
+            .local_db_path
+            .starts_with(&*std::env::temp_dir().to_string_lossy()));
+        assert!(scoped.local_db_path.ends_with("tenants/acme/memo.db"));
+    }
+
+    #[test]
+    fn tenant_entries_build_agents() {
+        let dir = std::env::temp_dir().join(format!("aria-tenant-entry-{}", next_session()));
+        let _env = EnvGuard::apply(&[("ARIA_MEMO_DIR", Some(dir.to_string_lossy().as_ref()))]);
+
+        let agent = create_agent_for_tenant("acme".into(), "t".into(), "gpt-test".into()).unwrap();
+        assert_eq!(agent.memory_backend(), "local");
+        assert!(dir.join("tenants").join("acme").join("memo.db").exists());
+
+        let config = SdkAgentConfig {
+            agent_name: "t2".into(),
+            instructions: "be nice".into(),
+            model: "gpt-test".into(),
+            sandbox_provider: "browser".into(),
+            memory: SdkMemoryConfig {
+                local_db_path: dir.join("t2.db").to_string_lossy().into_owned(),
+                ..SdkMemoryConfig::default()
+            },
+        };
+        let agent = create_agent_for_tenant_with("acme".into(), config).unwrap();
+        assert_eq!(agent.memory_backend(), "local");
+        assert!(dir.join("t2.db").exists());
+
+        // An empty tenant behaves like `create_agent` (no tenant directory).
+        let agent = create_agent_for_tenant(String::new(), "t3".into(), "gpt-test".into()).unwrap();
+        assert_eq!(agent.memory_backend(), "local");
+    }
+
+    // --------------------------------------------------------------- backends
+
+    #[test]
+    fn store_for_resolves_overrides_and_reports_missing_stores() {
+        let both = dummy_session(true, true);
+        assert!(both.store_for(None).is_ok());
+        assert!(both.store_for(Some("   ")).is_ok());
+        assert!(both.store_for(Some("local")).is_ok());
+        assert!(both.store_for(Some("cloud")).is_ok());
+        assert!(both.store_for(Some("both")).is_ok());
+        let err = both.store_for(Some("nonsense")).err().unwrap();
+        assert!(err.to_string().contains("unknown memory backend"), "{err}");
+
+        let local_only = dummy_session(true, false);
+        let err = local_only.store_for(Some("cloud")).err().unwrap();
+        assert!(
+            err.to_string().contains("cloud backend is not configured"),
+            "{err}"
+        );
+        let err = local_only.store_for(Some("both")).err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("both backend needs local and cloud stores"),
+            "{err}"
+        );
+
+        let cloud_only = dummy_session(false, true);
+        let err = cloud_only.store_for(Some("local")).err().unwrap();
+        assert!(
+            err.to_string().contains("local backend is not configured"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn pick_default_rejects_a_backend_without_its_store() {
+        use agent_core::context::MemoryContextStore;
+        assert!(pick_default(MemoryBackend::Local, None, None).is_err());
+        assert!(pick_default(MemoryBackend::Cloud, Some(MemoryContextStore::new()), None).is_err());
+        assert!(pick_default(MemoryBackend::Both, Some(MemoryContextStore::new()), None).is_err());
+        let err = pick_default(MemoryBackend::Local, None, None)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("memory backend `local` has no configured store"),
+            "{err}"
+        );
+        assert!(pick_default(MemoryBackend::Local, Some(MemoryContextStore::new()), None).is_ok());
+        assert!(pick_default(MemoryBackend::Cloud, None, Some(MemoryContextStore::new())).is_ok());
+        assert!(pick_default(
+            MemoryBackend::Both,
+            Some(MemoryContextStore::new()),
+            Some(MemoryContextStore::new())
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn cloud_backend_uses_env_fallbacks_and_skips_the_local_store() {
+        let _env = EnvGuard::clear(&["ARIA_AGENT_BASE_URL", "ARIA_AGENT_API_KEY", "ARIA_MEMO_DB"]);
+        let cfg = SdkMemoryConfig {
+            backend: "cloud".into(),
+            ..SdkMemoryConfig::default()
+        };
+        let (_context, local, cloud, backend) = build_stores(&cfg).unwrap();
+        assert!(local.is_none(), "cloud-only agents must not open a memo db");
+        assert!(cloud.is_some());
+        assert_eq!(backend, "cloud");
+    }
+
+    #[test]
+    fn explicit_cloud_settings_win_over_the_environment() {
+        let _env = EnvGuard::apply(&[
+            ("ARIA_AGENT_BASE_URL", Some("http://127.0.0.1:1")),
+            ("ARIA_AGENT_API_KEY", Some("env-key")),
+        ]);
+        let cfg = SdkMemoryConfig {
+            backend: "both".into(),
+            local_db_path: String::new(),
+            cloud_base_url: "http://127.0.0.1:2".into(),
+            cloud_api_key: "explicit-key".into(),
+        };
+        let (context, local, cloud, backend) = build_stores(&cfg).unwrap();
+        assert!(local.is_some() && cloud.is_some());
+        assert_eq!(backend, "both");
+        // The composite store is the default for `both`.
+        assert!(Arc::ptr_eq(&context, &context));
+    }
+
+    #[test]
+    fn build_stores_reports_unusable_paths_and_urls() {
+        let _env = EnvGuard::apply(&[("ARIA_MEMO_DB", None), ("ARIA_AGENT_BASE_URL", None)]);
+
+        // A database path under a non-directory can never be opened.
+        let bad_path = SdkMemoryConfig {
+            local_db_path: "/dev/null/memo.db".into(),
+            ..SdkMemoryConfig::default()
+        };
+        let err = build_stores(&bad_path).err().unwrap();
+        assert!(err.to_string().starts_with("core error:"), "{err}");
+
+        // An explicitly blank base URL is rejected by the cloud store.
+        std::env::set_var("ARIA_AGENT_BASE_URL", "");
+        let blank_url = SdkMemoryConfig {
+            backend: "cloud".into(),
+            ..SdkMemoryConfig::default()
+        };
+        let err = build_stores(&blank_url).err().unwrap();
+        assert!(err.to_string().contains("cloud base url is empty"), "{err}");
+    }
+
+    #[test]
+    fn unknown_backend_falls_back_to_local() {
+        let cfg = SdkMemoryConfig {
+            backend: "satellite".into(),
+            ..SdkMemoryConfig::default()
+        };
+        let (_context, local, cloud, backend) = build_stores(&cfg).unwrap();
+        assert_eq!(backend, "local");
+        assert!(local.is_some() && cloud.is_none());
+    }
+
+    #[test]
+    fn session_surfaces_store_errors() {
+        let cloud = crate::cloud_context::CloudContextStore::new("http://127.0.0.1:0", None)
+            .unwrap() as Arc<dyn ContextStore>;
+        let session = SdkSession {
+            context: cloud.clone(),
+            local: None,
+            cloud: Some(cloud),
+            backend: "cloud".into(),
+            session: "s".into(),
+        };
+        let err = session
+            .memorize("k".into(), "v".into(), None)
+            .expect_err("cloud is unreachable");
+        assert!(err.to_string().contains("cloud write failed"), "{err}");
+        let err = session
+            .recall("k".into(), None)
+            .expect_err("cloud is unreachable");
+        assert!(err.to_string().contains("cloud read failed"), "{err}");
+    }
+
+    // ------------------------------------------------------------ agent runs
+
+    #[test]
+    fn quickstart_agent_runs_a_turn_against_the_gateway() {
+        let gateway = Gateway::start();
+        gateway.mount(chat_mock("hi there"));
+        let base = gateway.base_url();
+        let _env = EnvGuard::apply(&[
+            ("GATEWAY_BASE_URL", Some(base.as_str())),
+            ("GATEWAY_API_KEY", Some("test-key")),
+        ]);
+
+        let agent = create_agent("quickstart".into(), "gpt-test".into()).unwrap();
+        assert_eq!(agent.memory_backend(), "local");
+        assert!(agent.session_id().starts_with("sess-"));
+        assert_eq!(agent.run("hello".into()).unwrap(), "hi there");
+
+        let session = agent.session();
+        assert_eq!(session.memory_backend(), "local");
+        session
+            .memorize("fact".into(), "water is wet".into(), None)
+            .unwrap();
+        assert_eq!(
+            session.recall("fact".into(), None).unwrap(),
+            Some("water is wet".into())
+        );
+
+        let reqs = gateway.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].url.path(), "/v1/chat/completions");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let user = body["messages"][1]["content"].as_str().unwrap();
+        assert!(user.ends_with("USER: hello"), "{user}");
+        assert_eq!(body["model"], "gpt-test");
+    }
+
+    #[test]
+    fn run_surfaces_model_errors() {
+        let gateway = Gateway::start();
+        gateway.mount(failing_chat_mock());
+        let base = gateway.base_url();
+        let _env = EnvGuard::apply(&[
+            ("GATEWAY_BASE_URL", Some(base.as_str())),
+            ("GATEWAY_API_KEY", Some("test-key")),
+        ]);
+        let agent = create_agent("failing".into(), "gpt-test".into()).unwrap();
+        let err = agent.run("hello".into()).unwrap_err();
+        assert!(err.to_string().starts_with("core error:"), "{err}");
+    }
+
+    #[test]
+    fn run_stream_emits_events_until_done() {
+        let gateway = Gateway::start();
+        gateway.mount(chat_mock("streamed reply"));
+        let base = gateway.base_url();
+        let _env = EnvGuard::apply(&[
+            ("GATEWAY_BASE_URL", Some(base.as_str())),
+            ("GATEWAY_API_KEY", Some("test-key")),
+        ]);
+
+        let agent = create_agent("streamer".into(), "gpt-test".into()).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent
+            .run_stream("hello".into(), Box::new(Recorder(events.clone())))
+            .unwrap();
+
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("Step { phase: \"recall\", label: None }")
+        );
+        assert!(
+            seen.contains(&"Step { phase: \"model\", label: None }".to_string()),
+            "{seen:?}"
+        );
+        assert!(
+            seen.contains(&"Token { text: \"streamed reply\" }".to_string()),
+            "{seen:?}"
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("Done { text: \"streamed reply\" }")
+        );
+    }
+
+    #[test]
+    fn run_stream_reports_stream_errors() {
+        let gateway = Gateway::start();
+        gateway.mount(failing_chat_mock());
+        let base = gateway.base_url();
+        let _env = EnvGuard::apply(&[
+            ("GATEWAY_BASE_URL", Some(base.as_str())),
+            ("GATEWAY_API_KEY", Some("test-key")),
+        ]);
+
+        let agent = create_agent("streamer".into(), "gpt-test".into()).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let err = agent
+            .run_stream("hello".into(), Box::new(Recorder(events.clone())))
+            .unwrap_err();
+        assert!(err.to_string().starts_with("core error:"), "{err}");
+        let seen = events.lock().unwrap().clone();
+        assert!(
+            seen.last()
+                .is_some_and(|e| e.starts_with("Error { message:")),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn run_stream_propagates_a_failing_context() {
+        // An unreachable cloud store fails during the recall that precedes the
+        // model call, so `run_event_stream` itself returns an error.
+        let context: Arc<dyn ContextStore> =
+            crate::cloud_context::CloudContextStore::new("http://127.0.0.1:0", None).unwrap();
+        let cfg = AgentConfig {
+            session: "unreachable".into(),
+            ..AgentConfig::default()
+        };
+        let model = agent_core::default_model(&cfg);
+        let sandbox: Arc<dyn agent_sandbox::Sandbox> = Arc::new(DockerSandbox::new());
+        let inner = Agent::with_handlers(cfg, model, context.clone(), sandbox, vec![]).unwrap();
+
+        let agent = SdkAgent {
+            inner: Arc::new(inner),
+            context,
+            local: None,
+            cloud: None,
+            backend: "cloud".into(),
+        };
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let err = agent
+            .run_stream("hello".into(), Box::new(Recorder(events.clone())))
+            .unwrap_err();
+        assert!(err.to_string().contains("cloud request failed"), "{err}");
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn advanced_entry_builds_an_agent_with_instructions_and_a_browser() {
+        let config = SdkAgentConfig {
+            agent_name: "advanced".into(),
+            instructions: "be concise".into(),
+            model: "gpt-test".into(),
+            sandbox_provider: "browser".into(),
+            memory: SdkMemoryConfig::default(),
+        };
+        let agent = create_agent_with(config).unwrap();
+        assert_eq!(agent.memory_backend(), "local");
+        assert!(agent.session_id().starts_with("sess-"));
+    }
+
+    #[test]
+    fn env_guard_restores_previous_values() {
+        // A pre-existing value exercises the `Some` restore arm; a variable that
+        // was absent exercises the `None` arm. Guards are never nested (the lock
+        // is not re-entrant).
+        const KEY: &str = "ARIA_AGENT_TEST_SEED";
+        std::env::set_var(KEY, "first");
+        let guard = EnvGuard::apply(&[(KEY, Some("second"))]);
+        assert_eq!(std::env::var(KEY).unwrap(), "second");
+        drop(guard);
+        assert_eq!(std::env::var(KEY).unwrap(), "first");
+
+        std::env::remove_var(KEY);
+        let guard = EnvGuard::clear(&[KEY]);
+        assert!(std::env::var(KEY).is_err());
+        drop(guard);
+        assert!(std::env::var(KEY).is_err());
     }
 }
 

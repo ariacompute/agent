@@ -27,3 +27,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 default = ["openai"]
 # Wire real OpenAI calls in the SDK agent runtime.
 openai = ["aria-agent-core/openai"]
+
+[dev-dependencies]
+# Local HTTP stubs for the cloud backend (no real network in tests).
+wiremock = "0.6"
+tempfile = "3"

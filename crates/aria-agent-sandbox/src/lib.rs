@@ -376,10 +376,10 @@ fn candidate_sockets() -> Vec<String> {
     if let Ok(p) = env::var("ARIA_DOCKER_SOCKET") {
         push(p);
     }
-    if let Ok(h) = env::var("DOCKER_HOST") {
-        if let Some(rest) = h.strip_prefix("unix://") {
-            push(rest.to_string());
-        }
+    if let Ok(host) = env::var("DOCKER_HOST") {
+        // Non-unix schemes (e.g. `tcp://`) contribute no socket path; `push`
+        // drops the empty string.
+        push(host.strip_prefix("unix://").unwrap_or_default().to_string());
     }
 
     #[cfg(unix)]
@@ -465,6 +465,18 @@ impl DockerSandbox {
     /// means the daemon's default runtime.
     pub fn runtime(&self) -> Option<&str> {
         self.runtime.as_deref()
+    }
+
+    /// Build a sandbox around an explicit daemon client. Used by tests (and by
+    /// embedders that already own a `bollard::Docker`), so the Docker I/O paths
+    /// can be exercised against a stub Engine API instead of a live daemon.
+    pub fn with_client(docker: Docker) -> Self {
+        Self {
+            docker: OnceCell::from(docker),
+            sockets: None,
+            resources: SandboxResourceLimits::from_env(),
+            runtime: None,
+        }
     }
 
     /// Pin the sandbox to one socket path (no `DOCKER_HOST`/auto-discovery).
@@ -805,8 +817,9 @@ mod tests {
     fn candidate_sockets_include_desktop_and_colima() {
         let cands = candidate_sockets();
         assert!(cands.contains(&"/var/run/docker.sock".to_string()));
-        if let Ok(home) = env::var("HOME") {
-            // Docker Desktop (macOS) keeps the daemon here by default.
+        // Docker Desktop (macOS) and Colima keep the daemon under `$HOME`.
+        let home = env::var("HOME").ok();
+        for home in home.iter() {
             assert!(cands.contains(&format!("{home}/.docker/run/docker.sock")));
             assert!(cands.contains(&format!("{home}/.colima/default/docker.sock")));
         }
@@ -1061,5 +1074,521 @@ mod tests {
         assert_eq!(out.unwrap().exit_code, 1);
         // destroy logs-and-continues on failure; it must not panic.
         let _ = sandbox.destroy(SandboxHandle { id: "nope".into() }).await;
+    }
+
+    // --- Stub Docker Engine API (raw TCP, so `exec` upgrade works) ---
+
+    #[cfg(unix)]
+    #[test]
+    fn parser_accepts_terabytes_and_rejects_zero_or_bad_units() {
+        assert_eq!(parse_memory(Some("1t".into()), 0), 1024i64.pow(4));
+        assert_eq!(parse_memory(Some(" 1.5G ".into()), 0), 1536 * 1024 * 1024);
+        // Unknown unit and non-positive values fall back to the default.
+        assert_eq!(parse_memory(Some("1x".into()), 7), 7);
+        assert_eq!(parse_memory(Some("0m".into()), 7), 7);
+    }
+
+    #[test]
+    fn every_provider_roundtrips_including_browser() {
+        for p in [
+            SandboxProvider::Docker,
+            SandboxProvider::Kata,
+            SandboxProvider::Cube,
+            SandboxProvider::Codex,
+            SandboxProvider::Browser,
+        ] {
+            assert_eq!(SandboxProvider::parse(p.as_str()), Some(p));
+        }
+        // Browser and codex are out-of-crate backends: selectable, not buildable.
+        assert!(matches!(
+            from_provider(SandboxProvider::Browser),
+            Err(SandboxError::NotConfigured(msg)) if msg.contains("browser")
+        ));
+    }
+
+    #[test]
+    fn default_impls_build_every_provider() {
+        let _ = DockerSandbox::default();
+        let _ = KataSandbox::default();
+        let _ = CubeSandbox::default();
+    }
+
+    #[tokio::test]
+    async fn kata_and_cube_delegate_to_their_inner_sandboxes() {
+        // Without a daemon every delegate call fails; the point is that the
+        // forwarding impls are the ones being exercised (not a panic).
+        let kata = KataSandbox::default();
+        let spec = ExecSpec::command(vec!["true".into()]);
+        assert!(kata.spawn(&spec).await.is_err());
+        assert!(kata
+            .exec(&SandboxHandle { id: "x".into() }, &["true".into()])
+            .await
+            .is_err());
+        assert!(kata
+            .destroy(SandboxHandle { id: "x".into() })
+            .await
+            .is_err());
+
+        let cube = CubeSandbox::default();
+        assert!(cube.spawn(&spec).await.is_err());
+        assert!(cube
+            .exec(&SandboxHandle { id: "x".into() }, &["true".into()])
+            .await
+            .is_err());
+        // destroy logs-and-continues.
+        let _ = cube.destroy(SandboxHandle { id: "x".into() }).await;
+    }
+
+    static SOCKET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_sockets_honour_the_environment_overrides() {
+        let _lock = SOCKET_ENV_LOCK.lock().unwrap();
+        // Pre-seed one variable so both restore arms are exercised: a value to
+        // put back, and a variable that must end up removed.
+        env::set_var("ARIA_DOCKER_SOCKET", "/tmp/aria-before.sock");
+        env::remove_var("DOCKER_HOST");
+        let saved_socket = env::var("ARIA_DOCKER_SOCKET").ok();
+        let saved_host = env::var("DOCKER_HOST").ok();
+        env::set_var("ARIA_DOCKER_SOCKET", "/tmp/aria-explicit.sock");
+        env::set_var("DOCKER_HOST", "unix:///tmp/aria-docker-host.sock");
+        let cands = candidate_sockets();
+        env::set_var("DOCKER_HOST", "tcp://127.0.0.1:2375");
+        let tcp_cands = candidate_sockets();
+        for (key, value) in [
+            ("ARIA_DOCKER_SOCKET", saved_socket),
+            ("DOCKER_HOST", saved_host),
+        ] {
+            match value {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
+        }
+        assert!(cands.contains(&"/tmp/aria-explicit.sock".to_string()));
+        assert!(cands.contains(&"/tmp/aria-docker-host.sock".to_string()));
+        // A `tcp://` DOCKER_HOST contributes no unix socket.
+        assert!(!tcp_cands.contains(&"/tmp/aria-docker-host.sock".to_string()));
+    }
+
+    #[tokio::test]
+    async fn client_accepts_an_existing_socket_file() {
+        // `connect_with_socket` only needs the socket *file* to exist.
+        let path = std::env::temp_dir().join(format!("aria-sock-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"").unwrap();
+        let sandbox = DockerSandbox::with_socket(path.to_string_lossy().to_string());
+        assert!(sandbox.client().await.is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    // The guard is intentionally held across the await: it serializes the
+    // `DOCKER_HOST` mutation for the whole resolution, and nothing inside the
+    // awaited future tries to take it again.
+    #[allow(clippy::await_holding_lock)]
+    async fn client_falls_back_to_probing_when_local_defaults_fail() {
+        let _lock = SOCKET_ENV_LOCK.lock().unwrap();
+        let saved = env::var("DOCKER_HOST").ok();
+        // Pointing at a socket that does not exist makes the local defaults fail.
+        env::set_var("DOCKER_HOST", "unix:///tmp/aria-no-such-docker.sock");
+        let sandbox = DockerSandbox::new();
+        let result = sandbox.client().await.map(|_| ());
+        match saved {
+            Some(v) => env::set_var("DOCKER_HOST", v),
+            None => env::remove_var("DOCKER_HOST"),
+        }
+        // The probe may still find a real daemon socket (e.g. a mounted
+        // `/var/run/docker.sock`); what matters is that the fallback runs and
+        // never panics.
+        assert!(
+            matches!(result, Ok(()) | Err(SandboxError::NotConfigured(_))),
+            "unexpected fallback outcome: {result:?}"
+        );
+    }
+
+    /// One request the stub daemon saw, in `METHOD path` form.
+    fn request_line(head: &str) -> String {
+        head.lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Route {
+        CreateContainer,
+        StartContainer,
+        CreateExec,
+        StartExec,
+        InspectExec,
+        RemoveContainer,
+        Other,
+    }
+
+    fn route_of(method: &str, path: &str) -> Route {
+        let path = path.split('?').next().unwrap_or(path);
+        if method == "DELETE" && path.contains("/containers/") {
+            return Route::RemoveContainer;
+        }
+        if path.ends_with("/containers/create") {
+            return Route::CreateContainer;
+        }
+        if path.ends_with("/exec") {
+            return Route::CreateExec;
+        }
+        if path.contains("/exec/") && path.ends_with("/start") {
+            return Route::StartExec;
+        }
+        if path.contains("/exec/") && path.ends_with("/json") {
+            return Route::InspectExec;
+        }
+        if path.contains("/containers/") && path.ends_with("/start") {
+            return Route::StartContainer;
+        }
+        Route::Other
+    }
+
+    /// A hand-rolled Docker Engine API stub.
+    ///
+    /// `bollard` starts `exec` with a raw-stream **upgrade**, which JSON mock
+    /// servers cannot emulate, so this speaks HTTP over a plain TCP socket and
+    /// writes multiplexed frames after the `101` response.
+    struct EngineStub {
+        endpoint: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl EngineStub {
+        fn start() -> Self {
+            Self::start_with(Route::Other, false)
+        }
+
+        /// Serve normally except for `fail`, which answers `500`.
+        fn start_failing(fail: Route) -> Self {
+            Self::start_with(fail, false)
+        }
+
+        /// Answer `exec` with an upgraded stream that is cut off mid-frame.
+        fn start_truncating() -> Self {
+            Self::start_with(Route::Other, true)
+        }
+
+        fn start_with(fail: Route, truncate: bool) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = std::sync::Arc::clone(&requests);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    serve(&mut stream, &seen, fail, truncate);
+                }
+            });
+            Self { endpoint, requests }
+        }
+
+        fn client(&self) -> Docker {
+            Docker::connect_with_http(&self.endpoint, 5, API_DEFAULT_VERSION).unwrap()
+        }
+
+        fn sandbox(&self) -> DockerSandbox {
+            DockerSandbox::with_client(self.client())
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn serve(
+        stream: &mut std::net::TcpStream,
+        seen: &std::sync::Mutex<Vec<String>>,
+        fail: Route,
+        truncate: bool,
+    ) {
+        use std::io::{Read, Write};
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 128];
+        let head_end = loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let line = request_line(&head);
+        seen.lock().unwrap().push(line.clone());
+        let mut parts = line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let path = parts.next().unwrap_or_default().to_string();
+        let route = route_of(&method, &path);
+
+        // Drain any declared body so the client is not left writing into a
+        // closed socket.
+        let declared = head
+            .lines()
+            .find_map(|l| {
+                let l = l.to_ascii_lowercase();
+                l.strip_prefix("content-length:")
+                    .map(|v| v.trim().to_string())
+            })
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        while buf.len() < head_end + declared {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+
+        // `Route::Other` doubles as "never fail", so the 404 branch stays reachable.
+        if route == fail && fail != Route::Other {
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            );
+            let _ = stream.flush();
+            return;
+        }
+
+        match route {
+            Route::CreateContainer => {
+                json(stream, "201 Created", r#"{"Id":"cid-1","Warnings":[]}"#)
+            }
+            Route::StartContainer | Route::RemoveContainer => {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                let _ = stream.flush();
+            }
+            Route::CreateExec => json(stream, "201 Created", r#"{"Id":"exec-1"}"#),
+            Route::InspectExec => json(stream, "200 OK", r#"{"ID":"exec-1","ExitCode":0}"#),
+            Route::StartExec => {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+                );
+                let _ = stream.flush();
+                if truncate {
+                    // Half a frame header, then EOF: the client's decoder errors.
+                    use std::io::Write;
+                    let _ = stream.write_all(&[1, 0]);
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+                frame(stream, 1, b"hello\n");
+                frame(stream, 2, b"oops\n");
+                // stdin frames are ignored by the sandbox.
+                frame(stream, 0, b"ignored\n");
+                let _ = stream.flush();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            Route::Other => {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                let _ = stream.flush();
+            }
+        }
+    }
+
+    fn json(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+        use std::io::Write;
+        let out = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(out.as_bytes());
+        let _ = stream.flush();
+    }
+
+    fn frame(stream: &mut std::net::TcpStream, kind: u8, payload: &[u8]) {
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(8 + payload.len());
+        buf.push(kind);
+        buf.extend_from_slice(&[0, 0, 0]);
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(payload);
+        let _ = stream.write_all(&buf);
+    }
+
+    fn stub_spec() -> ExecSpec {
+        let mut spec = ExecSpec::command(vec!["true".into()]);
+        spec.env = vec![("ARIA".into(), "1".into())];
+        spec.workdir = Some("/work".into());
+        spec
+    }
+
+    #[tokio::test]
+    async fn docker_spawn_exec_and_destroy_against_a_stub_engine() {
+        let stub = EngineStub::start();
+        let sandbox = stub.sandbox();
+
+        let handle = sandbox.spawn(&stub_spec()).await.unwrap();
+        assert!(handle.id.starts_with("aria-sandbox-"), "{}", handle.id);
+
+        let out = sandbox
+            .exec(&handle, &["echo".into(), "hello".into()])
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, "hello\n");
+        assert_eq!(out.stderr, "oops\n");
+
+        sandbox.destroy(handle).await.unwrap();
+
+        let seen = stub.requests();
+        assert!(
+            seen.iter().any(|l| l.contains("/containers/create")),
+            "create: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|l| l.contains("/containers/") && l.contains("/start")),
+            "start: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|l| l.contains("/containers/") && l.contains("/exec")),
+            "exec: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|l| l.ends_with("/json")),
+            "inspect: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|l| l.starts_with("DELETE ") && l.contains("/containers/")),
+            "remove: {seen:?}"
+        );
+    }
+
+    fn connect_stub(endpoint: &str) -> std::net::TcpStream {
+        std::net::TcpStream::connect(endpoint.trim_start_matches("http://")).unwrap()
+    }
+
+    #[test]
+    fn engine_stub_answers_unknown_routes_with_404() {
+        use std::io::{Read, Write};
+        let stub = EngineStub::start();
+        let mut sock = connect_stub(&stub.endpoint);
+        sock.write_all(b"GET /v1.0/nope HTTP/1.1\r\nHost: stub\r\n\r\n")
+            .unwrap();
+        let mut out = String::new();
+        sock.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 404"), "{out}");
+        assert_eq!(stub.requests(), vec!["GET /v1.0/nope".to_string()]);
+    }
+
+    #[test]
+    fn engine_stub_survives_a_client_that_hangs_up_early() {
+        use std::io::{Read, Write};
+        let stub = EngineStub::start();
+        // Connected and closed without a request: nothing is recorded.
+        drop(connect_stub(&stub.endpoint));
+        // A body shorter than its declared length ends the drain loop.
+        let mut sock = connect_stub(&stub.endpoint);
+        sock.write_all(
+            b"POST /v1.0/containers/create HTTP/1.1\r\nHost: stub\r\nContent-Length: 100\r\n\r\nonly-ten!!",
+        )
+        .unwrap();
+        sock.flush().unwrap();
+        sock.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut out = String::new();
+        sock.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 201"), "{out}");
+        assert_eq!(stub.requests().len(), 1);
+
+        // A body larger than one read chunk needs a second read.
+        let mut sock = connect_stub(&stub.endpoint);
+        let body = "x".repeat(6000);
+        let req = format!(
+            "POST /v1.0/containers/create HTTP/1.1\r\nHost: stub\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        sock.write_all(req.as_bytes()).unwrap();
+        sock.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut out = String::new();
+        sock.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 201"), "{out}");
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn docker_spawn_surfaces_create_and_start_errors() {
+        let create = EngineStub::start_failing(Route::CreateContainer);
+        let err = create
+            .sandbox()
+            .spawn(&ExecSpec::command(vec!["true".into()]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Spawn(_)), "{err}");
+
+        let start = EngineStub::start_failing(Route::StartContainer);
+        let err = start
+            .sandbox()
+            .spawn(&ExecSpec::command(vec!["true".into()]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Spawn(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn docker_exec_surfaces_create_and_start_errors() {
+        let handle = SandboxHandle { id: "c".into() };
+        let create = EngineStub::start_failing(Route::CreateExec);
+        let err = create
+            .sandbox()
+            .exec(&handle, &["true".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
+
+        let start = EngineStub::start_failing(Route::StartExec);
+        let err = start
+            .sandbox()
+            .exec(&handle, &["true".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn docker_exec_tolerates_an_uninspectable_exec() {
+        let stub = EngineStub::start_failing(Route::InspectExec);
+        let out = stub
+            .sandbox()
+            .exec(&SandboxHandle { id: "c".into() }, &["true".into()])
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, -1, "unknown exit code must degrade to -1");
+    }
+
+    #[tokio::test]
+    async fn docker_exec_surfaces_stream_errors() {
+        let stub = EngineStub::start_truncating();
+        let err = stub
+            .sandbox()
+            .exec(&SandboxHandle { id: "c".into() }, &["true".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn docker_destroy_surfaces_errors() {
+        let stub = EngineStub::start_failing(Route::RemoveContainer);
+        let err = stub
+            .sandbox()
+            .destroy(SandboxHandle { id: "c".into() })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
     }
 }

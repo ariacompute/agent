@@ -43,6 +43,14 @@ pub enum CoreError {
     Config(String),
 }
 
+/// Map any model/transport failure to [`CoreError::Model`].
+///
+/// Shared by every call site so the mapping is one exercised line instead of a
+/// per-call closure that only runs on unreachable validation failures.
+fn model_err(e: impl std::fmt::Display) -> CoreError {
+    CoreError::Model(e.to_string())
+}
+
 /// A single model request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -333,13 +341,13 @@ mod openai_impl {
                 .model(self.model.clone())
                 .messages(messages)
                 .build()
-                .map_err(|e| CoreError::Model(e.to_string()))?;
+                .map_err(model_err)?;
             let resp = self
                 .client
                 .chat()
                 .create(request)
                 .await
-                .map_err(|e| CoreError::Model(e.to_string()))?;
+                .map_err(model_err)?;
             let text = resp
                 .choices
                 .first()
@@ -372,7 +380,7 @@ mod openai_impl {
                 .messages(messages)
                 .stream(true)
                 .build()
-                .map_err(|e| CoreError::Model(e.to_string()))?;
+                .map_err(model_err)?;
             let client = self.client.clone();
             let s = async_stream::stream! {
                 let mut stream = match client.chat().create_stream(request).await {
@@ -427,13 +435,13 @@ mod openai_impl {
                     .tools(tools)
                     .tool_choice(ChatCompletionToolChoiceOption::Auto);
             }
-            let request = b.build().map_err(|e| CoreError::Model(e.to_string()))?;
+            let request = b.build().map_err(model_err)?;
             let resp = self
                 .client
                 .chat()
                 .create(request)
                 .await
-                .map_err(|e| CoreError::Model(e.to_string()))?;
+                .map_err(model_err)?;
             let choice = resp
                 .choices
                 .first()
@@ -541,6 +549,277 @@ mod openai_impl {
             // Invalid JSON falls back to Null rather than aborting the turn.
             assert_eq!(parsed.len(), 1);
             assert_eq!(parsed[0].arguments, serde_json::Value::Null);
+        }
+
+        // --- OpenAiModel against a loopback stub (no network) ---
+        mod openai_http {
+            use super::*;
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+            struct EnvGuard {
+                _lock: std::sync::MutexGuard<'static, ()>,
+                saved: Vec<(&'static str, Option<String>)>,
+            }
+
+            impl EnvGuard {
+                fn apply(vars: &[(&'static str, Option<&str>)]) -> Self {
+                    let lock = ENV_LOCK.lock().unwrap();
+                    let mut saved = Vec::new();
+                    for (key, value) in vars {
+                        saved.push((*key, std::env::var(key).ok()));
+                        match value {
+                            Some(v) => std::env::set_var(key, v),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                    Self { _lock: lock, saved }
+                }
+            }
+
+            impl Drop for EnvGuard {
+                fn drop(&mut self) {
+                    for (key, value) in &self.saved {
+                        restore_env(key, value);
+                    }
+                }
+            }
+
+            /// `Some` puts the previous value back; `None` removes the variable.
+            fn restore_env(key: &str, value: &Option<String>) {
+                if let Some(v) = value {
+                    std::env::set_var(key, v);
+                    return;
+                }
+                std::env::remove_var(key);
+            }
+
+            #[test]
+            fn restore_env_puts_values_back_and_removes_missing_keys() {
+                std::env::set_var("ARIA_TEST_RESTORE", "original");
+                restore_env("ARIA_TEST_RESTORE", &Some("restored".to_string()));
+                assert_eq!(std::env::var("ARIA_TEST_RESTORE").unwrap(), "restored");
+                restore_env("ARIA_TEST_RESTORE", &None);
+                assert!(std::env::var("ARIA_TEST_RESTORE").is_err());
+            }
+
+            fn request() -> ModelRequest {
+                ModelRequest {
+                    system: "be nice".into(),
+                    context: "ctx".into(),
+                    input: "hello".into(),
+                }
+            }
+
+            fn chat_response(
+                content: Option<&str>,
+                tool_calls: Option<serde_json::Value>,
+            ) -> serde_json::Value {
+                let mut message = serde_json::json!({ "role": "assistant", "content": content });
+                if let Some(calls) = tool_calls {
+                    message["tool_calls"] = calls;
+                }
+                serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "stub",
+                    "choices": [{ "index": 0, "finish_reason": "stop", "message": message }],
+                })
+            }
+
+            #[tokio::test]
+            async fn complete_decodes_the_reply_and_sends_env_config() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/chat/completions"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(chat_response(Some("stubbed reply"), None)),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                // Pre-seed one variable so the guard restores (rather than removes)
+                // it on drop.
+                std::env::set_var("GATEWAY_API_KEY", "previous");
+                let guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("GATEWAY_API_KEY", Some("key")),
+                    ("GATEWAY_MODEL", Some("gw-model")),
+                ]);
+                let model = OpenAiModel::new("ignored");
+                let resp = model.complete(&request()).await.unwrap();
+                assert_eq!(resp.text, "stubbed reply");
+
+                let reqs = server.received_requests().await.unwrap();
+                assert_eq!(reqs[0].headers.get("authorization").unwrap(), "Bearer key");
+                let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+                assert_eq!(body["model"], "gw-model");
+                drop(guard);
+            }
+
+            #[tokio::test]
+            async fn complete_reports_upstream_errors() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(500))
+                    .mount(&server)
+                    .await;
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("OPENAI_BASE_URL", None),
+                    ("OPENAI_MODEL", Some("fallback-model")),
+                    ("GATEWAY_MODEL", None),
+                ]);
+                let model = OpenAiModel::new("ignored");
+                let err = model.complete(&request()).await.unwrap_err();
+                assert!(matches!(err, CoreError::Model(_)));
+            }
+
+            #[tokio::test]
+            async fn complete_with_tools_parses_tool_calls() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(chat_response(
+                        None,
+                        Some(serde_json::json!([{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "shell",
+                                "arguments": "{\"command\":[\"echo\",\"hi\"]}",
+                            },
+                        }])),
+                    )))
+                    .mount(&server)
+                    .await;
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("GATEWAY_MODEL", Some("stub")),
+                ]);
+                let model = OpenAiModel::new("stub");
+                let tools = vec![Tool {
+                    name: "shell".into(),
+                    description: "run".into(),
+                    parameters: serde_json::json!({ "type": "object" }),
+                }];
+                let turn = model.complete_with_tools(&request(), &tools).await.unwrap();
+                assert_eq!(turn.tool_calls.len(), 1);
+                assert_eq!(turn.tool_calls[0].name, "shell");
+                assert_eq!(
+                    turn.tool_calls[0].arguments["command"][0],
+                    serde_json::json!("echo")
+                );
+                assert!(turn.text.is_empty());
+
+                let body: serde_json::Value =
+                    serde_json::from_slice(&server.received_requests().await.unwrap()[0].body)
+                        .unwrap();
+                assert!(body["tools"].is_array(), "tools must be advertised");
+            }
+
+            #[tokio::test]
+            async fn complete_with_tools_rejects_empty_choices() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "id": "x",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": "stub",
+                        "choices": [],
+                    })))
+                    .mount(&server)
+                    .await;
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("GATEWAY_MODEL", Some("stub")),
+                ]);
+                let model = OpenAiModel::new("stub");
+                let err = model
+                    .complete_with_tools(&request(), &[])
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.to_string().contains("empty choices from model"),
+                    "{err}"
+                );
+            }
+
+            #[tokio::test]
+            async fn stream_yields_tokens_until_done() {
+                let server = MockServer::start().await;
+                let sse = concat!(
+                    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+                    "\"model\":\"stub\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},",
+                    "\"finish_reason\":null}]}\n\n",
+                    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+                    "\"model\":\"stub\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},",
+                    "\"finish_reason\":null}]}\n\n",
+                    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+                    "\"model\":\"stub\",\"choices\":[{\"index\":0,\"delta\":{},",
+                    "\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+                    .mount(&server)
+                    .await;
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("GATEWAY_MODEL", Some("stub")),
+                ]);
+                let model = OpenAiModel::new("stub");
+                let mut stream = model.stream(&request()).await.unwrap();
+                let mut out = String::new();
+                while let Some(tok) = stream.next().await {
+                    out.push_str(&tok.unwrap());
+                }
+                assert_eq!(out, "hello");
+            }
+
+            #[tokio::test]
+            async fn stream_reports_upstream_errors() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(500))
+                    .mount(&server)
+                    .await;
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("GATEWAY_MODEL", Some("stub")),
+                ]);
+                let model = OpenAiModel::new("stub");
+                let mut stream = model.stream(&request()).await.unwrap();
+                let first = stream.next().await.expect("one error item");
+                assert!(first.is_err());
+            }
+
+            #[test]
+            fn blank_env_values_fall_through_to_the_next_source() {
+                // Blank GATEWAY_* values must fall back to the OPENAI_* pair, and an
+                // explicit model override must win over the constructor argument.
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some("   ")),
+                    ("OPENAI_BASE_URL", Some("http://127.0.0.1:1/v1/")),
+                    ("GATEWAY_MODEL", Some("")),
+                    ("OPENAI_MODEL", Some("openai-model")),
+                    ("GATEWAY_API_KEY", None),
+                    ("OPENAI_API_KEY", None),
+                ]);
+                let model = OpenAiModel::new("ctor-model");
+                assert_eq!(model.model, "openai-model");
+                assert_eq!(
+                    trimmed_env("OPENAI_BASE_URL").as_deref(),
+                    Some("http://127.0.0.1:1/v1/")
+                );
+                assert_eq!(trimmed_env("GATEWAY_BASE_URL"), None);
+                assert_eq!(trimmed_env("__ARIA_UNSET_VAR__"), None);
+            }
         }
     }
 }
@@ -1149,10 +1428,13 @@ async fn maybe_compact_store(context: &Arc<dyn ContextStore>, session: &str, thr
     if threshold == 0 {
         return;
     }
-    if let Ok(frags) = context.list_session(session, usize::MAX).await {
-        if frags.len() > threshold {
-            let _ = context.compact(session).await;
-        }
+    let frags = match context.list_session(session, usize::MAX).await {
+        Ok(frags) => frags,
+        // A store that cannot be listed is left alone; compaction is best-effort.
+        Err(_) => return,
+    };
+    if frags.len() > threshold {
+        let _ = context.compact(session).await;
     }
 }
 
@@ -1624,5 +1906,444 @@ mod tests {
                 }],
             })
         }
+    }
+    // --- Handlers, exec_tool, agentic folding and compaction ---
+
+    struct EchoHandler;
+
+    #[async_trait]
+    impl ToolHandler for EchoHandler {
+        fn handles(&self, name: &str) -> bool {
+            name == "echo"
+        }
+        async fn run(
+            &self,
+            call: &ToolCall,
+            _context: &Arc<dyn ContextStore>,
+            _session: &str,
+        ) -> ToolResult {
+            ToolResult {
+                call_id: call.id.clone(),
+                content: "handled".into(),
+                is_error: false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn with_handlers_dispatches_to_the_matching_handler() {
+        let memo = in_memory_context();
+        let agent = Agent::with_handlers(
+            AgentConfig::default(),
+            Box::new(StubModel::new("agent")),
+            memo.clone(),
+            Arc::new(LocalSandbox),
+            vec![Arc::new(EchoHandler)],
+        )
+        .unwrap();
+        assert_eq!(agent.session(), "default");
+
+        let res = agent
+            .exec_tool_call(&ToolCall {
+                id: "h1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.content, "handled");
+        assert!(!res.is_error);
+        assert_eq!(res.call_id, "h1");
+
+        // A non-matching tool falls through to the shell sandbox.
+        let shell = agent
+            .exec_tool_call(&ToolCall {
+                id: "s1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({ "command": ["echo", "via-sandbox"] }),
+            })
+            .await
+            .unwrap();
+        assert!(shell.content.contains("via-sandbox"));
+    }
+
+    #[tokio::test]
+    async fn exec_tool_runs_and_persists_the_capture() {
+        let memo = in_memory_context();
+        let agent = Agent::with_sandbox(
+            AgentConfig::default(),
+            Box::new(StubModel::new("agent")),
+            memo.clone(),
+            Arc::new(LocalSandbox),
+        )
+        .unwrap();
+        let captured = agent
+            .exec_tool(&["echo".into(), "captured".into()])
+            .await
+            .unwrap();
+        assert!(captured.starts_with("exit=0"), "{captured}");
+        assert!(captured.contains("captured"));
+        let frags = memo
+            .recall(&RecallQuery::new("default", "captured"))
+            .await
+            .unwrap();
+        assert!(frags.iter().any(|f| f.kind == FragmentKind::ToolResult));
+    }
+
+    #[tokio::test]
+    async fn exec_tool_call_rejects_an_empty_command() {
+        let agent = local_agent(Box::new(StubModel::new("agent")));
+        let res = agent
+            .exec_tool_call(&ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({ "command": [] }),
+            })
+            .await
+            .unwrap();
+        assert!(res.is_error);
+        assert!(res.content.contains("command is empty"), "{}", res.content);
+    }
+
+    #[test]
+    fn default_sandbox_box_builds_a_provider() {
+        let _sandbox = default_sandbox_box();
+    }
+
+    #[tokio::test]
+    async fn run_agentic_folds_the_event_stream() {
+        let agent = local_agent(Box::new(StubModel::new("agent")));
+        let out = agent.run_agentic("fold me", &[]).await.unwrap();
+        assert!(out.contains("fold me"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn graph_expand_pulls_related_context_into_the_prompt() {
+        let memo = in_memory_context();
+        let cfg = AgentConfig {
+            memory_graph: true,
+            memory_compact_threshold: 100,
+            ..AgentConfig::default()
+        };
+        let agent = Agent::with_sandbox(
+            cfg,
+            Box::new(StubModel::new("agent")),
+            memo.clone(),
+            Arc::new(LocalSandbox),
+        )
+        .unwrap();
+        let _ = agent.run("the secret code is 1234").await.unwrap();
+        let second = agent.run("the secret code is 1234").await.unwrap();
+        assert!(second.contains("<injected>"), "{second}");
+        assert!(!memo
+            .get_relations("default", None, None, None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_threshold_is_honoured_by_run() {
+        let memo = in_memory_context();
+        let cfg = AgentConfig {
+            memory_graph: true,
+            memory_compact_threshold: 1,
+            ..AgentConfig::default()
+        };
+        let agent = Agent::with_sandbox(
+            cfg,
+            Box::new(StubModel::new("agent")),
+            memo.clone(),
+            Arc::new(LocalSandbox),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            let _ = agent.run("compact this history").await.unwrap();
+        }
+        assert!(
+            memo.get_by_key("default", "__compact__default")
+                .await
+                .unwrap()
+                .is_some(),
+            "threshold reached must write a compaction note"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_models_answer_complete_directly() {
+        let req = ModelRequest {
+            system: "s".into(),
+            context: String::new(),
+            input: "ping".into(),
+        };
+        let looping = ToolLoopModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        assert!(looping.complete(&req).await.unwrap().text.contains("ping"));
+
+        let missing = MissingCommandModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        assert!(missing.complete(&req).await.unwrap().text.is_empty());
+
+        assert!(LoopForeverModel
+            .complete(&req)
+            .await
+            .unwrap()
+            .text
+            .is_empty());
+    }
+
+    // --- Stores that degrade in one specific operation ---
+
+    use crate::context::{ContextError, GraphRetrieveQuery, Relation, RelationKind};
+
+    /// Delegates to an in-memory store, but can fail `expand` (graph off) or
+    /// `list_session` (compaction cannot inspect the session).
+    struct FlakyStore {
+        inner: Arc<context::MemoryContextStore>,
+        fail_expand: bool,
+        fail_list: bool,
+    }
+
+    impl FlakyStore {
+        fn new(store: Arc<context::MemoryContextStore>) -> Self {
+            Self {
+                inner: store,
+                fail_expand: false,
+                fail_list: false,
+            }
+        }
+
+        fn no_graph(store: Arc<context::MemoryContextStore>) -> Arc<dyn ContextStore> {
+            Arc::new(Self {
+                fail_expand: true,
+                ..Self::new(store)
+            })
+        }
+
+        fn no_listing(store: Arc<context::MemoryContextStore>) -> Arc<dyn ContextStore> {
+            Arc::new(Self {
+                fail_list: true,
+                ..Self::new(store)
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ContextStore for FlakyStore {
+        async fn memorize(&self, frag: ContextFragment) -> Result<(), ContextError> {
+            self.inner.memorize(frag).await
+        }
+        async fn recall(&self, query: &RecallQuery) -> Result<Vec<ContextFragment>, ContextError> {
+            self.inner.recall(query).await
+        }
+        async fn compact(&self, session: &str) -> Result<ContextFragment, ContextError> {
+            self.inner.compact(session).await
+        }
+        async fn get_by_key(
+            &self,
+            session: &str,
+            key: &str,
+        ) -> Result<Option<ContextFragment>, ContextError> {
+            self.inner.get_by_key(session, key).await
+        }
+        async fn list_session(
+            &self,
+            session: &str,
+            top_k: usize,
+        ) -> Result<Vec<ContextFragment>, ContextError> {
+            if self.fail_list {
+                return Err(ContextError::Storage("listing disabled".into()));
+            }
+            self.inner.list_session(session, top_k).await
+        }
+        async fn relate(&self, rel: Relation) -> Result<(), ContextError> {
+            self.inner.relate(rel).await
+        }
+        async fn get_relations(
+            &self,
+            session: &str,
+            from: Option<&str>,
+            to: Option<&str>,
+            kind: Option<RelationKind>,
+            top_k: usize,
+        ) -> Result<Vec<Relation>, ContextError> {
+            self.inner
+                .get_relations(session, from, to, kind, top_k)
+                .await
+        }
+        async fn delete_relations(
+            &self,
+            session: &str,
+            from: Option<&str>,
+            to: Option<&str>,
+            kind: Option<RelationKind>,
+        ) -> Result<usize, ContextError> {
+            self.inner.delete_relations(session, from, to, kind).await
+        }
+        async fn expand(
+            &self,
+            query: &GraphRetrieveQuery,
+        ) -> Result<context::GraphRetrieveResult, ContextError> {
+            if self.fail_expand {
+                return Err(ContextError::Storage("graph disabled".into()));
+            }
+            self.inner.expand(query).await
+        }
+    }
+
+    /// Records every request so tests can assert on the injected context.
+    #[derive(Clone)]
+    struct RecordingModel {
+        seen: Arc<std::sync::Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl RecordingModel {
+        fn new() -> Self {
+            Self {
+                seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn seen(&self) -> Vec<ModelRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ModelClient for RecordingModel {
+        async fn complete(&self, req: &ModelRequest) -> Result<ModelResponse, CoreError> {
+            self.seen.lock().unwrap().push(req.clone());
+            Ok(ModelResponse {
+                text: "recorded".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_store_without_a_graph_still_answers() {
+        let raw = context::MemoryContextStore::new();
+        let cfg = AgentConfig {
+            memory_graph: true,
+            memory_compact_threshold: 100,
+            ..AgentConfig::default()
+        };
+        let context = FlakyStore::no_graph(raw.clone());
+        context
+            .memorize(ContextFragment::new(
+                "default",
+                FragmentKind::Message,
+                "alpha beta",
+            ))
+            .await
+            .unwrap();
+        let agent = Agent::with_sandbox(
+            cfg,
+            Box::new(StubModel::new("agent")),
+            context.clone(),
+            Arc::new(LocalSandbox),
+        )
+        .unwrap();
+        let reply = agent.run("alpha beta").await.unwrap();
+        assert!(reply.contains("alpha beta"), "{reply}");
+        // Graph expansion degraded to "no extra context".
+        let stored = raw
+            .recall(&RecallQuery::new("default", "alpha beta"))
+            .await
+            .unwrap();
+        assert!(!stored.is_empty());
+
+        // The wrapper delegates everything except `expand`.
+        assert!(context
+            .get_by_key("default", "missing")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            context
+                .delete_relations("default", Some("nope"), None, None)
+                .await
+                .unwrap(),
+            0
+        );
+        // Turn edges are still written even when the graph view is unavailable.
+        assert!(!context
+            .get_relations("default", None, None, None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(context.compact("default").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn compaction_is_skipped_when_the_session_cannot_be_listed() {
+        let raw = context::MemoryContextStore::new();
+        let context = FlakyStore::no_listing(raw.clone());
+        context
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "kept"))
+            .await
+            .unwrap();
+        maybe_compact_store(&context, "s", 1).await;
+        // No compaction note was written because listing failed.
+        assert!(raw.get_by_key("s", "__compact__s").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn graph_expansion_injects_related_but_unmatched_fragments() {
+        let memo = in_memory_context();
+        let cfg = AgentConfig {
+            memory_graph: true,
+            memory_compact_threshold: 100,
+            ..AgentConfig::default()
+        };
+        let model = RecordingModel::new();
+        let agent = Agent::with_sandbox(
+            cfg,
+            Box::new(model.clone()),
+            memo.clone(),
+            Arc::new(LocalSandbox),
+        )
+        .unwrap();
+        let _ = agent.run("alpha secret code 1234").await.unwrap();
+
+        let all = memo.list_session("default", 50).await.unwrap();
+        let seed = all
+            .iter()
+            .find(|f| f.content.contains("alpha secret code"))
+            .expect("the user turn is stored")
+            .clone();
+        // A lexically unrelated note: only the graph can surface it.
+        let note = ContextFragment::new("default", FragmentKind::LongTerm, "zzz trivia");
+        memo.memorize(note.clone()).await.unwrap();
+        memo.relate(Relation {
+            session: "default".into(),
+            from_id: seed.id.clone(),
+            to_id: note.id.clone(),
+            kind: RelationKind::Semantic,
+            score: 0.9,
+            provenance: "local".into(),
+            created_at: 1,
+        })
+        .await
+        .unwrap();
+
+        agent.run("alpha secret code 1234").await.unwrap();
+        let seen = model.seen();
+        let context = seen.last().expect("the model saw the turn").context.clone();
+        assert!(context.contains("zzz trivia"), "{context}");
+
+        // The streaming entrypoint performs the same merge before emitting.
+        let mut rx = agent
+            .run_event_stream("alpha secret code 1234", &[])
+            .await
+            .unwrap();
+        while rx.next().await.is_some() {}
+        // `run_stream` performs the same merge before the model is called.
+        let mut tokens = agent.run_stream("alpha secret code 1234").await.unwrap();
+        while tokens.next().await.is_some() {}
+        let streamed = model.seen();
+        assert!(streamed.len() > seen.len());
+        assert!(streamed.last().unwrap().context.contains("zzz trivia"));
     }
 }

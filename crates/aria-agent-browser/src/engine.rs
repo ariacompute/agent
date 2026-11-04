@@ -125,7 +125,8 @@ impl BrowserResult {
         {
             return "screenshot=captured".to_string();
         }
-        serde_json::to_string(&self.data).unwrap_or_else(|_| "{}".to_string())
+        // `serde_json::Value` always serializes; the fallback is never taken.
+        serde_json::to_string(&self.data).unwrap_or_default()
     }
 }
 
@@ -273,11 +274,10 @@ impl BrowserCatalog {
             "ARIACOMPUTE_BROWSER_IMAGE_{}",
             kind.as_str().to_ascii_uppercase()
         );
-        if let Ok(v) = std::env::var(&env_key) {
-            let v = v.trim().to_string();
-            if !v.is_empty() {
-                return v;
-            }
+        let from_env = std::env::var(&env_key).unwrap_or_default();
+        let from_env = from_env.trim();
+        if !from_env.is_empty() {
+            return from_env.to_string();
         }
         self.spec(kind).image.clone()
     }
@@ -404,5 +404,59 @@ mod tests {
                 url: "https://example.com".into()
             }
         );
+    }
+
+    #[test]
+    fn result_data_accessor_and_summary_shapes() {
+        let titled = BrowserResult {
+            ok: true,
+            data: serde_json::json!({ "title": "Example" }),
+        };
+        assert_eq!(titled.data()["title"], "Example");
+        assert_eq!(titled.summary(), "title=Example");
+
+        let text = BrowserResult {
+            ok: true,
+            data: serde_json::json!({ "text": "  hello world  " }),
+        };
+        assert_eq!(text.summary(), "text=hello world");
+
+        let long = BrowserResult {
+            ok: true,
+            data: serde_json::json!({ "text": "x".repeat(300) }),
+        };
+        assert_eq!(long.summary().len(), "text=".len() + 200);
+
+        let shot = BrowserResult {
+            ok: true,
+            data: serde_json::json!({ "screenshot": "AAAA" }),
+        };
+        assert_eq!(shot.summary(), "screenshot=captured");
+
+        // Anything else falls back to the compact JSON payload.
+        let other = BrowserResult {
+            ok: true,
+            data: serde_json::json!({ "n": 1 }),
+        };
+        assert_eq!(other.summary(), "{\"n\":1}");
+    }
+
+    #[test]
+    fn catalog_default_is_the_builtin_catalog() {
+        let cat = BrowserCatalog::default();
+        let builtin = BrowserCatalog::builtin();
+        assert_eq!(
+            cat.image_for(BrowserKind::Chromium),
+            builtin.image_for(BrowserKind::Chromium)
+        );
+    }
+
+    #[test]
+    fn blank_image_env_falls_back_to_the_builtin_image() {
+        std::env::set_var("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM", "   ");
+        let cat = BrowserCatalog::builtin();
+        assert_ne!(cat.image_for(BrowserKind::Chromium), "");
+        assert!(!cat.image_for(BrowserKind::Chromium).trim().is_empty());
+        std::env::remove_var("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM");
     }
 }

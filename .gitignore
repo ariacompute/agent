@@ -1,4 +1,6 @@
 /target
+# Coverage report produced by `just cov` / `scripts/coverage.sh`.
+lcov.info
 **/*.rs.bk
 .DS_Store
 *.log

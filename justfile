@@ -13,9 +13,13 @@ build:
 test:
     cargo test --workspace
 
-# Coverage hint (needs cargo-llvm-cov or cargo-tarpaulin installed).
+# Coverage report (writes lcov.info; no gate).
 cov:
-    cargo llvm-cov --workspace --lcov --output-path lcov.info || cargo tarpaulin --workspace --out Xml
+    cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+# Coverage gate: 100% line coverage outside the documented exclusions.
+cov-check:
+    ./scripts/coverage.sh
 
 # Generate UniFFI bindings for Swift and Kotlin from the ariacompute-agent crate.
 ffi:

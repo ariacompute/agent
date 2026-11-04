@@ -274,6 +274,43 @@ Rust(webpki-roots) / Bun / Node / Python 等自带信任库需升级。
 - 本仓库**无 Go**；Node 仅作 JS SDK 运行/构建运行时（engines `node >=18`），其 TLS 信任库随 Node 发布更新（建议 >= 22.23.4 / 24.22.1 / 26.12.1）。
 - 站点证书（部署用 Let's Encrypt）不受影响，无需重签。
 
+## Milestone 17 — test system upgrade (100% line coverage)
+
+- [x] `aria-agent-cloud` split into a library crate root (`src/lib.rs`) plus a thin
+      `src/main.rs`; `AppError`, `Principal`/auth, `AppState`, `api::keys`, `util`
+      moved into modules so the handlers are unit-testable without a process.
+- [x] Data access behind traits: `AgentStore` / `SessionStore` / `ApiKeyStore`
+      (`store/mod.rs`), with `store/memory.rs` (tenant isolation, `created_at DESC`,
+      `limit`, turn/item `seq`) used by tests and `store/pg.rs` keeping the
+      production SQL verbatim (excluded from the gate: needs a live database).
+- [x] API tests via `tower::ServiceExt::oneshot`: agents CRUD (400/404/500),
+      sessions/turns/items, memory + relations + graph, api-keys, stubs, and the
+      SSE stream (`agent.turn.created` → `item.*` → `output_text.*` →
+      `agent.turn.completed`, plus `agent.turn.failed`).
+- [x] `aria-agent-sandbox`: `DockerSandbox::with_client` injection point plus a
+      hand-rolled Engine API stub over TCP (raw-stream `exec` upgrade) covering
+      spawn/exec/destroy success and every failure branch.
+- [x] `aria-agent-memo`: storage edge cases (corrupt blobs, unusable paths, unknown
+      memo types, poisoned locks, dropped tables, invalid relation kinds); the CLI
+      interop tests moved behind the `cli-interop` feature.
+- [x] `aria-agent-core`: shared `model_err`/`db_err`/`prefixed` mappers, composite
+      merge/dedupe/ordering, graph degradation, `run_stream` dedupe, env guards.
+- [x] `aria-agent-browser`: every `browser_*` command, argument validation, image
+      override, `Unsupported`/`Engine` degradation, crashing runner.
+- [x] `ariacompute-agent`: `CloudContextStore` over a loopback stub (all REST verbs,
+      4xx/5xx, URL encoding), `store_for` backend combinations, `map_event`.
+- [x] Gate: `scripts/coverage.sh` (`just cov-check`) requires 100% of lcov line
+      records outside the documented exclusions; `.github/workflows/ci.yml` runs
+      fmt + clippy + `cargo test` + the gate.
+- [x] Docs: `docs/coverage.md` (exclusions, doubles, conventions).
+
+Acceptance:
+
+```bash
+cargo test --workspace   # green
+just cov-check           # 100% lines outside docs/coverage.md exclusions
+```
+
 ## Open follow-ups
 * Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
   path dependencies for deeper integration.

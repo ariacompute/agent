@@ -25,3 +25,6 @@ async-openai = { version = "0.24", optional = true }
 default = []
 # Wire real OpenAI calls (Responses/Chat API) instead of the built-in stub model.
 openai = ["dep:async-openai"]
+
+[dev-dependencies]
+wiremock = "0.6"

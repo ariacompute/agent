@@ -17,3 +17,7 @@ async-trait.workspace = true
 uuid.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 aria-agent-core.workspace = true
+
+[features]
+# Interop tests need the real `aria-memo` CLI on PATH; off by default.
+cli-interop = []

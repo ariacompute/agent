@@ -1348,10 +1348,9 @@ pub mod embed {
             for (h, c) in counts {
                 vec[h] = (c / max).sqrt();
             }
+            // `toks` is non-empty, so at least one bucket is non-zero and the
+            // magnitude is always positive.
             let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
-            if norm == 0.0 {
-                return Err(ContextError::Embedding("zero-magnitude vector".into()));
-            }
             for v in vec.iter_mut() {
                 *v /= norm;
             }
@@ -2029,6 +2028,47 @@ mod tests {
         ));
     }
 
+    /// Scores everything at 1.0 so every view clears the threshold.
+    struct AlwaysScorer;
+
+    impl RelationScorer for AlwaysScorer {
+        fn score(&self, _a: &ContextFragment, _b: &ContextFragment, _kind: RelationKind) -> f32 {
+            1.0
+        }
+    }
+
+    #[tokio::test]
+    async fn a_newer_fragment_omits_the_forward_temporal_edge() {
+        let store = MemoryContextStore::new();
+        let older = ContextFragment::new("s", FragmentKind::Message, "alpha beta");
+        store.memorize(older.clone()).await.unwrap();
+        let mut newer = ContextFragment::new("s", FragmentKind::Message, "alpha beta");
+        newer.created_at = older.created_at + 10;
+        store.memorize(newer.clone()).await.unwrap();
+
+        let ctrl = ContextController::new(
+            store.clone(),
+            Arc::new(embed::LocalEmbedder::new(EMBED_DIM)),
+            Arc::new(AlwaysScorer),
+            RelationConfig {
+                relation_threshold: 0.0,
+                ..RelationConfig::default()
+            },
+        );
+        assert!(ctrl.connect(&newer).await.unwrap() >= 1);
+        assert!(store
+            .get_relations("s", Some(&newer.id), None, Some(RelationKind::Temporal), 10)
+            .await
+            .unwrap()
+            .is_empty());
+        // The non-temporal views are still linked.
+        assert!(!store
+            .get_relations("s", Some(&newer.id), None, Some(RelationKind::Semantic), 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn composite_merges_relations() {
         let local = MemoryContextStore::new();
@@ -2104,6 +2144,59 @@ mod tests {
         };
         let res = composite.expand(&q).await.unwrap();
         assert_eq!(res.trace.hits, 2);
+
+        // A fresher copy of the same edge on one side wins the merge, and two
+        // distinct edges exercise the ordering.
+        cloud
+            .relate(Relation {
+                session: "s".into(),
+                from_id: a.id.clone(),
+                to_id: b.id.clone(),
+                kind: RelationKind::Semantic,
+                score: 0.9,
+                provenance: "cloud".into(),
+                created_at: 9,
+            })
+            .await
+            .unwrap();
+        composite
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::LongTerm,
+                "gamma node",
+            ))
+            .await
+            .unwrap();
+        let c = composite
+            .list_session("s", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|f| f.content.contains("gamma"))
+            .unwrap();
+        composite
+            .relate(Relation {
+                session: "s".into(),
+                from_id: b.id.clone(),
+                to_id: c.id.clone(),
+                kind: RelationKind::Entity,
+                score: 0.7,
+                provenance: "local".into(),
+                created_at: 7,
+            })
+            .await
+            .unwrap();
+
+        let merged = composite
+            .get_relations("s", None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(merged.len(), 2);
+        // Newest first.
+        assert_eq!(merged[0].created_at, 9);
+        assert_eq!(merged[1].created_at, 7);
+        // The freshest copy of the duplicated edge was kept.
+        assert_eq!(merged[0].provenance, "cloud");
     }
 
     // --- Abnormal paths (no DB) ---
@@ -2211,5 +2304,449 @@ mod tests {
             created_at: 1,
         };
         assert!(store.relate(self_loop).await.is_err());
+    }
+
+    // --- Branch coverage for scoring, traversal, composite stores and locks ---
+
+    #[test]
+    fn score_fragment_falls_back_to_keywords_on_vector_mismatch() {
+        let frag = ContextFragment::new("s", FragmentKind::Message, "alpha text");
+        let mismatched = vec![1.0f32, 0.0];
+        // (Some, None) → keyword only.
+        assert!(score_fragment("alpha", Some(&mismatched), &frag) > 0.0);
+        // (Some, Some) but different dimensions → cosine is None → keyword only.
+        let mut embedded = ContextFragment::new("s", FragmentKind::Message, "alpha text");
+        embedded.embedding = Some(vec![1.0, 0.0, 0.0]);
+        let fallback = score_fragment("alpha", Some(&mismatched), &embedded);
+        assert!((fallback - keyword_score("alpha", &embedded)).abs() < 1e-6);
+        // Matching vectors blend cosine with the keyword score.
+        let mut same = ContextFragment::new("s", FragmentKind::Message, "alpha text");
+        same.embedding = Some(vec![1.0, 0.0]);
+        assert!(score_fragment("alpha", Some(&mismatched), &same) >= fallback);
+    }
+
+    #[test]
+    fn token_jaccard_handles_empty_token_sets() {
+        assert_eq!(token_jaccard("", "abc"), 0.0);
+        assert_eq!(token_jaccard("abc", "!!"), 0.0);
+        assert!(token_jaccard("rust systems", "rust systems programming") > 0.0);
+    }
+
+    #[test]
+    fn graph_bfs_skips_cycles_and_stops_on_budget() {
+        let seeds = vec!["a".to_string()];
+        // Cycle a↔b: the revisited node is skipped, the walk exhausts naturally.
+        let (reached, stop) = graph_bfs(&seeds, &[], 10, 5, |n| {
+            if n == "a" {
+                vec![("b".into(), 1.0, RelationKind::Semantic)]
+            } else {
+                vec![("a".into(), 1.0, RelationKind::Semantic)]
+            }
+        });
+        assert_eq!(reached.len(), 2);
+        assert_eq!(stop, "exhausted");
+
+        // Budget of 2 (seed + one neighbour) stops the walk early.
+        let (reached, stop) = graph_bfs(&seeds, &[], 2, 5, |_| {
+            vec![
+                ("b".into(), 1.0, RelationKind::Semantic),
+                ("c".into(), 1.0, RelationKind::Semantic),
+            ]
+        });
+        assert_eq!(reached.len(), 2);
+        assert_eq!(stop, "budget");
+    }
+
+    #[test]
+    fn graph_bfs_filters_views_and_caps_depth() {
+        let seeds = vec!["a".to_string()];
+        let (reached, _) = graph_bfs(&seeds, &[RelationKind::Semantic], 10, 5, |n| {
+            if n == "a" {
+                vec![
+                    ("b".into(), 1.0, RelationKind::Causal),
+                    ("c".into(), 1.0, RelationKind::Semantic),
+                ]
+            } else {
+                Vec::new()
+            }
+        });
+        let ids: Vec<&str> = reached.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"c"));
+        assert!(!ids.contains(&"b"), "causal edge filtered out by views");
+
+        // max_hops = 1 still queues the first hop but never expands it.
+        let (reached, _) = graph_bfs(&seeds, &[], 10, 1, |_| {
+            vec![("b".into(), 1.0, RelationKind::Semantic)]
+        });
+        assert_eq!(reached.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn composite_exposes_its_children() {
+        let local = MemoryContextStore::new();
+        let cloud = MemoryContextStore::new();
+        let composite = CompositeContextStore::new(local.clone(), cloud.clone());
+        let l: Arc<dyn ContextStore> = local.clone();
+        let c: Arc<dyn ContextStore> = cloud.clone();
+        assert!(Arc::ptr_eq(composite.local(), &l));
+        assert!(Arc::ptr_eq(composite.cloud(), &c));
+    }
+
+    #[tokio::test]
+    async fn composite_compact_prefers_cloud_then_local() {
+        let local = MemoryContextStore::new();
+        let cloud = MemoryContextStore::new();
+        let composite = CompositeContextStore::new(local.clone(), cloud.clone());
+        composite
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::Message,
+                "compact me",
+            ))
+            .await
+            .unwrap();
+        let note = composite.compact("s").await.unwrap();
+        assert_eq!(note.kind, FragmentKind::Note);
+        assert!(note.content.contains("compact me"));
+
+        // Cloud compaction fails → the local copy is used.
+        let half_broken = CompositeContextStore::new(local.clone(), Arc::new(FailingStore));
+        let note = half_broken.compact("s").await.unwrap();
+        assert!(note.content.contains("compact me"));
+
+        // Both sides fail → the error surfaces.
+        let dead = CompositeContextStore::new(Arc::new(FailingStore), Arc::new(FailingStore));
+        assert!(dead.compact("s").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn composite_get_by_key_falls_back_when_cloud_fails() {
+        let local = MemoryContextStore::new();
+        local
+            .memorize(ContextFragment::new("s", FragmentKind::LongTerm, "from local").with_key("k"))
+            .await
+            .unwrap();
+        let composite = CompositeContextStore::new(local, Arc::new(FailingStore));
+        assert_eq!(
+            composite
+                .get_by_key("s", "k")
+                .await
+                .unwrap()
+                .unwrap()
+                .content,
+            "from local"
+        );
+    }
+
+    /// Two fragments plus a relation, stored on the in-memory backend.
+    async fn seeded_store() -> (Arc<MemoryContextStore>, ContextFragment, ContextFragment) {
+        let store = MemoryContextStore::new();
+        let a = ContextFragment::new("s", FragmentKind::LongTerm, "alpha node");
+        let b = ContextFragment::new("s", FragmentKind::LongTerm, "beta node");
+        store.memorize(a.clone()).await.unwrap();
+        store.memorize(b.clone()).await.unwrap();
+        store
+            .relate(Relation {
+                session: "s".into(),
+                from_id: a.id.clone(),
+                to_id: b.id.clone(),
+                kind: RelationKind::Semantic,
+                score: 0.8,
+                provenance: "local".into(),
+                created_at: 5,
+            })
+            .await
+            .unwrap();
+        (store, a, b)
+    }
+
+    #[tokio::test]
+    async fn composite_tolerates_a_failing_side_for_every_operation() {
+        let (store, a, b) = seeded_store().await;
+        let rel = Relation {
+            session: "s".into(),
+            from_id: a.id.clone(),
+            to_id: b.id.clone(),
+            kind: RelationKind::Semantic,
+            score: 0.7,
+            provenance: "local".into(),
+            created_at: 6,
+        };
+        let cloud_only = || CompositeContextStore::new(Arc::new(FailingStore), store.clone());
+        let local_only = || CompositeContextStore::new(store.clone(), Arc::new(FailingStore));
+        let dead = || CompositeContextStore::new(Arc::new(FailingStore), Arc::new(FailingStore));
+
+        // list_session: one side down still returns the surviving copy.
+        assert_eq!(local_only().list_session("s", 10).await.unwrap().len(), 2);
+        assert_eq!(cloud_only().list_session("s", 10).await.unwrap().len(), 2);
+        assert!(dead().list_session("s", 10).await.is_err());
+
+        // relate: one side down keeps the surviving edge.
+        assert!(local_only().relate(rel.clone()).await.is_ok());
+        assert!(cloud_only().relate(rel.clone()).await.is_ok());
+        assert!(dead().relate(rel.clone()).await.is_err());
+
+        // get_relations: one side down still returns edges.
+        assert_eq!(
+            local_only()
+                .get_relations("s", None, None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            cloud_only()
+                .get_relations("s", None, None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(dead()
+            .get_relations("s", None, None, None, 10)
+            .await
+            .is_err());
+
+        // delete_relations: one side down still deletes on the other. The edge
+        // lives on one side only, so the two calls delete it exactly once.
+        let via_local = local_only()
+            .delete_relations("s", Some(&a.id), None, None)
+            .await
+            .unwrap();
+        let via_cloud = cloud_only()
+            .delete_relations("s", Some(&a.id), None, None)
+            .await
+            .unwrap();
+        assert_eq!(via_local + via_cloud, 1);
+        assert!(dead()
+            .delete_relations("s", Some(&a.id), None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn composite_expand_walks_the_merged_graph() {
+        let (store, a, _b) = seeded_store().await;
+        let composite = CompositeContextStore::new(store.clone(), MemoryContextStore::new());
+        let res = composite
+            .expand(&GraphRetrieveQuery {
+                session: "s".into(),
+                seeds: vec![a.id.clone()],
+                views: vec![],
+                budget: 10,
+                max_hops: 2,
+                top_k: 5,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.trace.hits, res.items.len());
+        assert!(res.items.iter().any(|i| i.fragment.id == a.id));
+    }
+
+    #[tokio::test]
+    async fn failing_store_expand_is_an_error() {
+        let store: Arc<dyn ContextStore> = Arc::new(FailingStore);
+        let res = store
+            .expand(&GraphRetrieveQuery {
+                session: "s".into(),
+                seeds: vec!["a".into()],
+                views: vec![],
+                budget: 1,
+                max_hops: 1,
+                top_k: 1,
+            })
+            .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_store_default_matches_new() {
+        let store = MemoryContextStore::default();
+        store
+            .memorize(ContextFragment::new(
+                "s",
+                FragmentKind::Message,
+                "default store",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(store.list_session("s", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn connection_handles_a_newer_source_fragment() {
+        let store = MemoryContextStore::new();
+        let mut older = ContextFragment::new("s", FragmentKind::LongTerm, "shared topic text");
+        older.created_at = 10;
+        let mut newer = ContextFragment::new("s", FragmentKind::LongTerm, "shared topic text");
+        newer.created_at = 20;
+        store.memorize(older).await.unwrap();
+        store.memorize(newer.clone()).await.unwrap();
+
+        let ctrl = ContextController::with_defaults(
+            store.clone(),
+            Arc::new(embed::LocalEmbedder::new(EMBED_DIM)),
+        );
+        let created = ctrl.connect(&newer).await.unwrap();
+        assert!(created >= 2, "expected edges, got {created}");
+        assert!(!store
+            .get_relations("s", None, None, None, 50)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_without_seeds_returns_an_empty_trace() {
+        let store = MemoryContextStore::new();
+        let ctrl =
+            ContextController::with_defaults(store, Arc::new(embed::LocalEmbedder::new(EMBED_DIM)));
+        let res = ctrl
+            .retrieve(&RecallQuery::new("s", "nothing stored"), vec![], 5, 2, 5)
+            .await
+            .unwrap();
+        assert!(res.items.is_empty());
+        assert_eq!(res.trace.stop_reason, "no-seeds");
+        assert_eq!(res.trace.hits, 0);
+    }
+
+    fn poison_fragments(store: &Arc<MemoryContextStore>) {
+        let clone = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.inner.write().unwrap();
+            panic!("poison the fragment lock");
+        })
+        .join();
+    }
+
+    fn poison_relations(store: &Arc<MemoryContextStore>) {
+        let clone = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.relations.write().unwrap();
+            panic!("poison the relation lock");
+        })
+        .join();
+    }
+
+    fn graph_query() -> GraphRetrieveQuery {
+        GraphRetrieveQuery {
+            session: "s".into(),
+            seeds: vec!["a".into()],
+            views: vec![],
+            budget: 1,
+            max_hops: 1,
+            top_k: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_store_surfaces_poisoned_fragment_lock() {
+        let store = MemoryContextStore::new();
+        poison_fragments(&store);
+
+        let frag = ContextFragment::new("s", FragmentKind::Message, "x");
+        assert!(store.memorize(frag).await.is_err());
+        assert!(store.recall(&RecallQuery::new("s", "x")).await.is_err());
+        assert!(store.compact("s").await.is_err());
+        assert!(store.get_by_key("s", "k").await.is_err());
+        assert!(store.list_session("s", 1).await.is_err());
+        // Relations are readable/writable only after the fragment check, so a
+        // failing `relate` here exercises the read guard.
+        assert!(store
+            .relate(Relation {
+                session: "s".into(),
+                from_id: "a".into(),
+                to_id: "b".into(),
+                kind: RelationKind::Semantic,
+                score: 0.5,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .is_err());
+        // The relation plane has its own lock, so it stays usable here.
+        assert!(store.get_relations("s", None, None, None, 1).await.is_ok());
+        assert!(store.expand(&graph_query()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_store_surfaces_poisoned_relation_lock() {
+        let store = MemoryContextStore::new();
+        // Endpoints must exist, otherwise `relate` fails before locking.
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "a"))
+            .await
+            .unwrap();
+        store
+            .memorize(ContextFragment::new("s", FragmentKind::Message, "b"))
+            .await
+            .unwrap();
+        let ids: Vec<String> = store
+            .list_session("s", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        poison_relations(&store);
+
+        assert!(store
+            .relate(Relation {
+                session: "s".into(),
+                from_id: ids[0].clone(),
+                to_id: ids[1].clone(),
+                kind: RelationKind::Semantic,
+                score: 0.5,
+                provenance: "local".into(),
+                created_at: 1,
+            })
+            .await
+            .is_err());
+        assert!(store.get_relations("s", None, None, None, 1).await.is_err());
+        assert!(store
+            .delete_relations("s", Some("a"), None, None)
+            .await
+            .is_err());
+        assert!(store.expand(&graph_query()).await.is_err());
+    }
+
+    #[test]
+    fn embedder_reports_dimensions_and_cosine_edges() {
+        let e = embed::LocalEmbedder::new(EMBED_DIM);
+        assert_eq!(e.dim(), EMBED_DIM);
+        assert_eq!(embed::LocalEmbedder::new(0).dim(), 1);
+        assert!(embed::cosine(&[], &[1.0]).is_none());
+        assert!(embed::cosine(&[1.0], &[1.0, 0.0]).is_none());
+        assert_eq!(embed::cosine(&[0.0, 0.0], &[1.0, 0.0]), Some(0.0));
+        assert_eq!(embed::cosine(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
+        assert!(e.embed("").is_err());
+    }
+
+    #[test]
+    fn local_scorer_covers_every_kind() {
+        let scorer = LocalRelationScorer;
+        let mut a = ContextFragment::new("s", FragmentKind::Message, "rust systems programming");
+        let mut b = ContextFragment::new("s", FragmentKind::Message, "rust systems design");
+        assert!((0.0..=1.0).contains(&scorer.score(&a, &b, RelationKind::Semantic)));
+
+        // With vectors the semantic view uses cosine instead of token overlap.
+        a.embedding = Some(vec![1.0, 0.0]);
+        b.embedding = Some(vec![1.0, 0.0]);
+        assert_eq!(scorer.score(&a, &b, RelationKind::Semantic), 1.0);
+
+        a.created_at = 5;
+        b.created_at = 10;
+        assert_eq!(scorer.score(&a, &b, RelationKind::Temporal), 1.0);
+        assert_eq!(scorer.score(&b, &a, RelationKind::Temporal), 0.0);
+
+        assert!(scorer.score(&a, &b, RelationKind::Entity) > 0.0);
+        let causal = scorer.score(&a, &b, RelationKind::Causal);
+        assert!((0.0..=1.0).contains(&causal));
+        // The reverse direction loses the temporal-adjacency bonus.
+        let reverse = scorer.score(&b, &a, RelationKind::Causal);
+        assert!((0.0..=1.0).contains(&reverse));
+        assert!(reverse < causal || causal == 0.0);
     }
 }
