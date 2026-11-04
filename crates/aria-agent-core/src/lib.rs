@@ -46,7 +46,9 @@ pub enum CoreError {
 /// Map any model/transport failure to [`CoreError::Model`].
 ///
 /// Shared by every call site so the mapping is one exercised line instead of a
-/// per-call closure that only runs on unreachable validation failures.
+/// per-call closure that only runs on unreachable validation failures. Only the
+/// `openai` backend performs fallible transport calls, hence the gate.
+#[cfg(feature = "openai")]
 fn model_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Model(e.to_string())
 }

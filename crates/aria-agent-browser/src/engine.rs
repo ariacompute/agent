@@ -320,6 +320,48 @@ pub trait BrowserEngine: Send + Sync {
 mod tests {
     use super::*;
 
+    /// Serializes tests that touch `ARIACOMPUTE_BROWSER_*`.
+    ///
+    /// The variables are process-global, so parallel tests otherwise observe each
+    /// other's values: a macOS runner surfaced this as `image_for` returning the
+    /// built-in image right after another test blanked the override.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds [`ENV_LOCK`] and restores the touched variables on drop.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn apply(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut saved = Vec::new();
+            for (key, value) in vars {
+                saved.push((*key, std::env::var(key).ok()));
+                restore_env(key, &value.map(str::to_string));
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                restore_env(key, value);
+            }
+        }
+    }
+
+    /// `Some` puts the value back; `None` removes the variable.
+    fn restore_env(key: &str, value: &Option<String>) {
+        if let Some(v) = value {
+            std::env::set_var(key, v);
+            return;
+        }
+        std::env::remove_var(key);
+    }
+
     #[test]
     fn kind_roundtrip_parse_and_str() {
         for k in [
@@ -352,6 +394,12 @@ mod tests {
 
     #[test]
     fn catalog_contains_all_kinds() {
+        // `image_for` reads the environment, so clear the overrides while this
+        // runs instead of racing with the override tests.
+        let _env = EnvGuard::apply(&[
+            ("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM", None),
+            ("ARIACOMPUTE_BROWSER_IMAGE_SERVO", None),
+        ]);
         let cat = BrowserCatalog::builtin();
         for k in [
             BrowserKind::Servo,
@@ -367,22 +415,32 @@ mod tests {
 
     #[test]
     fn catalog_image_env_override() {
-        std::env::set_var("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM", "my/chromium:dev");
+        let _env = EnvGuard::apply(&[(
+            "ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM",
+            Some("my/chromium:dev"),
+        )]);
         let cat = BrowserCatalog::builtin();
         assert_eq!(
             cat.image_for(BrowserKind::Chromium),
             "my/chromium:dev".to_string()
         );
-        std::env::remove_var("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM");
     }
 
     #[test]
     fn catalog_default_kind_env() {
-        std::env::set_var("ARIACOMPUTE_BROWSER_ENGINE", "camoufox");
+        let _env = EnvGuard::apply(&[("ARIACOMPUTE_BROWSER_ENGINE", Some("camoufox"))]);
         assert_eq!(BrowserCatalog::default_kind(), BrowserKind::Camoufox);
         std::env::set_var("ARIACOMPUTE_BROWSER_ENGINE", "bogus");
         assert_eq!(BrowserCatalog::default_kind(), BrowserKind::Chromium);
-        std::env::remove_var("ARIACOMPUTE_BROWSER_ENGINE");
+    }
+
+    #[test]
+    fn restore_env_puts_values_back_and_removes_missing_keys() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        restore_env("ARIA_BROWSER_TEST_RESTORE", &Some("kept".to_string()));
+        assert_eq!(std::env::var("ARIA_BROWSER_TEST_RESTORE").unwrap(), "kept");
+        restore_env("ARIA_BROWSER_TEST_RESTORE", &None);
+        assert!(std::env::var("ARIA_BROWSER_TEST_RESTORE").is_err());
     }
 
     #[test]
@@ -443,6 +501,7 @@ mod tests {
 
     #[test]
     fn catalog_default_is_the_builtin_catalog() {
+        let _env = EnvGuard::apply(&[("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM", None)]);
         let cat = BrowserCatalog::default();
         let builtin = BrowserCatalog::builtin();
         assert_eq!(
@@ -453,10 +512,9 @@ mod tests {
 
     #[test]
     fn blank_image_env_falls_back_to_the_builtin_image() {
-        std::env::set_var("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM", "   ");
+        let _env = EnvGuard::apply(&[("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM", Some("   "))]);
         let cat = BrowserCatalog::builtin();
         assert_ne!(cat.image_for(BrowserKind::Chromium), "");
         assert!(!cat.image_for(BrowserKind::Chromium).trim().is_empty());
-        std::env::remove_var("ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM");
     }
 }
