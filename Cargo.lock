@@ -1206,7 +1206,7 @@ dependencies = [
 [[package]]
 name = "codex-api"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -1238,7 +1238,7 @@ dependencies = [
 [[package]]
 name = "codex-async-utils"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "rand 0.9.5",
  "tokio",
@@ -1248,7 +1248,7 @@ dependencies = [
 [[package]]
 name = "codex-client"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "codex-http-client",
  "eventsource-stream",
@@ -1263,7 +1263,7 @@ dependencies = [
 [[package]]
 name = "codex-execpolicy"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "anyhow",
  "clap",
@@ -1281,7 +1281,7 @@ dependencies = [
 [[package]]
 name = "codex-extension-items"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "codex-utils-absolute-path",
  "schemars 0.8.22",
@@ -1293,7 +1293,7 @@ dependencies = [
 [[package]]
 name = "codex-http-client"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "bytes",
  "codex-utils-rustls-provider",
@@ -1328,7 +1328,7 @@ dependencies = [
 [[package]]
 name = "codex-mxc-sandbox"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "anyhow",
  "codex-network-proxy",
@@ -1348,7 +1348,7 @@ dependencies = [
 [[package]]
 name = "codex-network-proxy"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "anyhow",
  "aws-credential-types",
@@ -1397,7 +1397,7 @@ dependencies = [
 [[package]]
 name = "codex-otel"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "bytes",
  "chrono",
@@ -1432,7 +1432,7 @@ dependencies = [
 [[package]]
 name = "codex-protocol"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "chardetng",
  "chrono",
@@ -1476,7 +1476,7 @@ dependencies = [
 [[package]]
 name = "codex-sandboxing"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "anyhow",
  "codex-mxc-sandbox",
@@ -1502,7 +1502,7 @@ dependencies = [
 [[package]]
 name = "codex-uds"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "async-io",
  "libc",
@@ -1515,7 +1515,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-absolute-path"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "dirs",
  "dunce",
@@ -1527,7 +1527,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-cache"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "lru",
  "sha1",
@@ -1537,7 +1537,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-home-dir"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "codex-utils-absolute-path",
  "dirs",
@@ -1546,7 +1546,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-image"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "base64 0.22.1",
  "codex-utils-cache",
@@ -1560,7 +1560,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-path-uri"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "base64 0.22.1",
  "codex-utils-absolute-path",
@@ -1575,12 +1575,12 @@ dependencies = [
 [[package]]
 name = "codex-utils-process"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 
 [[package]]
 name = "codex-utils-pty"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -1596,7 +1596,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-redacted-string"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -1605,7 +1605,7 @@ dependencies = [
 [[package]]
 name = "codex-utils-rustls-provider"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "rustls",
 ]
@@ -1613,12 +1613,12 @@ dependencies = [
 [[package]]
 name = "codex-utils-stream-parser"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 
 [[package]]
 name = "codex-utils-string"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "regex-lite",
  "serde",
@@ -1628,7 +1628,7 @@ dependencies = [
 [[package]]
 name = "codex-websocket-client"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "codex-http-client",
  "futures",
@@ -1642,7 +1642,7 @@ dependencies = [
 [[package]]
 name = "codex-windows-sandbox"
 version = "0.0.0"
-source = "git+https://github.com/ariacompute/codex?branch=main#e8e6a922c0008bc08bacc69dd2ce9b6c3c12944c"
+source = "git+https://github.com/ariacompute/codex?branch=main#6af8a27c2109c5483bc3dc2de1d736dabaf6f503"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

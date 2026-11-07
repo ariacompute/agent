@@ -1,13 +1,13 @@
-From 3888859d31a2d448f9684db15192512911a8c1e5 Mon Sep 17 00:00:00 2001
+From 6af8a27c2109c5483bc3dc2de1d736dabaf6f503 Mon Sep 17 00:00:00 2001
 From: Jia Jia <jia@ariacompute.com>
-Date: Wed, 28 Oct 2026 09:24:30 +0800
+Date: Fri, 6 Nov 2026 20:16:00 +0800
 Subject: [PATCH] [ARIACOMPUTE-PATCH]: make codex a root cargo workspace
 
 ---
  codex-rs/Cargo.lock => Cargo.lock |   0
- Cargo.toml                        | 682 ++++++++++++++++++++++++++++++
- codex-rs/Cargo.toml               | 682 ------------------------------
- 3 files changed, 682 insertions(+), 682 deletions(-)
+ Cargo.toml                        | 689 ++++++++++++++++++++++++++++++
+ codex-rs/Cargo.toml               | 689 ------------------------------
+ 3 files changed, 689 insertions(+), 689 deletions(-)
  rename codex-rs/Cargo.lock => Cargo.lock (100%)
  create mode 100644 Cargo.toml
  delete mode 100644 codex-rs/Cargo.toml
@@ -18,16 +18,17 @@ rename from codex-rs/Cargo.lock
 rename to Cargo.lock
 diff --git a/Cargo.toml b/Cargo.toml
 new file mode 100644
-index 00000000..3e2eb9a8
+index 000000000..f8363eb3b
 --- /dev/null
 +++ b/Cargo.toml
-@@ -0,0 +1,682 @@
+@@ -0,0 +1,689 @@
 +[workspace]
 +members = [
 +    "codex-rs/aws-auth",
 +    "codex-rs/analytics",
 +    "codex-rs/agent-graph-store",
 +    "codex-rs/agent-message-board-client",
++    "codex-rs/agent-message-board-host",
 +    "codex-rs/agent-identity",
 +    "codex-rs/agent-roles",
 +    "codex-rs/backend-client",
@@ -116,6 +117,7 @@ index 00000000..3e2eb9a8
 +    "codex-rs/memories/write",
 +    "codex-rs/mermaid",
 +    "codex-rs/message-board",
++    "codex-rs/message-board-mcp",
 +    "codex-rs/model-provider-info",
 +    "codex-rs/mxc-sandbox",
 +    "codex-rs/models-manager",
@@ -169,6 +171,7 @@ index 00000000..3e2eb9a8
 +    "codex-rs/utils/cli",
 +    "codex-rs/utils/elapsed",
 +    "codex-rs/utils/sandbox-summary",
++    "codex-rs/utils/model-facing-id",
 +    "codex-rs/utils/sleep-inhibitor",
 +    "codex-rs/utils/approval-presets",
 +    "codex-rs/utils/oss",
@@ -236,15 +239,16 @@ index 00000000..3e2eb9a8
 +codex-code-mode-runtime = { path = "codex-rs/code-mode-runtime" }
 +codex-plugin-host = { path = "codex-rs/plugin-host" }
 +codex-home = { path = "codex-rs/codex-home" }
-+codex-http-client = { path = "http-client" }
++codex-http-client = { path = "codex-rs/http-client" }
 +codex-websocket-auth = { path = "codex-rs/websocket-auth" }
 +codex-websocket-client = { path = "codex-rs/websocket-client" }
 +codex-config = { path = "codex-rs/config" }
 +codex-connectors = { path = "codex-rs/connectors" }
-+codex-agent-extension = { path = "codex-rs/ext/agent" }
 +codex-agent-message-board-client = { path = "codex-rs/agent-message-board-client" }
 +codex-agent-message-board-extension = { path = "codex-rs/ext/agent-message-board" }
++codex-agent-message-board-host = { path = "codex-rs/agent-message-board-host" }
 +codex-message-board = { path = "codex-rs/message-board" }
++codex-message-board-mcp = { path = "codex-rs/message-board-mcp" }
 +codex-connectors-extension = { path = "codex-rs/ext/connectors" }
 +codex-context-fragments = { path = "codex-rs/context-fragments" }
 +codex-core = { path = "codex-rs/core" }
@@ -267,6 +271,7 @@ index 00000000..3e2eb9a8
 +codex-git-attribution = { path = "codex-rs/ext/git-attribution" }
 +codex-guardian-reviewer = { path = "codex-rs/ext/guardian-reviewer" }
 +codex-guardian-v2 = { path = "codex-rs/ext/guardian-v2" }
++codex-guardian-v3 = { path = "codex-rs/ext/guardian-v3" }
 +codex-history-notes-extension = { path = "codex-rs/ext/history-notes" }
 +codex-image-generation-extension = { path = "codex-rs/ext/image-generation" }
 +codex-external-agent-migration = { path = "codex-rs/external-agent-migration" }
@@ -577,6 +582,7 @@ index 00000000..3e2eb9a8
 +ts-rs = "11"
 +tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 +uds_windows = "1.1.0"
++unicode-normalization = "0.1.25"
 +unicode-segmentation = "1.12.0"
 +unicode-width = "0.2"
 +url = "2"
@@ -696,26 +702,28 @@ index 00000000..3e2eb9a8
 +# Uncomment to debug local changes.
 +# ratatui = { path = "../../ratatui" }
 +crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
-+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
-+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
++tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "02cb49fa827411e9279e3688d19ab9e82661b0e8" }
++tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "db4be399bc1b8b5de2edb46c7187834edabf7e30" }
++v8 = { git = "https://github.com/openai-oss-forks/rusty_v8.git", rev = "90a65f887a0c0f048f3784afbcb320b373c8a2e0" }
 +
 +# Uncomment to debug local changes.
 +# rmcp = { path = "../../rust-sdk/crates/rmcp" }
 +
 +[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
-+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
++tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "db4be399bc1b8b5de2edb46c7187834edabf7e30" }
 diff --git a/codex-rs/Cargo.toml b/codex-rs/Cargo.toml
 deleted file mode 100644
-index a0edc453..00000000
+index 2543d27a3..000000000
 --- a/codex-rs/Cargo.toml
 +++ /dev/null
-@@ -1,682 +0,0 @@
+@@ -1,689 +0,0 @@
 -[workspace]
 -members = [
 -    "aws-auth",
 -    "analytics",
 -    "agent-graph-store",
 -    "agent-message-board-client",
+-    "agent-message-board-host",
 -    "agent-identity",
 -    "agent-roles",
 -    "backend-client",
@@ -804,6 +812,7 @@ index a0edc453..00000000
 -    "memories/write",
 -    "mermaid",
 -    "message-board",
+-    "message-board-mcp",
 -    "model-provider-info",
 -    "mxc-sandbox",
 -    "models-manager",
@@ -857,6 +866,7 @@ index a0edc453..00000000
 -    "utils/cli",
 -    "utils/elapsed",
 -    "utils/sandbox-summary",
+-    "utils/model-facing-id",
 -    "utils/sleep-inhibitor",
 -    "utils/approval-presets",
 -    "utils/oss",
@@ -929,10 +939,11 @@ index a0edc453..00000000
 -codex-websocket-client = { path = "websocket-client" }
 -codex-config = { path = "config" }
 -codex-connectors = { path = "connectors" }
--codex-agent-extension = { path = "ext/agent" }
 -codex-agent-message-board-client = { path = "agent-message-board-client" }
 -codex-agent-message-board-extension = { path = "ext/agent-message-board" }
+-codex-agent-message-board-host = { path = "agent-message-board-host" }
 -codex-message-board = { path = "message-board" }
+-codex-message-board-mcp = { path = "message-board-mcp" }
 -codex-connectors-extension = { path = "ext/connectors" }
 -codex-context-fragments = { path = "context-fragments" }
 -codex-core = { path = "core" }
@@ -955,6 +966,7 @@ index a0edc453..00000000
 -codex-git-attribution = { path = "ext/git-attribution" }
 -codex-guardian-reviewer = { path = "ext/guardian-reviewer" }
 -codex-guardian-v2 = { path = "ext/guardian-v2" }
+-codex-guardian-v3 = { path = "ext/guardian-v3" }
 -codex-history-notes-extension = { path = "ext/history-notes" }
 -codex-image-generation-extension = { path = "ext/image-generation" }
 -codex-external-agent-migration = { path = "external-agent-migration" }
@@ -1265,6 +1277,7 @@ index a0edc453..00000000
 -ts-rs = "11"
 -tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 -uds_windows = "1.1.0"
+-unicode-normalization = "0.1.25"
 -unicode-segmentation = "1.12.0"
 -unicode-width = "0.2"
 -url = "2"
@@ -1384,14 +1397,15 @@ index a0edc453..00000000
 -# Uncomment to debug local changes.
 -# ratatui = { path = "../../ratatui" }
 -crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
--tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
--tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+-tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "02cb49fa827411e9279e3688d19ab9e82661b0e8" }
+-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "db4be399bc1b8b5de2edb46c7187834edabf7e30" }
+-v8 = { git = "https://github.com/openai-oss-forks/rusty_v8.git", rev = "90a65f887a0c0f048f3784afbcb320b373c8a2e0" }
 -
 -# Uncomment to debug local changes.
 -# rmcp = { path = "../../rust-sdk/crates/rmcp" }
 -
 -[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
--tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "db4be399bc1b8b5de2edb46c7187834edabf7e30" }
 -- 
 2.43.0
 
