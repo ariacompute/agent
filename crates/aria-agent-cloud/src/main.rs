@@ -85,6 +85,8 @@ mod codex_sandbox {
             .transform(SandboxTransformRequest {
                 command,
                 permissions: &PermissionProfile::default(),
+                // Default profile has no symbolic `:workspace_roots` rules to bind.
+                workspace_roots: None,
                 sandbox: SandboxType::None,
                 enforce_managed_network: false,
                 environment_id: None,
