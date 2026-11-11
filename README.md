@@ -1,13 +1,79 @@
+<div align="center">
+<a name="readme-top"></a>
+
 # agent
 
-[English](README.md) | [中文](README_cn.md)
+**A layered agent platform for AI agents**
 
-A layered agent platform built on OpenAI's [`codex`](https://github.com/openai/codex)
-harness, exposing agents as (a) a **Rust + Cloud API** speaking the **OpenAI beta
-Agents** resource surface, (b) **JS / Python SDKs** mirroring the OpenAI Agents
-SDK, and (c) **native SDKs for Swift / Kotlin**.
+It wraps OpenAI's [`codex`](https://github.com/openai/codex) harness and exposes agents as<br/>
+(a) a **Rust + Cloud API** speaking the **OpenAI beta Agents** resource surface, (b) **JS / Python<br/>
+SDKs** mirroring the OpenAI Agents SDK, and (c) **native SDKs for Swift / Kotlin** — all sharing<br/>
+one `recall → model → memorize` runtime with pluggable sandboxes.
 
-## Modules
+[English](./README.md) · **简体中文** · [Docs](./docs/adr/0001-submodule-strategy.md)
+
+[![][release-shield]][release-link] [![][language-shield]][language-link] [![][license-shield]][license-link] [![][lastcommit-shield]][lastcommit-link]
+<br/>
+[![][sdks-shield]][sdks-link] [![][tests-shield]][tests-link] [![][docs-shield]][docs-link] [![][codex-shield]][codex-link]
+</div>
+
+<details>
+<summary><kbd>Table of contents</kbd></summary>
+
+#### TOC
+
+**Get started**
+
+- [✨ Features](#-features)
+- [🧩 Modules](#-modules)
+- [🚀 Quick start](#-quick-start)
+
+**CLI & deploy**
+
+- [🧰 Command line](#-command-line)
+- [🛳 Deployment](#-deployment)
+
+**Architecture & SDK**
+
+- [🔗 codex submodule](#-codex-submodule)
+- [🌐 Browser sandbox](#-browser-sandbox)
+- [🧠 Memory graph & memo tools](#-memory-graph--memo-tools)
+- [🔌 OpenAI Agents API compatibility](#-openai-agents-api-compatibility)
+
+**SDK**
+
+- [📦 SDK examples](#-sdk-examples)
+
+**Trust & governance**
+
+- [🔏 Trust store security](#-trust-store-security)
+- [🔨 Development](#-development)
+- [📚 Documentation](#-documentation)
+- [📝 License](#-license)
+- [🤝 Engineering conventions](#-engineering-conventions)
+
+</details>
+
+## ✨ Features
+
+`agent` gives every SDK the same three-step shape — define an `Agent`, run it once, then
+continue the conversation and stream — while the runtime decides where memory lives and
+where tools execute:
+
+- 🧩 **Layered agent runtime** — `aria-agent-core` runs `recall → model → memorize`; tools execute inside a pluggable `Sandbox` (Docker / Kata / Cube / Browser).
+- 🔗 **Deep codex integration** — OpenAI's `codex` harness is vendored as a git submodule (sandboxing + memories) and promoted to a root Cargo workspace via a small patch.
+- ☁️ **Cloud API** — `aria-agent-cloud` is an axum service speaking the OpenAI **beta Agents** surface, with Postgres + pgvector holding both metadata *and* context, and SSE streaming.
+- 📱 **On-device store** — `aria-agent-memo` (aria memo / SQLite) keeps a local-first context copy that is interchangeable with the cloud backend behind one `ContextStore` trait.
+- 🌐 **Five-language SDKs** — JS / Python mirror the OpenAI Agents SDK; Rust / Swift / Kotlin embed the runtime in-process with no server or network.
+- 🧭 **Pluggable sandbox** — every tool container is capped by `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` and reaches the daemon through `DOCKER_HOST` / `ARIA_DOCKER_SOCKET`.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🧩 Modules
 
 | Module | What it is |
 |--------|------------|
@@ -27,41 +93,13 @@ SDK, and (c) **native SDKs for Swift / Kotlin**.
 > and boot fails without it. The **on-device** SDK keeps its embedded sled store.
 > See `docs/adr/0010-context-storage-pgvector.md`.
 
-## codex submodule
+<div align="right">
 
-This repo depends on OpenAI's [`codex`](https://github.com/openai/codex) as a git
-submodule at `codex/`. The upstream `codex` workspace lives at `codex/codex-rs/`
-and has **no manifest at the repo root**, so a git dependency (`package =
-"codex-*"`) cannot resolve without a patch.
+[![][back-to-top]](#readme-top)
 
-`patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch` promotes the
-`codex-rs` workspace definition up to the repo root (and prefixes internal
-`path` dependencies with `codex-rs/`). This is exactly what the
-`ariacompute/codex` fork (branch `main`) does. Apply it **inside the
-`codex/` submodule** after checkout:
+</div>
 
-```bash
-# 1. clone the submodule (shallow)
-git submodule update --init --depth 1 codex
-
-# 2. apply the root-workspace patch inside the submodule
-git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
-```
-
-After this, `codex/Cargo.toml` exists at the repo root and cargo can resolve
-`codex-*` crates transitively. The patch is **not committed** in the submodule —
-it lives in `patch/` at the repo root — so re-run it whenever you re-init the
-submodule. To undo the patch and restore the submodule:
-
-```bash
-git -C codex checkout -- . && git -C codex clean -fd
-```
-
-> The patch is required for the deep compile-integration described in
-> `docs/adr/0005-codex-integration.md`. If you only build our crates that do not
-> depend on codex crates, you can skip it.
-
-## Quick start
+## 🚀 Quick start
 
 ```bash
 # 1. codex submodule + root-workspace patch (see "codex submodule" above)
@@ -87,7 +125,13 @@ export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 
-## CLI
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🧰 Command line
 
 The `aria-agent` binary (crate `aria-agent-cloud`) is both the cloud server
 (default subcommand `serve`) and a self-updating CLI. CLI settings live in a
@@ -124,7 +168,13 @@ aria-agent serve --port 3000
 > `ARIA_AGENT_FFI_LIB` at `~/.ariacompute/lib` (where `upgrade` installs
 > `libaria-agent_ffi`) so native SDKs can find the cdylib.
 
-## Docker Compose deployment
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🛳 Deployment
 
 The cloud service ships with a `Dockerfile` and `docker-compose.yml` for a
 self-contained deployment (Postgres + the `aria-agent` axum service). All
@@ -325,7 +375,53 @@ warning, so the service always boots.
 |--------|-----------|---------|
 | `pgdata` | Postgres (pgvector) | `agents` / `runs` metadata **and** `context_fragments` (context memory). |
 
-## Browser sandbox
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🔗 codex submodule
+
+This repo depends on OpenAI's [`codex`](https://github.com/openai/codex) as a git
+submodule at `codex/`. The upstream `codex` workspace lives at `codex/codex-rs/`
+and has **no manifest at the repo root**, so a git dependency (`package =
+"codex-*"`) cannot resolve without a patch.
+
+`patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch` promotes the
+`codex-rs` workspace definition up to the repo root (and prefixes internal
+`path` dependencies with `codex-rs/`). This is exactly what the
+`ariacompute/codex` fork (branch `main`) does. Apply it **inside the
+`codex/` submodule** after checkout:
+
+```bash
+# 1. clone the submodule (shallow)
+git submodule update --init --depth 1 codex
+
+# 2. apply the root-workspace patch inside the submodule
+git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
+```
+
+After this, `codex/Cargo.toml` exists at the repo root and cargo can resolve
+`codex-*` crates transitively. The patch is **not committed** in the submodule —
+it lives in `patch/` at the repo root — so re-run it whenever you re-init the
+submodule. To undo the patch and restore the submodule:
+
+```bash
+git -C codex checkout -- . && git -C codex clean -fd
+```
+
+> The patch is required for the deep compile-integration described in
+> `docs/adr/0005-codex-integration.md`. If you only build our crates that do not
+> depend on codex crates, you can skip it.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🌐 Browser sandbox
 
 `aria-agent-browser` embeds a real, sandboxed browser into the agent runtime. It
 reuses the same `Sandbox` trait and Docker/Kata container path as command
@@ -368,7 +464,13 @@ Image tags are overridable per engine via `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`
 (e.g. `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`), falling back to the built-in
 defaults. See `docs/adr/0012-browser-sandbox.md`.
 
-## Memory graph & memo tools
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🧠 Memory graph & memo tools
 
 The agent doesn't just read/write the `aria-agent-memo` store — it **actively
 manages its own memory** during a run:
@@ -397,7 +499,67 @@ enables it). `aria-agent-core` depends only on the `ContextStore` trait — neve
 `aria-agent-memo` — so the local (aria memo / SQLite) and cloud (pgvector)
 backends are interchangeable. See `docs/adr/0013-agent-memo-integration.md`.
 
-## SDK examples
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🔌 OpenAI Agents API compatibility
+
+`POST /v1/agents/sessions/{id}/events/stream` speaks the **OpenAI beta Agents
+streaming protocol**, so an OpenAI client can consume it unchanged. Every SSE
+`data:` frame is an `agent.*` event with `event_id`, `session_id`, `turn_id` and a
+monotonic `sequence_number`:
+
+| Event | Payload |
+|---|---|
+| `agent.turn.created` | `turn{id,status,session_id,agent_id}` |
+| `agent.turn.in_progress` | phase boundary; extra `phase` (`recall` / `model` / `tool_exec` / `loop_guard`) + `label` |
+| `agent.turn.item.added` | `item` — `message` (assistant, `role`) or `function_call` (`name`, `arguments`) |
+| `agent.turn.item.done` | completed `item`; a `function_call` also carries the executed `result` |
+| `agent.turn.output_text.delta` | `item_id`, `delta` |
+| `agent.turn.output_text.done` | `item_id`, `text` |
+| `agent.turn.completed` | terminal: `turn{status:"completed", output}` |
+| `agent.turn.failed` | terminal: `turn{status:"failed"}`, `error` |
+
+`agent.turn.completed` (or `agent.turn.failed`) is the terminal event: when a
+client sees it the run is finished — there is no trailing `data: [DONE]`
+sentinel.
+
+Extra fields our orchestration needs but the beta schema does not model (the
+agentic `phase`, the tool `result`) are carried **inside** these frames, so
+strict OpenAI clients simply ignore them. No private `aria.*` frames are emitted.
+
+The supported way to consume this protocol is one of the SDKs above — they decode
+these frames for you (`result.finalOutput` / `result.final_output`):
+
+```python
+from ariacompute_agent import Agent, Runner
+
+agent = Agent(name="Agent Demo")
+streamed = await Runner.run_streamed(agent, "tell me a joke")
+async for event in streamed.events:
+    if event["type"] == "agent.turn.output_text.delta":
+        print(event["delta"], end="", flush=True)
+```
+
+### Default agent
+
+`ensure_schema` seeds a default agent — `id: agent-demo`,
+`name: Agent Demo` — so a fresh deployment (and the Aria Playground) has
+something to run out of the box. Deployments seeded with the previous default
+(`playground-demo`) are renamed in place on the next boot. List the agents
+visible to your key with `GET /v1/agents` (admins see every agent, tenants
+only their own).
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📦 SDK examples
 
 Every example below uses an **official SDK** — none of them hand-roll HTTP. All
 SDKs mirror the OpenAI Agents SDK shape: define an `Agent`, then run it.
@@ -412,7 +574,7 @@ SDKs mirror the OpenAI Agents SDK shape: define an `Agent`, then run it.
 
 The JS / Python SDKs are thin clients over the beta Agents REST API that the
 service still exposes — see
-[OpenAI Agents API compatibility](#openai-agents-api-compatibility) for the wire
+[OpenAI Agents API compatibility](#-openai-agents-api-compatibility) for the wire
 contract. The Rust / Swift / Kotlin SDKs embed the runtime **in-process** and keep
 their context in the on-device store (no server, no network).
 
@@ -796,62 +958,140 @@ library AAR that bundles the native `libaria_agent_ffi.so` for `arm64-v8a` and
 Consumers resolve the AAR from a `flatDir` repo or a Maven repository (see the
 `cockpit/app` README for an example).
 
-## OpenAI Agents API compatibility
+<div align="right">
 
-`POST /v1/agents/sessions/{id}/events/stream` speaks the **OpenAI beta Agents
-streaming protocol**, so an OpenAI client can consume it unchanged. Every SSE
-`data:` frame is an `agent.*` event with `event_id`, `session_id`, `turn_id` and a
-monotonic `sequence_number`:
+[![][back-to-top]](#readme-top)
 
-| Event | Payload |
-|---|---|
-| `agent.turn.created` | `turn{id,status,session_id,agent_id}` |
-| `agent.turn.in_progress` | phase boundary; extra `phase` (`recall` / `model` / `tool_exec` / `loop_guard`) + `label` |
-| `agent.turn.item.added` | `item` — `message` (assistant, `role`) or `function_call` (`name`, `arguments`) |
-| `agent.turn.item.done` | completed `item`; a `function_call` also carries the executed `result` |
-| `agent.turn.output_text.delta` | `item_id`, `delta` |
-| `agent.turn.output_text.done` | `item_id`, `text` |
-| `agent.turn.completed` | terminal: `turn{status:"completed", output}` |
-| `agent.turn.failed` | terminal: `turn{status:"failed"}`, `error` |
+</div>
 
-`agent.turn.completed` (or `agent.turn.failed`) is the terminal event: when a
-client sees it the run is finished — there is no trailing `data: [DONE]`
-sentinel.
+## 🔏 Trust store security
 
-Extra fields our orchestration needs but the beta schema does not model (the
-agentic `phase`, the tool `result`) are carried **inside** these frames, so
-strict OpenAI clients simply ignore them. No private `aria.*` frames are emitted.
+The 2026-10 eMudhra (emSign) intermediate CA key compromise is handled in two
+layers for the agent:
 
-The supported way to consume this protocol is one of the SDKs above — they decode
-these frames for you (`result.finalOutput` / `result.final_output`):
+- **Rust (cloud + CLI binaries).** Outbound TLS (provider API calls, `upgrade`
+  downloads from GitHub/Gitee Releases) goes through `reqwest` + `rustls-tls`,
+  whose trust store is the compiled-in **`webpki-roots`**, pinned `>=1.0.10` in
+  `aria-agent-cloud` so the compromised emSign roots are removed. The binaries do
+  not use the system bundle, so the lock bump is the decisive fix.
+- **JS SDK.** Built and tested with **bun >= 1.4.4**; it performs no outbound TLS
+  itself beyond the fetch it makes to the cloud service.
+- **Python SDK.** Bundles no trust store and relies on the host / container
+  `ca-certificates`.
 
-```python
-from ariacompute_agent import Agent, Runner
+`scripts/check-emudhra.sh` scans a system or image CA bundle offline for the known
+root / intermediate SHA-256 fingerprints (exit `0` clean, `1` hit, `2` unreadable):
 
-agent = Agent(name="Agent Demo")
-streamed = await Runner.run_streamed(agent, "tell me a joke")
-async for event in streamed.events:
-    if event["type"] == "agent.turn.output_text.delta":
-        print(event["delta"], end="", flush=True)
+```bash
+scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 ```
 
-### Default agent
+<div align="right">
 
-`ensure_schema` seeds a default agent — `id: agent-demo`,
-`name: Agent Demo` — so a fresh deployment (and the Aria Playground) has
-something to run out of the box. Deployments seeded with the previous default
-(`playground-demo`) are renamed in place on the next boot. List the agents
-visible to your key with `GET /v1/agents` (admins see every agent, tenants
-only their own).
+[![][back-to-top]](#readme-top)
 
-## License
+</div>
 
-MIT.
+## 🔨 Development
 
-## Engineering Conventions
+| Target | Effect |
+|---|---|
+| `cargo build --workspace` | build all crates |
+| `cargo test --workspace` | run the workspace test suite |
+| `cargo clippy --workspace --all-targets -- -D warnings` | lint with warnings as errors |
+| `just ffi` | regenerate the Swift / Kotlin bindings (needs the cdylib built) |
+| `cargo run -p aria-agent-cloud` | run the cloud API (needs Postgres + OpenAI key) |
+| `aria-agent serve` | start the cloud HTTP server (default subcommand) |
+| `aria-agent setup` / `upgrade` | configure Releases source / self-update the binary + cdylib |
 
-This repository follows the Harness Engineering philosophy:
+The `codex` submodule must be initialized (and the root-workspace patch applied)
+before any crate that depends on `codex-*` is built — see
+[codex submodule](#-codex-submodule). Crates that do not depend on codex build
+without it.
 
-- [`AGENTS.md`](AGENTS.md): Agent engineering context entry and directory index
-- [`requirements.md`](requirements.md): Requirements spec (feature boundaries/exceptions/acceptance criteria, human-review-gated)
-- [`task.md`](task.md): Implementation task checklist
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📚 Documentation
+
+Detailed design records live under [`docs/adr/`](./docs/adr), written in English:
+
+| Document | What it covers |
+|---|---|
+| [Submodule strategy](./docs/adr/0001-submodule-strategy.md) | Why `codex` stays out of the workspace and is referenced by design |
+| [FFI boundary](./docs/adr/0002-ffi-boundary.md) | Stable `ariacompute-agent` exported surface and regeneration rule |
+| [Sandbox providers](./docs/adr/0003-sandbox-providers.md) | Docker / Kata / Cube / Browser provider traits |
+| [Memo storage](./docs/adr/0004-memo-storage.md) | `aria-agent-memo` on-device store schema |
+| [codex integration](./docs/adr/0005-codex-integration.md) | Deep compile integration with the `codex` submodule |
+| [Multi-tenant API keys](./docs/adr/0007-multi-tenant-api-keys.md) | Admin / tenant key model and `POST /v1/api-keys` |
+| [SDK interface](./docs/adr/0008-sdk-interface.md) | Session-less happy-path SDK ergonomics |
+| [OpenAI beta Agents API](./docs/adr/0009-openai-beta-agents-api.md) | Streaming event envelope contract |
+| [Context storage pgvector](./docs/adr/0010-context-storage-pgvector.md) | Why pgvector is mandatory for cloud context |
+| [Memory backend switch](./docs/adr/0011-memory-backend-switch.md) | `cloud` / `local` / `both` selection and merge |
+| [Browser sandbox](./docs/adr/0012-browser-sandbox.md) | Six-image `BrowserCatalog` and `BrowserSandbox` |
+| [Agent–memo integration](./docs/adr/0013-agent-memo-integration.md) | Memory graph, auto-compact, memo tool family |
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📝 License
+
+MIT. See [LICENSE](./LICENSE).
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🤝 Engineering conventions
+
+This repository follows the Harness Engineering philosophy: the repository is the agent's context, and the documents that govern it are versioned alongside the code.
+
+- [`AGENTS.md`](./AGENTS.md) — agent engineering context entry and directory index
+- [`requirements.md`](./requirements.md) — requirements spec (feature boundaries / exceptions / acceptance criteria), human-review-gated before implementation
+- [`task.md`](./task.md) — implementation task checklist
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+---
+
+<div align="center">
+
+Copyright © 2026 [ariacompute][org]. <br/>
+This project is [MIT](./LICENSE) licensed.
+
+</div>
+
+<!-- LINK GROUP -->
+
+[org]: https://github.com/ariacompute
+[release-link]: https://github.com/ariacompute/agent/releases
+[language-link]: ./Cargo.toml
+[license-link]: ./LICENSE
+[lastcommit-link]: https://github.com/ariacompute/agent/commits
+[sdks-link]: #-sdk-examples
+[tests-link]: ./justfile
+[docs-link]: ./docs/adr
+[codex-link]: #-codex-submodule
+
+[release-shield]: https://img.shields.io/github/v/release/ariacompute/agent?style=flat-square&labelColor=black&color=555
+[language-shield]: https://img.shields.io/badge/language-Rust%20%2F%20Swift%20%2F%20Kotlin-555?style=flat-square&labelColor=black
+[license-shield]: https://img.shields.io/github/license/ariacompute/agent?style=flat-square&labelColor=black&color=555
+[lastcommit-shield]: https://img.shields.io/github/last-commit/ariacompute/agent?style=flat-square&labelColor=black&color=555
+[sdks-shield]: https://img.shields.io/badge/SDKs-5_languages-555?style=flat-square&labelColor=black
+[tests-shield]: https://img.shields.io/badge/tests-cargo_test--workspace-555?style=flat-square&labelColor=black
+[docs-shield]: https://img.shields.io/badge/docs-12_ADRs-555?style=flat-square&labelColor=black
+[codex-shield]: https://img.shields.io/badge/codex-submodule-555?style=flat-square&labelColor=black
+
+[back-to-top]: https://img.shields.io/badge/-BACK_TO_TOP-151515?style=flat-square
