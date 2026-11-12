@@ -6,8 +6,27 @@ name: Publish npm (@ariacompute/agent)
 # The package mirrors the OpenAI Agents SDK shape (Agent / run / runStreamed /
 # tool / Session) on top of the aria-agent-cloud beta Agents API.
 #
-# Secrets required:
-#   NPM_TOKEN — npm automation token with publish permission for @ariacompute.
+# Auth: npm Trusted Publishing (OIDC). No long-lived token, no repo secret.
+# Prerequisites, on npmjs.com:
+#   Packages → @ariacompute/agent → Settings → Trusted publishing → Add trusted publisher
+#     Provider            GitHub Actions
+#     Organization/user   ariacompute
+#     Repository          agent
+#     Workflow filename   publish-npm.yml   (file name only, .yml included)
+#     Environment name    (empty)
+#     Allowed actions     must have "npm publish" checked (npm 2026-09-03+
+#                         defaults to only "npm stage publish")
+#   The connection must complete its first successful publish within 2 days
+#   or it expires and cannot be edited (delete + recreate).
+# OIDC requires npm CLI >= 11.5.1, i.e. Node >= 22.14 (we run Node 24).
+# Provenance is generated automatically for public repos + public packages;
+# no --provenance flag needed.
+# After the first verified OIDC release, tighten the package's
+# Settings → Publishing access to "Require two-factor authentication and
+# disallow tokens", then revoke the old granular/NPM_TOKEN credential.
+#
+# The SDK itself is built and type-checked with bun; the publish step uses the
+# Node/npm toolchain so the OIDC token exchange runs on a supported npm CLI.
 
 on:
   release:
@@ -18,22 +37,47 @@ on:
         description: "Version to publish (default: tag with v stripped)"
         required: false
 
+permissions:
+  id-token: write # OIDC token exchange with the npm registry, required
+  contents: read
+
 jobs:
   publish:
     name: npm @ariacompute/agent
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          # Release build: never restore a cached npm state.
+          package-manager-cache: false
+      - name: Verify npm CLI supports OIDC
+        shell: bash
+        run: |
+          NPM_VERSION="$(npm --version)"
+          echo "node $(node --version) / npm $NPM_VERSION"
+          NPM_VERSION="$NPM_VERSION" node -e '
+            const [major, minor] = process.env.NPM_VERSION.split(".").map(Number);
+            if (major < 11 || (major === 11 && minor < 5)) {
+              console.error(`npm ${process.env.NPM_VERSION} is too old for Trusted Publishing (need >= 11.5.1)`);
+              process.exit(1);
+            }
+          '
       - name: Resolve version
         run: |
           VERSION="${{ inputs.version }}"
           if [ -z "$VERSION" ] && [ "${GITHUB_EVENT_NAME}" = "release" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$VERSION" ]; then
+            VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
           fi
           [ -n "$VERSION" ] || VERSION="0.0.0"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
@@ -48,11 +92,10 @@ jobs:
           bunx tsc -p tsconfig.json --noEmit
       - name: Pin version
         working-directory: sdk/js
-        run: npm version "$VERSION" --no-git-tag-version
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
       - name: Publish
+        # No NODE_AUTH_TOKEN: setting one would silently fall back to token
+        # auth and defeat trusted publishing. `--access public` is not needed
+        # either; package.json carries publishConfig.access.
         working-directory: sdk/js
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
-          npm publish --access public
+        run: npm publish

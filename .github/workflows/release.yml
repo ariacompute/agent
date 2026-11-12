@@ -36,9 +36,10 @@ jobs:
             asset_os: macos
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -191,9 +192,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Set package version from tag
         run: |
