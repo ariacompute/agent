@@ -94,11 +94,15 @@ mod tests {
         calls: AtomicUsize,
         last: std::sync::Mutex<Option<Vec<String>>>,
         fail_exec: bool,
+        fail_spawn: bool,
     }
 
     #[async_trait]
     impl Sandbox for Recording {
         async fn spawn(&self, _spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
+            if self.fail_spawn {
+                return Err(SandboxError::Spawn("boom".into()));
+            }
             Ok(SandboxHandle { id: "rec".into() })
         }
 
@@ -160,6 +164,20 @@ mod tests {
         let shell = SandboxShell::new(sb);
         let err = shell.exec(&["true".into()], None).await.unwrap_err();
         assert!(matches!(err, super::super::SeamError::Io(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_maps_to_unavailable() {
+        let sb = Arc::new(Recording {
+            fail_spawn: true,
+            ..Default::default()
+        });
+        let shell = SandboxShell::new(sb);
+        let err = shell.exec(&["true".into()], None).await.unwrap_err();
+        assert!(
+            matches!(err, super::super::SeamError::Unavailable(_)),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

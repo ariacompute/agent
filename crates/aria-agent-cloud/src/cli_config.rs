@@ -75,8 +75,8 @@ pub fn load_cli_config() -> std::io::Result<AgentCliConfig> {
 pub fn save_cli_config(cfg: &AgentCliConfig) -> std::io::Result<PathBuf> {
     ensure_aria_home()?;
     let path = cli_config_path()?;
-    let raw = serde_yaml::to_string(cfg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    // `AgentCliConfig` contains only a String and is always serializable.
+    let raw = serde_yaml::to_string(cfg).expect("CLI config is serializable");
     std::fs::write(&path, raw)?;
     Ok(path)
 }
@@ -157,6 +157,17 @@ mod tests {
             let loaded = load_cli_config().unwrap();
             assert_eq!(loaded.upgrade_url, "https://github.com/ariacompute");
             assert!(lib_dir().unwrap().ends_with("lib"));
+        });
+    }
+
+    #[test]
+    fn malformed_config_is_reported_as_invalid_data() {
+        let dir = std::env::temp_dir().join("aria-cli-config-malformed");
+        with_aria_home(&dir, || {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(cli_config_path().unwrap(), "upgrade_url: [unterminated").unwrap();
+            let err = load_cli_config().unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         });
     }
 

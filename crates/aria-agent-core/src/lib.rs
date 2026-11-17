@@ -715,6 +715,31 @@ mod openai_impl {
             }
 
             #[tokio::test]
+            async fn complete_with_tools_forwards_reported_usage() {
+                let server = MockServer::start().await;
+                let mut body = chat_response(Some("done"), None);
+                body["usage"] = serde_json::json!({
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14,
+                });
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                    .mount(&server)
+                    .await;
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
+                    ("GATEWAY_MODEL", Some("stub")),
+                ]);
+                let model = OpenAiModel::new("stub");
+                let turn = model.complete_with_tools(&request(), &[]).await.unwrap();
+                let usage = turn.usage.expect("usage is forwarded");
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 4);
+                assert_eq!(usage.model, "stub");
+            }
+
+            #[tokio::test]
             async fn complete_reports_upstream_errors() {
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
@@ -914,6 +939,10 @@ pub struct AgentConfig {
     pub tool_result_max_bytes: usize,
 }
 
+fn workspace_root_unavailable(e: std::io::Error) -> CoreError {
+    CoreError::Config(format!("workspace root unavailable: {e}"))
+}
+
 fn default_preset() -> String {
     "workspace_write".to_string()
 }
@@ -962,8 +991,7 @@ pub fn build_policy(config: &AgentConfig) -> Result<Option<Arc<seams::SandboxPol
         ))
     })?;
     let root = if config.workspace_root.trim().is_empty() {
-        std::env::current_dir()
-            .map_err(|e| CoreError::Config(format!("workspace root unavailable: {e}")))?
+        std::env::current_dir().map_err(workspace_root_unavailable)?
     } else {
         std::path::PathBuf::from(config.workspace_root.trim())
     };
@@ -1049,7 +1077,9 @@ impl Agent {
         sandbox: Arc<dyn Sandbox>,
         handlers: Vec<Arc<dyn ToolHandler>>,
     ) -> Result<Self, CoreError> {
-        let policy = build_policy(&config)?;
+        // `build_policy` returns `Some` on every successful path; the `Option`
+        // is kept for callers that probe without committing to an agent.
+        let policy = build_policy(&config)?.expect("policy on success");
         let approvals: Arc<dyn seams::ApprovalBroker> = match config.approval_mode.as_str() {
             "auto" => Arc::new(seams::AutoAllow),
             "deny" | "" => Arc::new(seams::DenyAll),
@@ -1059,18 +1089,13 @@ impl Agent {
                 )))
             }
         };
-        let post = match &policy {
-            Some(p) => seams::PostExecPolicy::default()
-                .with_max_bytes(config.tool_result_max_bytes)
-                .with_spill_dir(p.root().join(".aria/spill")),
-            None => seams::PostExecPolicy::default().with_max_bytes(config.tool_result_max_bytes),
-        };
-        let mut pipeline = seams::ToolExecutionPipeline::new(handlers.clone())
+        let post = seams::PostExecPolicy::default()
+            .with_max_bytes(config.tool_result_max_bytes)
+            .with_spill_dir(policy.root().join(".aria/spill"));
+        let pipeline = seams::ToolExecutionPipeline::new(handlers.clone())
             .with_approvals(approvals)
-            .with_post_exec(post);
-        if let Some(p) = &policy {
-            pipeline = pipeline.with_policy(p.clone());
-        }
+            .with_post_exec(post)
+            .with_policy(policy.clone());
         let session_log: Option<Arc<dyn session::SessionPersistence>> =
             if config.session_log_dir.trim().is_empty() {
                 None
@@ -1260,7 +1285,7 @@ async fn maybe_compact_store(context: &Arc<dyn ContextStore>, session: &str, thr
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[tokio::test]
@@ -1330,6 +1355,42 @@ mod tests {
         let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
         let res = Agent::with_model(cfg, model, in_memory_context());
         assert!(matches!(res, Err(CoreError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn browser_sandbox_provider_is_a_config_error_without_injection() {
+        let cfg = AgentConfig {
+            sandbox_provider: "browser".into(),
+            ..AgentConfig::default()
+        };
+        let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
+        let res = Agent::with_model(cfg, model, in_memory_context());
+        assert!(matches!(res, Err(CoreError::Config(_))));
+    }
+
+    #[test]
+    fn an_unavailable_current_directory_is_a_config_error() {
+        let err = workspace_root_unavailable(std::io::Error::other("cwd gone"));
+        assert!(matches!(err, CoreError::Config(_)));
+        assert!(err.to_string().contains("workspace root unavailable"));
+    }
+
+    #[test]
+    fn invalid_workspace_root_is_reported_and_excluded_from_the_prompt() {
+        let cfg = AgentConfig {
+            workspace_root: "relative/missing/root".into(),
+            permission_preset: "read_only".into(),
+            ..AgentConfig::default()
+        };
+        assert!(matches!(build_policy(&cfg), Err(CoreError::Config(_))));
+        assert!(!build_prompt(&cfg).sections().is_empty());
+    }
+
+    #[test]
+    fn the_title_provider_is_accessible() {
+        let model: Box<dyn ModelClient> = Box::new(StubModel::new("agent"));
+        let agent = Agent::with_model(AgentConfig::default(), model, in_memory_context()).unwrap();
+        let _ = agent.title_provider();
     }
 
     #[test]
@@ -1937,10 +1998,12 @@ mod tests {
 
     /// Delegates to an in-memory store, but can fail `expand` (graph off) or
     /// `list_session` (compaction cannot inspect the session).
-    struct FlakyStore {
-        inner: Arc<context::MemoryContextStore>,
-        fail_expand: bool,
-        fail_list: bool,
+    pub(crate) struct FlakyStore {
+        pub(crate) inner: Arc<context::MemoryContextStore>,
+        pub(crate) fail_expand: bool,
+        pub(crate) fail_list: bool,
+        pub(crate) fail_recall: bool,
+        pub(crate) fail_memorize: bool,
     }
 
     impl FlakyStore {
@@ -1949,6 +2012,8 @@ mod tests {
                 inner: store,
                 fail_expand: false,
                 fail_list: false,
+                fail_recall: false,
+                fail_memorize: false,
             }
         }
 
@@ -1970,9 +2035,15 @@ mod tests {
     #[async_trait]
     impl ContextStore for FlakyStore {
         async fn memorize(&self, frag: ContextFragment) -> Result<(), ContextError> {
+            if self.fail_memorize {
+                return Err(ContextError::Storage("memorize disabled".into()));
+            }
             self.inner.memorize(frag).await
         }
         async fn recall(&self, query: &RecallQuery) -> Result<Vec<ContextFragment>, ContextError> {
+            if self.fail_recall {
+                return Err(ContextError::Storage("recall disabled".into()));
+            }
             self.inner.recall(query).await
         }
         async fn compact(&self, session: &str) -> Result<ContextFragment, ContextError> {

@@ -264,3 +264,28 @@ pub async fn delete_job(
     }
     Ok(Json(job.into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seam_errors_map_by_variant() {
+        assert!(matches!(
+            seam_error(SeamError::Invalid("x".into())),
+            AppError::BadRequest(_)
+        ));
+        assert!(matches!(
+            seam_error(SeamError::NotFound("x".into())),
+            AppError::NotFound
+        ));
+        assert!(matches!(
+            seam_error(SeamError::Denied("x".into())),
+            AppError::Forbidden(_)
+        ));
+        assert!(matches!(
+            seam_error(SeamError::Io("x".into())),
+            AppError::Core(_)
+        ));
+    }
+}

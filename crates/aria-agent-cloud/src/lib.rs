@@ -17,7 +17,7 @@
 
 pub mod api;
 #[cfg(test)]
-mod api_tests;
+pub(crate) mod api_tests;
 pub mod app;
 pub mod auth;
 pub mod cli_config;

@@ -179,6 +179,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_skips_non_skills_and_reports_bad_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("loose.txt"), "not a skill").unwrap();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        let skills = FilesystemSkills::new([dir.path().to_path_buf()]);
+        assert!(skills.list().await.unwrap().is_empty());
+
+        let blocker = tempfile::tempdir().unwrap();
+        let file = blocker.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let skills = FilesystemSkills::new([file]);
+        assert!(matches!(skills.list().await, Err(SeamError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_skill_body_is_an_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "secret", "body");
+        let path = dir.path().join("secret").join("SKILL.md");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let skills = FilesystemSkills::new([dir.path().to_path_buf()]);
+        assert!(matches!(skills.load("secret").await, Err(SeamError::Io(_))));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[tokio::test]
     async fn duplicate_skill_names_across_roots_are_rejected() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();

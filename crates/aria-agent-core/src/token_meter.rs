@@ -149,6 +149,13 @@ mod tests {
     }
 
     #[test]
+    fn default_meter_uses_the_documented_limits() {
+        let m = TokenMeter::default();
+        assert!(!m.under_pressure());
+        assert_eq!(m.pressure_ratio(), DEFAULT_PRESSURE_RATIO);
+    }
+
+    #[test]
     fn invalid_configuration_falls_back() {
         let m = TokenMeter::new(0, 0.0);
         assert!(!m.under_pressure());

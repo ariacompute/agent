@@ -10,6 +10,10 @@ use async_trait::async_trait;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+fn io_err(what: &str, path: &Path, e: std::io::Error) -> SessionError {
+    SessionError::Io(format!("{what} {}: {e}", path.display()))
+}
+
 /// Directory-backed JSONL provider.
 #[derive(Debug, Clone)]
 pub struct JsonlPersistence {
@@ -51,23 +55,22 @@ impl SessionPersistence for JsonlPersistence {
         if records.is_empty() {
             return Ok(());
         }
-        std::fs::create_dir_all(&self.root)
-            .map_err(|e| SessionError::Io(format!("mkdir {}: {e}", self.root.display())))?;
+        std::fs::create_dir_all(&self.root).map_err(|e| io_err("mkdir", &self.root, e))?;
         let path = self.path_for(session);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|e| SessionError::Io(format!("open {}: {e}", path.display())))?;
+            .map_err(|e| io_err("open", &path, e))?;
         for record in records {
-            let line = serde_json::to_string(record)
-                .map_err(|e| SessionError::Serde(format!("encode record: {e}")))?;
+            // `SessionRecord` contains only infallibly serializable fields.
+            let line = serde_json::to_string(record).expect("session records serialize");
+            // `std::fs::File` is unbuffered; its `flush()` is a no-op that cannot
+            // fail, so the writes themselves are the only fallible step here.
             file.write_all(line.as_bytes())
                 .and_then(|_| file.write_all(b"\n"))
-                .map_err(|e| SessionError::Io(format!("append {}: {e}", path.display())))?;
+                .map_err(|e| io_err("append", &path, e))?;
         }
-        file.flush()
-            .map_err(|e| SessionError::Io(format!("flush {}: {e}", path.display())))?;
         Ok(())
     }
 
@@ -160,6 +163,28 @@ mod tests {
         let read = p.read("s", 0).await.unwrap();
         assert_eq!(read.len(), 2);
         assert_eq!(read[1].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn io_failures_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "a file").unwrap();
+        let p = JsonlPersistence::new(blocker.join("nested"));
+        assert!(p.append("s", &[record(0, "x")]).await.is_err());
+
+        let p = JsonlPersistence::new(dir.path());
+        std::fs::create_dir_all(p.path_for("s")).unwrap();
+        assert!(p.append("s", &[record(0, "x")]).await.is_err());
+
+        #[cfg(unix)]
+        {
+            // `/dev/full` accepts writes but reports ENOSPC — covers the append
+            // failure after the file was successfully opened.
+            std::fs::remove_dir_all(p.path_for("s")).unwrap();
+            std::os::unix::fs::symlink("/dev/full", p.path_for("s")).unwrap();
+            assert!(p.append("s", &[record(0, "x")]).await.is_err());
+        }
     }
 
     #[test]

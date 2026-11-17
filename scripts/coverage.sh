@@ -11,16 +11,16 @@
 # uncovered while its annotated source is fully green; they are printed
 # separately for transparency.
 #
-# Exclusions (see `docs/coverage.md`): the `codex` submodule, the FFI binding
-# generator, the cloud process entrypoint, and the Postgres/pgvector backends
-# (they need a live database; their `DATABASE_URL`-gated tests stay in place).
+# Exclusions (see `docs/coverage.md`): the FFI binding generator, the cloud
+# process entrypoint, and the Postgres/pgvector backends (they need a live
+# database; their `DATABASE_URL`-gated tests stay in place).
 #
 # Usage: ./scripts/coverage.sh [extra cargo-llvm-cov args]
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IGNORE='(^|/)codex/|crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs'
+IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs'
 
 echo "==> running the workspace under coverage"
 cargo llvm-cov --workspace --lcov --output-path lcov.info \

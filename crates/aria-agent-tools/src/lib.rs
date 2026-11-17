@@ -265,7 +265,38 @@ macro_rules! family_handler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::seams::NoWeb;
+    use agent_core::seams::{NoQuestions, NoWeb};
+    use agent_sandbox::{ExecSpec, SandboxError, SandboxHandle};
+
+    struct NoopSandbox;
+
+    #[async_trait::async_trait]
+    impl agent_sandbox::Sandbox for NoopSandbox {
+        async fn spawn(&self, _spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
+            Err(SandboxError::NotConfigured("noop".into()))
+        }
+        async fn exec(
+            &self,
+            _handle: &SandboxHandle,
+            _cmd: &[String],
+        ) -> Result<agent_sandbox::ExecOutput, SandboxError> {
+            Err(SandboxError::NotConfigured("noop".into()))
+        }
+        async fn destroy(&self, _handle: SandboxHandle) -> Result<(), SandboxError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn noop_sandbox_is_inert() {
+        use agent_sandbox::Sandbox;
+        let s = NoopSandbox;
+        let spec = ExecSpec::command(vec!["echo".into()]);
+        assert!(s.spawn(&spec).await.is_err());
+        let handle = SandboxHandle { id: "noop".into() };
+        assert!(s.exec(&handle, &["echo".into()]).await.is_err());
+        assert!(s.destroy(handle).await.is_ok());
+    }
 
     #[test]
     fn empty_set_registers_nothing() {
@@ -306,6 +337,38 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(names.len(), sorted.len(), "duplicate tool names: {names:?}");
+    }
+
+    #[test]
+    fn every_family_is_registered_when_every_seam_exists() {
+        let set = ToolSet::local(
+            Arc::new(agent_core::seams::SandboxPolicy::default()),
+            Arc::new(NoopSandbox),
+            agent_core::in_memory_context(),
+        );
+        let mut set = set;
+        set.web = Some(Arc::new(NoWeb));
+        set.questions = Some(Arc::new(NoQuestions));
+        set.terminal = true;
+        let tools = set.tools();
+        for name in [
+            "fs_read",
+            "shell",
+            "job_list",
+            "term_open",
+            "skill_list",
+            "web_fetch",
+            "ask_user",
+            "plan_set",
+            "todo_write",
+            "memo_store",
+        ] {
+            assert!(tools.iter().any(|t| t.name == name), "missing {name}");
+        }
+        assert_eq!(set.handlers().len(), 10);
+        let (built_tools, built_handlers) = builtin(&set);
+        assert_eq!(built_tools.len(), tools.len());
+        assert_eq!(built_handlers.len(), 10);
     }
 
     #[tokio::test]

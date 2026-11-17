@@ -108,4 +108,33 @@ mod tests {
         assert_eq!(res.content, "env?|dev,prod");
         assert!(run(&h, json!({})).await.is_error);
     }
+
+    #[test]
+    fn schema_and_prefix_are_stable() {
+        let tools = ask_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "ask_user");
+        assert_eq!(tools[0].parameters["required"][0], "question");
+        let h = AskToolHandler::new(Arc::new(Fixed));
+        assert!(h.handles("ask_user"));
+        assert!(!h.handles("other"));
+    }
+
+    #[tokio::test]
+    async fn unknown_ask_tool_is_invalid() {
+        let h = AskToolHandler::new(Arc::new(Fixed));
+        let res = h
+            .run(
+                &ToolCall {
+                    id: "c".into(),
+                    name: "ask_other".into(),
+                    arguments: json!({}),
+                },
+                &agent_core::in_memory_context(),
+                "s",
+            )
+            .await;
+        assert!(res.is_error);
+        assert!(res.content.contains("invalid"), "{}", res.content);
+    }
 }

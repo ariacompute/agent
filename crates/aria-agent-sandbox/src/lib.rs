@@ -922,8 +922,13 @@ mod tests {
         assert_eq!(parse_cpu(Some("nope".into()), 2.0), 2.0);
         assert_eq!(parse_cpu(None, 1.0), 1.0);
         // memory
+        assert_eq!(parse_memory(Some("512k".into()), 0), 512 * 1024);
         assert_eq!(parse_memory(Some("512m".into()), 0), 512 * 1024 * 1024);
         assert_eq!(parse_memory(Some("1g".into()), 0), 1024 * 1024 * 1024);
+        assert_eq!(
+            parse_memory(Some("4t".into()), 0),
+            4 * 1024 * 1024 * 1024 * 1024
+        );
         assert_eq!(parse_memory(Some("1024".into()), 0), 1024);
         assert_eq!(parse_memory(Some("bad".into()), 999), 999);
         assert_eq!(parse_memory(None, 123), 123);
@@ -1141,6 +1146,36 @@ mod tests {
         assert!(cands.contains(&"/tmp/aria-docker-host.sock".to_string()));
         // A `tcp://` DOCKER_HOST contributes no unix socket.
         assert!(!tcp_cands.contains(&"/tmp/aria-docker-host.sock".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_sockets_skip_unset_home_and_xdg() {
+        let _lock = SOCKET_ENV_LOCK.lock().unwrap();
+        let saved_home = env::var("HOME").ok();
+        let saved_xdg = env::var("XDG_RUNTIME_DIR").ok();
+        env::remove_var("HOME");
+        env::remove_var("XDG_RUNTIME_DIR");
+        env::remove_var("ARIA_DOCKER_SOCKET");
+        env::remove_var("DOCKER_HOST");
+        let cands = candidate_sockets();
+        // The sentinel guarantees the `None` restore arm is exercised even when
+        // HOME / XDG_RUNTIME_DIR are set in the ambient environment.
+        for (key, value) in [
+            ("HOME", saved_home),
+            ("XDG_RUNTIME_DIR", saved_xdg),
+            ("ARIA_SOCKET_TEST_SENTINEL", None),
+        ] {
+            match value {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
+        }
+        // The unconditional defaults are always present; no home-derived ones.
+        assert!(cands.contains(&"/var/run/docker.sock".to_string()));
+        assert!(cands
+            .iter()
+            .all(|p| !p.contains("/.docker/run/") || p.starts_with("/var")));
     }
 
     #[tokio::test]

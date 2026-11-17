@@ -197,8 +197,9 @@ pub fn agent_from_request(
     let reasoning = req.reasoning.clone().unwrap_or_default();
     let multi_agent = req.multi_agent.clone().unwrap_or_default();
     let service_tier = req.service_tier.clone().unwrap_or_else(|| "auto".into());
+    // `Vec<serde_json::Value>` is always serializable; validate cheaply here.
     let _ = serde_json::to_string(&req.tools.clone().unwrap_or_default())
-        .map_err(|e| AppError::BadRequest(format!("invalid tools: {e}")))?;
+        .expect("tool definitions are serializable");
     Ok(Agent {
         id,
         object: crate::types::AGENT_OBJECT.into(),

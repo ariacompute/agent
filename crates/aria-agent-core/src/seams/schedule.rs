@@ -185,6 +185,24 @@ mod tests {
         assert!(matches!(neither.validate(), Err(SeamError::Invalid(_))));
     }
 
+    #[test]
+    fn serde_defaults_and_non_firing_schedules() {
+        let entry: ScheduleEntry = serde_json::from_value(serde_json::json!({
+            "id": "x",
+            "owner": "t",
+            "name": "n",
+            "every_secs": 10,
+            "at_ms": null,
+            "payload": null,
+            "next_run_ms": null
+        }))
+        .unwrap();
+        assert!(entry.enabled);
+        let mut zero = ScheduleEntry::every("t", "n", 1);
+        zero.every_secs = Some(0);
+        assert_eq!(zero.next_after(100), None);
+    }
+
     #[tokio::test]
     async fn no_schedule_is_fail_closed() {
         let s = NoSchedule;

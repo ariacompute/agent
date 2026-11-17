@@ -277,6 +277,12 @@ mod tests {
     }
 
     #[test]
+    fn seam_key_as_str_and_display_agree() {
+        assert_eq!(FS.as_str(), "fs");
+        assert_eq!(format!("{FS}"), "fs");
+    }
+
+    #[test]
     fn duplicate_provides_is_rejected() {
         let m = PluginManifest::new("x", SeamRole::Seam).provides([FS, FS]);
         assert!(matches!(

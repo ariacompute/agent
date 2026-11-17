@@ -447,6 +447,7 @@ mod tests {
     #[tokio::test]
     async fn failed_flush_keeps_the_records_for_a_retry() {
         let backend: std::sync::Arc<dyn SessionPersistence> = std::sync::Arc::new(FailingBackend);
+        assert!(backend.read("s1", 0).await.unwrap().is_empty());
         let mut rec = SessionRecorder::with_persistence("s1", backend);
         rec.push(SessionEvent::TextDelta { text: "x".into() });
         assert!(rec.flush().await.is_err());

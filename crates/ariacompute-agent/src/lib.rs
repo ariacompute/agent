@@ -664,6 +664,17 @@ mod tests {
             label: None,
         });
         assert!(matches!(step, SdkStreamEvent::Step { label: None, .. }));
+        let approval = map_event(&AgentEvent::Approval {
+            id: "a1".into(),
+            tool: "shell".into(),
+            decision: "deny".into(),
+            reason: Some("nope".into()),
+        });
+        let rendered = format!("{approval:?}");
+        assert!(
+            rendered.contains("a1") && rendered.contains("deny"),
+            "{rendered}"
+        );
     }
 
     #[test]

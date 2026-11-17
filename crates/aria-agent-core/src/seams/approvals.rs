@@ -142,6 +142,17 @@ mod tests {
     }
 
     #[test]
+    fn decision_labels_and_reasons() {
+        assert_eq!(ApprovalDecision::Allow.reason(), "approved");
+        assert_eq!(ApprovalDecision::Allow.as_str(), "allow");
+        let deny = ApprovalDecision::Deny {
+            reason: "no".into(),
+        };
+        assert_eq!(deny.reason(), "denied: no");
+        assert_eq!(deny.as_str(), "deny");
+    }
+
+    #[test]
     fn request_defaults_to_workspace_write() {
         let req = ApprovalRequest::new("shell", "s", json!(null));
         assert_eq!(req.preset, PermissionPreset::WorkspaceWrite);

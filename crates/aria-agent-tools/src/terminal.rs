@@ -327,6 +327,9 @@ mod tests {
             names,
             vec!["term_open", "term_write", "term_read", "term_close"]
         );
+        let h = TerminalToolHandler::new(None);
+        assert!(h.handles("term_open"));
+        assert!(!h.handles("other"));
     }
 
     #[test]
@@ -336,6 +339,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert("t".into(), TerminalSession::default());
+        h.push_output("t", "small").unwrap();
         let big = "x".repeat(MAX_TERMINAL_BYTES + 10);
         h.push_output("t", &big).unwrap();
         let guard = h.sessions.lock().unwrap();

@@ -60,6 +60,15 @@ fn map_policy(e: PolicyError) -> SeamError {
     }
 }
 
+fn io_err(what: &str, path: &std::path::Path, e: std::io::Error) -> SeamError {
+    SeamError::Io(format!("{what} {}: {e}", path.display()))
+}
+
+/// A plain (non-capturing) mapper for the rare `next_entry` IO failure.
+fn list_err(e: std::io::Error) -> SeamError {
+    SeamError::Io(format!("list directory: {e}"))
+}
+
 #[async_trait]
 impl FsSeam for LocalFs {
     async fn read(&self, path: &str) -> SeamResult<String> {
@@ -74,11 +83,11 @@ impl FsSeam for LocalFs {
         if let Some(parent) = p.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| SeamError::Io(format!("mkdir {}: {e}", parent.display())))?;
+                .map_err(|e| io_err("mkdir", parent, e))?;
         }
         tokio::fs::write(&p, contents)
             .await
-            .map_err(|e| SeamError::Io(format!("write {}: {e}", p.display())))
+            .map_err(|e| io_err("write", &p, e))
     }
 
     async fn edit(&self, path: &str, old: &str, new: &str) -> SeamResult<usize> {
@@ -88,7 +97,7 @@ impl FsSeam for LocalFs {
         let p = self.resolve(path)?;
         let body = tokio::fs::read_to_string(&p)
             .await
-            .map_err(|e| SeamError::Io(format!("read {}: {e}", p.display())))?;
+            .map_err(|e| io_err("read", &p, e))?;
         if !body.contains(old) {
             return Err(SeamError::NotFound(format!(
                 "`old` text not found in {}",
@@ -98,7 +107,7 @@ impl FsSeam for LocalFs {
         let updated = body.replacen(old, new, 1);
         tokio::fs::write(&p, updated)
             .await
-            .map_err(|e| SeamError::Io(format!("write {}: {e}", p.display())))?;
+            .map_err(|e| io_err("write", &p, e))?;
         Ok(1)
     }
 
@@ -107,12 +116,8 @@ impl FsSeam for LocalFs {
         let mut out = Vec::new();
         let mut rd = tokio::fs::read_dir(&p)
             .await
-            .map_err(|e| SeamError::Io(format!("list {}: {e}", p.display())))?;
-        while let Some(entry) = rd
-            .next_entry()
-            .await
-            .map_err(|e| SeamError::Io(format!("list {}: {e}", p.display())))?
-        {
+            .map_err(|e| io_err("list", &p, e))?;
+        while let Some(entry) = rd.next_entry().await.map_err(list_err)? {
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             out.push(if is_dir { format!("{name}/") } else { name });
@@ -147,6 +152,14 @@ impl FsSeam for LocalFs {
 mod tests {
     use super::*;
     use crate::seams::policy::PermissionPreset;
+
+    #[test]
+    fn next_entry_io_error_is_mapped() {
+        assert!(matches!(
+            list_err(std::io::Error::other("x")),
+            SeamError::Io(_)
+        ));
+    }
 
     fn fixture() -> (tempfile::TempDir, LocalFs) {
         let dir = tempfile::tempdir().unwrap();
@@ -200,6 +213,79 @@ mod tests {
             fs.stat("nope.txt").await,
             Err(SeamError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn policy_and_error_helpers_are_exposed() {
+        let (_dir, fs) = fixture();
+        assert_eq!(fs.policy().root(), _dir.path());
+        assert!(matches!(
+            map_policy(PolicyError::NoRoot),
+            SeamError::Unavailable(_)
+        ));
+        assert!(matches!(
+            map_policy(PolicyError::Invalid("x".into())),
+            SeamError::Invalid(_)
+        ));
+        assert!(matches!(
+            io_err(
+                "op",
+                std::path::Path::new("/x"),
+                std::io::Error::other("boom")
+            ),
+            SeamError::Io(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn io_failures_are_surfaced() {
+        let (dir, fs) = fixture();
+        fs.write("a", "i am a file").await.unwrap();
+        assert!(
+            matches!(fs.write("a/child.txt", "x").await, Err(SeamError::Io(_))),
+            "mkdir over a file must fail"
+        );
+        fs.write("dir/inside.txt", "x").await.unwrap();
+        assert!(
+            matches!(
+                fs.write("dir", "overwrite a directory").await,
+                Err(SeamError::Io(_))
+            ),
+            "writing onto a directory must fail"
+        );
+        fs.write("plain.txt", "body").await.unwrap();
+        assert!(matches!(
+            fs.edit("plain.txt", "zzz", "x").await,
+            Err(SeamError::NotFound(_))
+        ));
+        assert!(
+            matches!(fs.list("plain.txt").await, Err(SeamError::Io(_))),
+            "listing a file must fail"
+        );
+        assert!(matches!(
+            fs.read("plain.txt/child").await,
+            Err(SeamError::Io(_))
+        ));
+        assert!(matches!(
+            fs.edit("missing.txt", "a", "b").await,
+            Err(SeamError::Io(_))
+        ));
+
+        #[cfg(unix)]
+        {
+            let loop_path = dir.path().join("loop");
+            std::os::unix::fs::symlink("loop", &loop_path).unwrap();
+            assert!(
+                matches!(fs.stat("loop").await, Err(SeamError::Io(_))),
+                "a symlink loop is an IO error, not NotFound"
+            );
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.path().join("plain.txt");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+            let err = fs.edit("plain.txt", "body", "changed").await;
+            assert!(matches!(err, Err(SeamError::Io(_))), "{err:?}");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
     }
 
     #[tokio::test]

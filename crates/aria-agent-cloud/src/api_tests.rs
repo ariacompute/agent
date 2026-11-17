@@ -165,6 +165,52 @@ pub fn harness() -> Harness {
     harness_with(|| Box::new(StubModel::new("agent")))
 }
 
+/// A schedule provider that keeps returning a job even after `remove` reports
+/// it was not deleted — exercises the list/remove race guard in `delete_job`.
+pub struct StubbornSchedule(pub agent_core::seams::ScheduleEntry);
+
+#[async_trait]
+impl agent_core::seams::ScheduleSeam for StubbornSchedule {
+    async fn upsert(
+        &self,
+        entry: agent_core::seams::ScheduleEntry,
+    ) -> agent_core::seams::SeamResult<agent_core::seams::ScheduleEntry> {
+        Ok(entry)
+    }
+    async fn list(
+        &self,
+        _owner: &str,
+    ) -> agent_core::seams::SeamResult<Vec<agent_core::seams::ScheduleEntry>> {
+        Ok(vec![self.0.clone()])
+    }
+    async fn remove(&self, _owner: &str, _id: &str) -> agent_core::seams::SeamResult<bool> {
+        Ok(false)
+    }
+}
+
+pub fn harness_with_schedule(schedule: Arc<dyn agent_core::seams::ScheduleSeam>) -> Harness {
+    let mem = Arc::new(MemoryStore::new());
+    let contexts = Contexts::default();
+    let ctx = contexts.clone();
+    let make_context: MakeContext = Arc::new(move |p: &Principal| ctx.store_for(p));
+    let state = AppState {
+        agents: mem.clone(),
+        sessions: mem.clone(),
+        keys: mem.clone(),
+        teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+        schedule,
+        titles: mem.clone(),
+        key_cache: KeyCache::new(Duration::from_secs(60)),
+        make_model: Arc::new(|| Box::new(StubModel::new("agent"))),
+        make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
+        make_context,
+    };
+    Harness {
+        app: build_router(state.clone()),
+        state,
+    }
+}
+
 /// Same harness, but the context store can be made to fail on chosen calls.
 pub fn harness_with_context(fail_recall: bool, fail_relations: bool) -> Harness {
     let mem = Arc::new(MemoryStore::new());
@@ -175,6 +221,7 @@ pub fn harness_with_context(fail_recall: bool, fail_relations: bool) -> Harness 
             inner: inner.store_for(p),
             fail_recall,
             fail_relations,
+            fail_all: false,
         }) as Arc<dyn ContextStore>
     });
     let make_model: MakeModel = Arc::new(|| Box::new(StubModel::new("agent")));
@@ -203,6 +250,12 @@ pub struct FaultyContext {
     pub inner: Arc<dyn ContextStore>,
     pub fail_recall: bool,
     pub fail_relations: bool,
+    /// Make every operation fail; used to prove each handler maps the error.
+    pub fail_all: bool,
+}
+
+fn ctx_err() -> agent_core::context::ContextError {
+    agent_core::context::ContextError::Storage("injected context failure".into())
 }
 
 #[async_trait]
@@ -211,6 +264,9 @@ impl ContextStore for FaultyContext {
         &self,
         frag: agent_core::context::ContextFragment,
     ) -> Result<(), agent_core::context::ContextError> {
+        if self.fail_all {
+            return Err(ctx_err());
+        }
         self.inner.memorize(frag).await
     }
 
@@ -218,10 +274,8 @@ impl ContextStore for FaultyContext {
         &self,
         query: &agent_core::context::RecallQuery,
     ) -> Result<Vec<agent_core::context::ContextFragment>, agent_core::context::ContextError> {
-        if self.fail_recall {
-            return Err(agent_core::context::ContextError::Storage(
-                "injected recall failure".into(),
-            ));
+        if self.fail_recall || self.fail_all {
+            return Err(ctx_err());
         }
         self.inner.recall(query).await
     }
@@ -239,6 +293,9 @@ impl ContextStore for FaultyContext {
         key: &str,
     ) -> Result<Option<agent_core::context::ContextFragment>, agent_core::context::ContextError>
     {
+        if self.fail_all {
+            return Err(ctx_err());
+        }
         self.inner.get_by_key(session, key).await
     }
 
@@ -247,6 +304,9 @@ impl ContextStore for FaultyContext {
         session: &str,
         top_k: usize,
     ) -> Result<Vec<agent_core::context::ContextFragment>, agent_core::context::ContextError> {
+        if self.fail_all {
+            return Err(ctx_err());
+        }
         self.inner.list_session(session, top_k).await
     }
 
@@ -265,10 +325,8 @@ impl ContextStore for FaultyContext {
         kind: Option<agent_core::context::RelationKind>,
         top_k: usize,
     ) -> Result<Vec<agent_core::context::Relation>, agent_core::context::ContextError> {
-        if self.fail_relations {
-            return Err(agent_core::context::ContextError::Storage(
-                "injected relations failure".into(),
-            ));
+        if self.fail_relations || self.fail_all {
+            return Err(ctx_err());
         }
         self.inner
             .get_relations(session, from, to, kind, top_k)
@@ -282,6 +340,9 @@ impl ContextStore for FaultyContext {
         to: Option<&str>,
         kind: Option<agent_core::context::RelationKind>,
     ) -> Result<usize, agent_core::context::ContextError> {
+        if self.fail_all {
+            return Err(ctx_err());
+        }
         self.inner.delete_relations(session, from, to, kind).await
     }
 
@@ -289,6 +350,9 @@ impl ContextStore for FaultyContext {
         &self,
         query: &agent_core::context::GraphRetrieveQuery,
     ) -> Result<agent_core::context::GraphRetrieveResult, agent_core::context::ContextError> {
+        if self.fail_all {
+            return Err(ctx_err());
+        }
         self.inner.expand(query).await
     }
 }
@@ -1458,6 +1522,27 @@ async fn memory_write_read_and_recall() {
 }
 
 #[tokio::test]
+async fn memory_accepts_every_kind_including_tool_result() {
+    let _env = env_admin().await;
+    let h = harness();
+    let agent_id = create_agent(&h, "memory-kinds").await;
+    let sess = create_session(&h, &agent_id).await;
+    let base = format!("/v1/agents/sessions/{sess}/memory");
+    for kind in ["message", "tool_result", "long_term", "note"] {
+        let (status, item) = send(
+            &h.app,
+            "POST",
+            &base,
+            Some(ADMIN_KEY),
+            Some(json!({"value": "x", "kind": kind})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kind}: {item}");
+        assert_eq!(item["kind"], kind);
+    }
+}
+
+#[tokio::test]
 async fn memory_rejects_unknown_kinds_and_missing_sessions() {
     let _env = env_admin().await;
     let h = harness();
@@ -1844,6 +1929,77 @@ async fn context_failures_are_swallowed_by_memory_writes_and_streams() {
     assert_eq!(last["memory_relations"], json!([]));
 }
 
+/// Context store where every operation fails, to exercise each handler's
+/// explicit error mapping (400 rather than a panic or a silent empty result).
+pub fn harness_with_context_failing_all() -> Harness {
+    let mem = Arc::new(MemoryStore::new());
+    let contexts = Contexts::default();
+    let inner = contexts.clone();
+    let make_context: MakeContext = Arc::new(move |p: &Principal| {
+        Arc::new(FaultyContext {
+            inner: inner.store_for(p),
+            fail_all: true,
+            fail_recall: false,
+            fail_relations: false,
+        }) as Arc<dyn ContextStore>
+    });
+    let make_model: MakeModel = Arc::new(|| Box::new(StubModel::new("agent")));
+    let make_sandbox: MakeSandbox = Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>);
+    let state = AppState {
+        agents: mem.clone(),
+        sessions: mem.clone(),
+        keys: mem.clone(),
+        teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+        schedule: Arc::new(aria_agent_orchestrator::MemorySchedule::new()),
+        titles: mem.clone(),
+        key_cache: KeyCache::new(Duration::from_secs(60)),
+        make_model,
+        make_sandbox,
+        make_context,
+    };
+    Harness {
+        app: build_router(state.clone()),
+        state,
+    }
+}
+
+#[tokio::test]
+async fn context_storage_failures_map_to_bad_request() {
+    let _env = env_admin().await;
+    let h = harness_with_context_failing_all();
+    let agent_id = create_agent(&h, "ctx-all-fail").await;
+    let sess = create_session(&h, &agent_id).await;
+
+    let cases: Vec<(&str, String, Option<Value>)> = vec![
+        (
+            "POST",
+            format!("/v1/agents/sessions/{sess}/memory"),
+            Some(json!({"value": "x"})),
+        ),
+        ("GET", format!("/v1/agents/sessions/{sess}/memory/k"), None),
+        ("GET", format!("/v1/agents/sessions/{sess}/memory"), None),
+        (
+            "GET",
+            format!("/v1/agents/sessions/{sess}/memory/relations"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("/v1/agents/sessions/{sess}/memory/relations?from=a"),
+            None,
+        ),
+        (
+            "GET",
+            format!("/v1/agents/sessions/{sess}/memory/relations/graph?seeds=a"),
+            None,
+        ),
+    ];
+    for (method, uri, body) in cases {
+        let (status, payload) = send(&h.app, method, &uri, Some(ADMIN_KEY), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}: {payload}");
+    }
+}
+
 // ------------------------------------------------------------ store failures
 
 /// Wrap the memory store so every call fails: proves handlers map storage
@@ -1934,6 +2090,17 @@ async fn storage_failures_map_to_500() {
             "{method} {uri}: {payload}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_failing_key_lookup_maps_to_500() {
+    let _env = env_admin().await;
+    let h = faulty::harness();
+    // A non-bootstrap token forces a store lookup, which the faulty store fails.
+    let status = crate::auth::resolve_principal(&h.state, Some("aria-not-the-admin".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 // ------------------------------------------- deep session-write failures
@@ -2319,6 +2486,23 @@ fn store_scope_string_helpers() {
 // ------------------------------------------------- orchestration HTTP surface
 
 #[tokio::test]
+async fn delete_job_reports_not_found_when_remove_loses_the_race() {
+    let _env = env_admin().await;
+    let mut entry = agent_core::seams::ScheduleEntry::every("tenant-admin", "ghost", 60);
+    entry.id = "job-1".into();
+    let h = harness_with_schedule(Arc::new(StubbornSchedule(entry)));
+    let (status, body) = send(
+        &h.app,
+        "DELETE",
+        "/v1/scheduled-jobs/job-1",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
 async fn agent_teams_are_dependency_gated_over_http() {
     let _env = env_admin().await;
     let h = harness();
@@ -2382,6 +2566,17 @@ async fn agent_teams_are_dependency_gated_over_http() {
     let (status, body) = send(
         &h.app,
         "GET",
+        &format!("/v1/agent-teams/{team}"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "release");
+
+    let (status, body) = send(
+        &h.app,
+        "GET",
         "/v1/agent-teams/missing",
         Some(ADMIN_KEY),
         None,
@@ -2424,6 +2619,18 @@ async fn scheduled_jobs_round_trip_and_validate_their_trigger() {
     assert_eq!(body["every_secs"], 60);
     assert!(body["next_run_ms"].as_i64().expect("next run") > 0);
 
+    // One-shot `at_ms` jobs are accepted too.
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/v1/scheduled-jobs",
+        Some(ADMIN_KEY),
+        Some(json!({"name": "once", "at_ms": 9_000_000_000i64})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["at_ms"], 9_000_000_000i64);
+
     for bad in [
         json!({"name": "neither"}),
         json!({"name": "both", "every_secs": 5, "at_ms": 10}),
@@ -2441,7 +2648,7 @@ async fn scheduled_jobs_round_trip_and_validate_their_trigger() {
 
     let (status, body) = send(&h.app, "GET", "/v1/scheduled-jobs", Some(ADMIN_KEY), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["data"].as_array().expect("data").len(), 1);
+    assert_eq!(body["data"].as_array().expect("data").len(), 2);
 
     let (status, body) = send(
         &h.app,
@@ -2755,5 +2962,19 @@ async fn child_session_visibility_follows_the_parent_tenant() {
     assert!(matches!(
         crate::api::sessions::ensure_session_visible(&h.state, &owner, "ghost::sub::c1").await,
         Err(crate::AppError::NotFound)
+    ));
+
+    // A chain deeper than the hop budget ends in 404 (no infinite walking).
+    let too_deep = format!("ghost{}", "::sub::c".repeat(12));
+    assert!(matches!(
+        crate::api::sessions::ensure_session_visible(&h.state, &owner, &too_deep).await,
+        Err(crate::AppError::NotFound)
+    ));
+
+    // A storage failure is surfaced, never masked as "missing".
+    let broken = faulty::harness();
+    assert!(matches!(
+        crate::api::sessions::ensure_session_visible(&broken.state, &owner, "sess-a").await,
+        Err(crate::AppError::Core(_))
     ));
 }

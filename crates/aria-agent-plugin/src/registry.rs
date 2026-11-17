@@ -204,11 +204,9 @@ impl Registry {
                 return Err(PluginError::MissingDefault { seam: key.0 });
             }
         }
-        tracing::debug!(
-            providers = self.entries.len(),
-            plugins = manifests.len(),
-            "plugin registry frozen"
-        );
+        let providers = self.entries.len();
+        let plugins = manifests.len();
+        tracing::debug!(providers, plugins, "plugin registry frozen");
         Ok(FrozenRegistry {
             entries: self.entries,
             defaults: self.defaults,
@@ -500,12 +498,10 @@ mod tests {
             .with(STORAGE, "json", "storage"),
         );
         let err = plugin(Registry::new(), vec![a, b]).unwrap_err();
-        match err {
-            PluginError::Cycle { chain } => {
-                assert!(chain.contains('a') && chain.contains('b'), "{chain}");
-            }
-            other => panic!("expected cycle, got {other:?}"),
-        }
+        assert!(
+            matches!(err, PluginError::Cycle { ref chain } if chain.contains('a') && chain.contains('b')),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -649,5 +645,47 @@ mod tests {
         let shared = Shared::new(d.clone());
         assert_eq!(shared.get().id(), "x");
         assert_eq!(shared.clone().get().id(), "x");
+    }
+
+    #[test]
+    fn builder_api_resolves_named_defaults_and_reports_state() {
+        let mut reg = Registry::new();
+        assert!(format!("{reg:?}").contains("providers: 0"));
+        assert!(!reg.has(WEB));
+        assert!(reg.provider_names(WEB).is_empty());
+        assert!(matches!(
+            reg.set_default(WEB, "http"),
+            Err(PluginError::NoProvider { .. })
+        ));
+        reg.provide::<dyn Dummy>(WEB, "http", Arc::new(DummyImpl("web")))
+            .unwrap();
+        reg.provide::<dyn Dummy>(WEB, "backup", Arc::new(DummyImpl("alt")))
+            .unwrap();
+        reg.set_default(WEB, "backup").unwrap();
+        assert!(reg.has(WEB));
+        assert_eq!(reg.provider_names(WEB), vec!["http", "backup"]);
+        assert!(format!("{reg:?}").contains("providers: 2"));
+        let default: Arc<dyn Dummy> = reg.resolve(WEB).unwrap();
+        assert_eq!(default.id(), "alt");
+        let named: Arc<dyn Dummy> = reg.resolve_named(WEB, "http").unwrap();
+        assert_eq!(named.id(), "web");
+
+        let manifest = PluginManifest::new("p", SeamRole::Seam).provides([WEB]);
+        let frozen = reg.freeze(&[manifest]).unwrap();
+        assert!(format!("{frozen:?}").contains("FrozenRegistry"));
+        assert_eq!(frozen.provider_names(WEB), vec!["http", "backup"]);
+        assert_eq!(frozen.default_name(WEB), Some("backup"));
+    }
+
+    #[test]
+    fn freeze_rejects_a_default_with_no_matching_provider() {
+        let mut reg = Registry::new();
+        reg.provide::<dyn Dummy>(WEB, "http", Arc::new(DummyImpl("web")))
+            .unwrap();
+        reg.defaults.insert(WEB.0, "ghost");
+        assert!(matches!(
+            reg.freeze(&[]),
+            Err(PluginError::MissingDefault { .. })
+        ));
     }
 }

@@ -316,3 +316,29 @@ pub fn generate_key() -> (String, String, String) {
     let hash = hash_key(&key);
     (key, prefix, hash)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_with(auth: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .header(axum::http::header::AUTHORIZATION, auth)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn presented_token_accepts_bearer_and_apikey_prefixes() {
+        assert_eq!(
+            presented_token(&request_with("Bearer secret")).as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            presented_token(&request_with("ApiKey secret")).as_deref(),
+            Some("secret")
+        );
+        assert_eq!(presented_token(&request_with("Basic secret")), None);
+        assert_eq!(presented_token(&request_with("Bearer ")), None);
+    }
+}

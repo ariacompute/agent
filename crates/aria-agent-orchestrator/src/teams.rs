@@ -162,11 +162,11 @@ impl AgentTeam {
             visited += 1;
             for task in &self.tasks {
                 if task.depends_on.iter().any(|d| d == id) {
-                    if let Some(entry) = indegree.get_mut(task.id.as_str()) {
-                        *entry = entry.saturating_sub(1);
-                        if *entry == 0 {
-                            ready.push(task.id.as_str());
-                        }
+                    // Every task id is present in `indegree` (built above).
+                    let entry = indegree.get_mut(task.id.as_str()).expect("known task");
+                    *entry = entry.saturating_sub(1);
+                    if *entry == 0 {
+                        ready.push(task.id.as_str());
                     }
                 }
             }
@@ -460,6 +460,57 @@ mod tests {
             AgentTeam::new("t", "n", vec![TeamTask::new("a", " ")]),
             Err(SeamError::Invalid(_))
         ));
+        assert!(matches!(
+            AgentTeam::new("t", "n", vec![TeamTask::new("", "a")]),
+            Err(SeamError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_diamond_dag_validates_and_drains_all_degrees() {
+        let t = AgentTeam::new(
+            "t",
+            "diamond",
+            vec![
+                TeamTask::new("root", "root"),
+                TeamTask::new("left", "left").after(["root"]),
+                TeamTask::new("right", "right").after(["root"]),
+                TeamTask::new("join", "join").after(["left", "right"]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(t.ready().len(), 1);
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn claiming_a_finished_task_and_releasing_a_missing_one_are_denied() {
+        let mut t = team();
+        for id in ["spec", "impl", "ship"] {
+            t.claim(id, "w").unwrap();
+            t.complete(id, "ok").unwrap();
+        }
+        assert!(matches!(t.claim("spec", "w2"), Err(SeamError::Denied(_))));
+        assert!(matches!(t.release("nope"), Err(SeamError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_team_store_reports_io_errors() {
+        let store = MemoryTeams::new();
+        let r = &store;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = r.teams.lock().unwrap();
+            panic!("poison teams");
+        }));
+        assert!(matches!(store.list("t").await, Err(SeamError::Io(_))));
+
+        let store2 = MemoryTeams::new();
+        let r2 = &store2;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = r2.seq.lock().unwrap();
+            panic!("poison seq");
+        }));
+        assert!(matches!(store2.create(team()).await, Err(SeamError::Io(_))));
     }
 
     #[test]

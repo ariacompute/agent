@@ -1486,6 +1486,13 @@ mod tests {
     }
 
     #[test]
+    fn ensure_embedding_leaves_punctuation_only_content_without_vector() {
+        let mut f = ContextFragment::new("s", FragmentKind::Message, "!!!???...");
+        ensure_embedding(&mut f);
+        assert!(f.embedding.is_none());
+    }
+
+    #[test]
     fn score_prefers_exact_key_then_vector() {
         let keyed =
             ContextFragment::new("s", FragmentKind::LongTerm, "unrelated").with_key("fact1");
@@ -2355,6 +2362,35 @@ mod tests {
         });
         assert_eq!(reached.len(), 2);
         assert_eq!(stop, "budget");
+    }
+
+    #[test]
+    fn graph_bfs_handles_duplicate_seeds_and_weaker_paths() {
+        let seeds = vec!["a".to_string(), "a".to_string(), "b".to_string()];
+        // `b` is a seed (score 1.0) so the weaker path a->b (0.1) is ignored.
+        let (reached, _) = graph_bfs(&seeds, &[], 10, 10, |n| {
+            if n == "a" {
+                vec![("b".into(), 0.1, RelationKind::Semantic)]
+            } else {
+                Vec::new()
+            }
+        });
+        let scores: Vec<f32> = reached.iter().map(|(_, s)| *s).collect();
+        assert_eq!(scores.len(), 2);
+        assert!(scores.iter().all(|s| *s == 1.0), "{scores:?}");
+    }
+
+    #[test]
+    fn graph_bfs_does_not_raise_a_score_on_a_zero_weight_edge() {
+        let seeds = vec!["a".to_string()];
+        // A zero-score edge produces `nacc == 0`, which must not overwrite a
+        // stronger existing score for the node (the `nacc > *e` false path).
+        let (reached, _) = graph_bfs(&seeds, &[], 10, 10, |n| match n {
+            "a" => vec![("zero".into(), 0.0, RelationKind::Semantic)],
+            _ => Vec::new(),
+        });
+        let zero = reached.iter().find(|(id, _)| id == "zero").unwrap();
+        assert_eq!(zero.1, 0.0);
     }
 
     #[test]

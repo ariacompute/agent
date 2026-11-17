@@ -408,6 +408,27 @@ mod tests {
     }
 
     #[test]
+    fn truncation_snaps_back_to_a_char_boundary() {
+        let p = ToolExecutionPipeline::new(vec![])
+            .with_post_exec(PostExecPolicy::default().with_max_bytes(4));
+        let out = p.post_execute(
+            "c2",
+            ToolResult {
+                call_id: "c2".into(),
+                content: "€€€".into(),
+                is_error: false,
+            },
+            None,
+        );
+        assert!(
+            out.result.content.starts_with("€"),
+            "{}",
+            out.result.content
+        );
+        assert!(out.result.content.contains("[truncated"));
+    }
+
+    #[test]
     fn spill_writes_the_full_output() {
         let dir = tempfile::tempdir().unwrap();
         let p = ToolExecutionPipeline::new(vec![]).with_post_exec(
@@ -429,6 +450,42 @@ mod tests {
         assert_eq!(spill.bytes, full.len());
         assert_eq!(std::fs::read_to_string(&spill.path).unwrap(), full);
         assert!(out.result.content.contains(&spill.path));
+    }
+
+    #[test]
+    fn an_unwritable_spill_dir_degrades_to_plain_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        let p = ToolExecutionPipeline::new(vec![]).with_post_exec(
+            PostExecPolicy::default()
+                .with_max_bytes(4)
+                .with_spill_dir(&blocker),
+        );
+        let out = p.post_execute(
+            "c3",
+            ToolResult {
+                call_id: "c3".into(),
+                content: "abcdefghij".into(),
+                is_error: false,
+            },
+            None,
+        );
+        assert!(out.spill.is_none());
+        assert!(out.result.content.contains("[truncated"));
+    }
+
+    #[tokio::test]
+    async fn no_policy_means_no_tool_denial() {
+        let p = ToolExecutionPipeline::new(vec![]);
+        assert!(matches!(
+            p.authorize(&call("shell"), "s").await,
+            Authz::Denied { .. }
+        ));
+        assert!(matches!(
+            p.authorize(&call("fs_read"), "s").await,
+            Authz::Allowed { approval: None }
+        ));
     }
 
     #[test]

@@ -148,6 +148,26 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn wait_is_fail_closed_even_for_providers_that_only_start_children() {
+        assert!(NoSubagents.wait("x").await.is_err());
+
+        struct Starter;
+        #[async_trait]
+        impl Subagents for Starter {
+            async fn spawn(&self, _req: SubagentRequest) -> SeamResult<SubagentHandle> {
+                Err(SeamError::Unavailable("start only".into()))
+            }
+            async fn list(&self, _parent_session: &str) -> SeamResult<Vec<SubagentHandle>> {
+                Ok(Vec::new())
+            }
+        }
+        assert!(matches!(
+            Starter.wait("x").await,
+            Err(SeamError::Unsupported(_))
+        ));
+    }
+
     #[test]
     fn request_roundtrips() {
         let req = SubagentRequest::new("parent", "task");

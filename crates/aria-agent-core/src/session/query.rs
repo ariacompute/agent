@@ -247,6 +247,18 @@ mod tests {
     }
 
     #[test]
+    fn filters_by_kind_and_explicit_turn_id() {
+        let records = log();
+        let with_kind = SessionFilter::kind("text_delta");
+        assert_eq!(query(&records, &with_kind).len(), 1);
+        assert_eq!(query_with_turns(&records, &with_kind).len(), 1);
+        let with_turn = SessionFilter::turn("t1");
+        assert!(!query(&records, &with_turn).is_empty());
+        assert!(!query_with_turns(&records, &with_turn).is_empty());
+        assert!(query(&records, &SessionFilter::turn("nope")).is_empty());
+    }
+
+    #[test]
     fn full_text_search_is_case_insensitive() {
         let hits = search_text(&log(), "hello");
         assert_eq!(hits.len(), 2);

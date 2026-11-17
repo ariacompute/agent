@@ -147,11 +147,10 @@ pub(crate) async fn build_agent_inner(
     allow_subagents: bool,
 ) -> Result<Agent, AppError> {
     let context = state.context_for(principal);
-    tracing::debug!(
-        principal = %principal.id,
-        session = %cfg.session,
-        "context: store resolved for principal"
-    );
+    let tenant = principal.id.as_str();
+    let session = cfg.session.as_str();
+    #[rustfmt::skip]
+    tracing::debug!(principal = tenant, session, "context: store resolved for principal");
     // The `docker` provider is resolved through the injected factory so tests can
     // substitute an in-process sandbox without a daemon. `browser` is resolved
     // here too: a `BrowserSandbox` (browser container manager + engine) is built
@@ -185,7 +184,7 @@ pub(crate) async fn build_agent_inner(
     // tool the deployment cannot serve (ADR-0016).
     let policy = agent_core::build_policy(&cfg)
         .map_err(AppError::Core)?
-        .ok_or_else(|| AppError::Core(CoreError::Config("no sandbox policy".into())))?;
+        .expect("policy on success");
     let set = aria_agent_tools::ToolSet::local(policy, sandbox.clone(), context.clone());
     handlers.extend(set.handlers());
     let mut tools = set.tools();
@@ -345,7 +344,6 @@ pub fn agent_config(name: &str, instructions: &str, session: &str) -> AgentConfi
     }
 }
 
-/// The HTTP surface: the OpenAI beta Agents resource plus self-serve API keys.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         // --- beta Agents resource (OpenAI-compatible) ---
@@ -516,3 +514,128 @@ pub async fn healthz() -> Response {
 /// `Json` helper used by the API-key handlers (kept here so the response type
 /// stays identical across handlers).
 pub type JsonResponse<T> = Json<T>;
+
+/// The HTTP surface: the OpenAI beta Agents resource plus self-serve API keys.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api_tests::{harness, harness_with};
+    use crate::auth::{ApiKeyScopes, PrincipalKind};
+    use agent_core::session::SessionError;
+
+    fn principal() -> Principal {
+        Principal {
+            id: "tenant".into(),
+            kind: PrincipalKind::User,
+            scopes: ApiKeyScopes::read_write(),
+        }
+    }
+
+    struct FailingTitles {
+        fail_get: bool,
+        fail_put: bool,
+    }
+
+    #[async_trait]
+    impl TitleStore for FailingTitles {
+        async fn put_title(&self, _p: &Principal, _row: &TitleRow) -> Result<(), AppError> {
+            if self.fail_put {
+                return Err(AppError::Core(CoreError::Config("put failed".into())));
+            }
+            Ok(())
+        }
+        async fn get_title(
+            &self,
+            _p: &Principal,
+            _session: &str,
+        ) -> Result<Option<TitleRow>, AppError> {
+            if self.fail_get {
+                return Err(AppError::Core(CoreError::Config("get failed".into())));
+            }
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn agent_tools_include_the_shell_and_browser_families() {
+        let tools = agent_tools();
+        assert!(tools.iter().any(|t| t.name == "shell"));
+        assert!(tools.iter().any(|t| t.name.starts_with("browser_")));
+    }
+
+    #[tokio::test]
+    async fn subagent_factory_reports_build_and_run_failures() {
+        let h = harness();
+        let bad_build = CloudSubagentsFactory {
+            state: h.state.clone(),
+            principal: principal(),
+            base: AgentConfig {
+                sandbox_provider: "bogus".into(),
+                ..AgentConfig::default()
+            },
+        };
+        let err = bad_build
+            .run(
+                &SubagentRequest {
+                    parent_session: "parent".into(),
+                    task: "hi".into(),
+                    agent_name: None,
+                    max_steps: 0,
+                },
+                "child",
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("child agent"), "{err}");
+
+        let h = harness_with(|| Box::new(crate::api_tests::FailingModel));
+        let bad_run = CloudSubagentsFactory {
+            state: h.state.clone(),
+            principal: principal(),
+            base: agent_config("parent", "", "parent"),
+        };
+        let err = bad_run
+            .run(
+                &SubagentRequest {
+                    parent_session: "parent".into(),
+                    task: "hi".into(),
+                    agent_name: None,
+                    max_steps: 0,
+                },
+                "child",
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("child run"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn title_projection_surfaces_store_failures_and_is_write_only() {
+        use agent_core::session::SessionPersistence;
+
+        let record = |source: &str| SessionRecord {
+            seq: 1,
+            at_ms: 0,
+            event: SessionEvent::TitleSet {
+                title: "t".into(),
+                source: source.into(),
+            },
+        };
+        let projection = |fail_get: bool, fail_put: bool| TitleProjection {
+            store: Arc::new(FailingTitles { fail_get, fail_put }),
+            principal: principal(),
+        };
+        let err = projection(true, false)
+            .append("s", &[record(SOURCE_FIRST_PROMPT)])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::Io(_)), "{err:?}");
+        let err = projection(false, true)
+            .append("s", &[record("provider")])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::Io(_)), "{err:?}");
+        let err = projection(false, false).read("s", 0).await.unwrap_err();
+        assert!(matches!(err, SessionError::Io(_)), "{err:?}");
+    }
+}

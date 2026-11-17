@@ -123,5 +123,8 @@ mod tests {
         let loaded = run(&h, "skill_load", json!({"name": "rust"})).await;
         assert!(loaded.content.contains("Be thorough."));
         assert!(run(&h, "skill_load", json!({})).await.is_error);
+        let invalid = run(&h, "skill_other", json!({})).await;
+        assert!(invalid.is_error);
+        assert!(invalid.content.contains("invalid"), "{}", invalid.content);
     }
 }

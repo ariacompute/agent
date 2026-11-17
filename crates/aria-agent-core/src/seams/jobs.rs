@@ -111,27 +111,27 @@ impl JobsSeam for LocalJobs {
         tokio::spawn(async move {
             let result = shell.exec(&argv, cwd.as_deref()).await;
             let mut guard = jobs.lock().unwrap();
-            if let Some(job) = guard.get_mut(&task_id) {
-                match result {
-                    Ok(out) => {
-                        job.output = bound(format!("{}{}", out.stdout, out.stderr));
-                        job.exit_code = Some(out.exit_code);
-                        job.state = if job.state == JobState::Killed {
-                            JobState::Killed
-                        } else if out.success() {
-                            JobState::Succeeded
-                        } else {
-                            JobState::Failed
-                        };
-                    }
-                    Err(e) => {
-                        job.output = bound(format!("error: {e}"));
-                        job.state = if job.state == JobState::Killed {
-                            JobState::Killed
-                        } else {
-                            JobState::Failed
-                        };
-                    }
+            // The record was inserted above and jobs are never removed.
+            let job = guard.get_mut(&task_id).expect("job record exists");
+            match result {
+                Ok(out) => {
+                    job.output = bound(format!("{}{}", out.stdout, out.stderr));
+                    job.exit_code = Some(out.exit_code);
+                    job.state = if job.state == JobState::Killed {
+                        JobState::Killed
+                    } else if out.success() {
+                        JobState::Succeeded
+                    } else {
+                        JobState::Failed
+                    };
+                }
+                Err(e) => {
+                    job.output = bound(format!("error: {e}"));
+                    job.state = if job.state == JobState::Killed {
+                        JobState::Killed
+                    } else {
+                        JobState::Failed
+                    };
                 }
             }
         });
@@ -145,13 +145,10 @@ impl JobsSeam for LocalJobs {
     async fn output(&self, id: &str, from: usize) -> SeamResult<(String, bool)> {
         self.with_job(id, |job| {
             let bytes = job.output.as_bytes();
-            let start = from.min(bytes.len());
-            // Slice on a char boundary so the result stays valid UTF-8.
-            let mut end = bytes.len();
-            while end > start && !job.output.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut start = start;
+            // `end` is always a char boundary (String length); only `start`
+            // from the caller can land inside a multi-byte codepoint.
+            let end = bytes.len();
+            let mut start = from.min(end);
             while start < end && !job.output.is_char_boundary(start) {
                 start += 1;
             }
@@ -277,6 +274,97 @@ mod tests {
         assert!(matches!(jobs.kill(&id).await, Err(SeamError::Invalid(_))));
     }
 
+    struct FailingShell;
+
+    #[async_trait]
+    impl ShellSeam for FailingShell {
+        async fn exec(&self, _argv: &[String], _cwd: Option<&str>) -> SeamResult<ShellOutput> {
+            Err(SeamError::Io("boom".into()))
+        }
+    }
+
+    struct SlowShell;
+
+    #[async_trait]
+    impl ShellSeam for SlowShell {
+        async fn exec(&self, _argv: &[String], _cwd: Option<&str>) -> SeamResult<ShellOutput> {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(ShellOutput {
+                exit_code: 0,
+                stdout: "late".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct PendingShell;
+
+    #[async_trait]
+    impl ShellSeam for PendingShell {
+        async fn exec(&self, _argv: &[String], _cwd: Option<&str>) -> SeamResult<ShellOutput> {
+            std::future::pending().await
+        }
+    }
+
+    #[test]
+    fn every_state_has_a_stable_label() {
+        assert_eq!(JobState::Running.as_str(), "running");
+        assert_eq!(JobState::Succeeded.as_str(), "succeeded");
+        assert_eq!(JobState::Failed.as_str(), "failed");
+        assert_eq!(JobState::Killed.as_str(), "killed");
+        assert!(!JobState::Running.is_terminal());
+        assert!(JobState::Killed.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn shell_errors_mark_the_job_failed() {
+        let jobs = LocalJobs::new(Arc::new(FailingShell));
+        let id = jobs.start(vec!["boom".into()], None).await.unwrap();
+        let rec = settle(&jobs, &id).await;
+        assert_eq!(rec.state, JobState::Failed);
+        assert!(rec.output.contains("error: boom"), "{}", rec.output);
+    }
+
+    #[tokio::test]
+    async fn killing_a_running_job_stays_killed_after_the_task_returns() {
+        let jobs = LocalJobs::new(Arc::new(SlowShell));
+        let id = jobs.start(vec!["sleep".into()], None).await.unwrap();
+        jobs.kill(&id).await.unwrap();
+        // Wait past the shell's delay so the spawned task processes the kill.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let rec = settle(&jobs, &id).await;
+        assert_eq!(rec.state, JobState::Killed);
+    }
+
+    struct SlowFailingShell;
+
+    #[async_trait]
+    impl ShellSeam for SlowFailingShell {
+        async fn exec(&self, _argv: &[String], _cwd: Option<&str>) -> SeamResult<ShellOutput> {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Err(SeamError::Io("late boom".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn killing_a_job_that_then_errors_stays_killed() {
+        let jobs = LocalJobs::new(Arc::new(SlowFailingShell));
+        let id = jobs.start(vec!["sleep".into()], None).await.unwrap();
+        jobs.kill(&id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let rec = settle(&jobs, &id).await;
+        assert_eq!(rec.state, JobState::Killed);
+    }
+
+    #[tokio::test]
+    async fn output_start_is_snapped_forward_to_a_char_boundary() {
+        let jobs = LocalJobs::new(shell(0, "ééé"));
+        let id = jobs.start(vec!["echo".into()], None).await.unwrap();
+        settle(&jobs, &id).await;
+        let (slice, _) = jobs.output(&id, 1).await.unwrap();
+        assert_eq!(slice, "éé");
+    }
+
     #[test]
     fn output_is_bounded_on_char_boundaries() {
         let big = "é".repeat(MAX_JOB_OUTPUT_BYTES);
@@ -284,5 +372,17 @@ mod tests {
         assert!(bounded.len() <= MAX_JOB_OUTPUT_BYTES + 32);
         assert!(bounded.ends_with("[output truncated]"));
         assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        let three_byte = "€".repeat(MAX_JOB_OUTPUT_BYTES);
+        let bounded = bound(three_byte);
+        assert!(bounded.len() <= MAX_JOB_OUTPUT_BYTES + 32);
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "job did not settle")]
+    async fn settle_panics_when_a_job_never_finishes() {
+        let jobs = LocalJobs::new(Arc::new(PendingShell));
+        let id = jobs.start(vec!["pending".into()], None).await.unwrap();
+        settle(&jobs, &id).await;
     }
 }

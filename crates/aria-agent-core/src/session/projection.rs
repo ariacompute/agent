@@ -423,6 +423,46 @@ mod tests {
     }
 
     #[test]
+    fn orphaned_item_and_turn_events_are_ignored_safely() {
+        use serde_json::json;
+        let p = SessionProjection::replay(&[
+            rec(
+                0,
+                SessionEvent::ItemAdded {
+                    item_id: "orphan".into(),
+                    kind: "tool".into(),
+                    payload: json!({}),
+                },
+            ),
+            rec(
+                1,
+                SessionEvent::ItemDone {
+                    item_id: "orphan".into(),
+                    result: "x".into(),
+                    is_error: false,
+                },
+            ),
+            rec(
+                2,
+                SessionEvent::ItemAdded {
+                    item_id: "todo".into(),
+                    kind: "todo".into(),
+                    payload: json!({"unexpected": true}),
+                },
+            ),
+            rec(
+                3,
+                SessionEvent::TurnCompleted {
+                    turn_id: "never-started".into(),
+                    output: "x".into(),
+                },
+            ),
+        ]);
+        assert!(p.turns.is_empty());
+        assert!(p.todos.is_empty());
+    }
+
+    #[test]
     fn projection_roundtrips_through_json() {
         let p = SessionProjection::replay(&full_log());
         let json = serde_json::to_string(&p).unwrap();

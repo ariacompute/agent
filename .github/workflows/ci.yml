@@ -2,10 +2,9 @@ name: CI
 
 # Test + coverage gate for the agent workspace.
 #
-# `test` runs the whole suite (including the `codex` submodule, which the cloud
-# runtime depends on). `coverage` re-runs it under `cargo-llvm-cov` and fails
-# unless every included source line is executed — see `scripts/coverage.sh`
-# and `docs/coverage.md` for the exclusion list.
+# `test` runs the whole workspace suite. `coverage` re-runs it under
+# `cargo-llvm-cov` and fails unless every included source line is executed —
+# see `scripts/coverage.sh` and `docs/coverage.md` for the exclusion list.
 
 on:
   push:

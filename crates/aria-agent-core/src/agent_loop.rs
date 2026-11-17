@@ -884,6 +884,31 @@ mod tests {
         events
     }
 
+    fn flaky_agent(log_dir: &Path, fail_recall: bool, fail_memorize: bool) -> Agent {
+        let root = log_dir.to_string_lossy().to_string();
+        let cfg = AgentConfig {
+            session: "s1".into(),
+            agent_name: "tester".into(),
+            workspace_root: root.clone(),
+            session_log_dir: root,
+            ..AgentConfig::default()
+        };
+        let context: Arc<dyn crate::context::ContextStore> = Arc::new(crate::tests::FlakyStore {
+            inner: crate::context::MemoryContextStore::new(),
+            fail_expand: false,
+            fail_list: false,
+            fail_recall,
+            fail_memorize,
+        });
+        Agent::with_sandbox(
+            cfg,
+            Box::new(ToolThenText::default()),
+            context,
+            Arc::new(LocalSandbox),
+        )
+        .expect("agent builds")
+    }
+
     fn tool_result(events: &[AgentEvent]) -> ToolResult {
         events
             .iter()
@@ -892,6 +917,53 @@ mod tests {
                 _ => None,
             })
             .expect("one tool call event")
+    }
+
+    #[tokio::test]
+    async fn one_shot_run_uses_the_complete_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_with_model(dir.path(), Box::new(ToolThenText::default()));
+        assert_eq!(agent.run("hi").await.unwrap(), "final answer for hi");
+        let _ = agent.sandbox();
+    }
+
+    #[tokio::test]
+    async fn exec_tool_call_refuses_without_an_approval_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent(dir.path(), "deny", "workspace_write");
+        let result = agent
+            .exec_tool_call(&ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: json!({"command": ["echo", "hi"]}),
+            })
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn run_stream_records_failures_from_context_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(flaky_agent(dir.path(), true, false)
+            .run_stream("hi")
+            .await
+            .is_err());
+        assert!(flaky_agent(dir.path(), false, true)
+            .run_stream("hi")
+            .await
+            .is_err());
+
+        struct FailModel;
+        #[async_trait]
+        impl ModelClient for FailModel {
+            async fn complete(&self, _req: &ModelRequest) -> Result<ModelResponse, CoreError> {
+                Err(CoreError::Model("stream unavailable".into()))
+            }
+        }
+        let agent = agent_with_model(dir.path(), Box::new(FailModel));
+        assert!(agent.run_stream("hi").await.is_err());
     }
 
     #[tokio::test]
@@ -1129,8 +1201,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_context_overflow_compacts_and_retries_once() {
+        let model = OverflowThenAnswer::default();
+        let _ = model
+            .complete(&ModelRequest {
+                system: String::new(),
+                context: String::new(),
+                input: "x".into(),
+            })
+            .await;
         let dir = tempfile::tempdir().unwrap();
-        let agent = agent_with_model(dir.path(), Box::new(OverflowThenAnswer::default()));
+        let agent = agent_with_model(dir.path(), Box::new(model));
         let events = collect(&agent, "long prompt").await;
         assert!(
             events
@@ -1176,6 +1256,13 @@ mod tests {
             }
         }
 
+        let _ = AlwaysOverflow
+            .complete(&ModelRequest {
+                system: String::new(),
+                context: String::new(),
+                input: "x".into(),
+            })
+            .await;
         let dir = tempfile::tempdir().unwrap();
         let agent = agent_with_model(dir.path(), Box::new(AlwaysOverflow));
         let mut stream = agent
@@ -1231,6 +1318,13 @@ mod tests {
             }
         }
 
+        let _ = ReportedUsage
+            .complete(&ModelRequest {
+                system: String::new(),
+                context: String::new(),
+                input: "x".into(),
+            })
+            .await;
         let dir = tempfile::tempdir().unwrap();
         let agent = agent_with_model(dir.path(), Box::new(ReportedUsage));
         let events = collect(&agent, "hi").await;
@@ -1434,6 +1528,24 @@ mod one_shot_turn_tests {
     }
 
     #[tokio::test]
+    async fn a_blank_provider_title_keeps_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = one_shot(dir.path(), Box::new(EchoModel), "s-blank-title")
+            .with_title_provider(Arc::new(FixedTitle("   ")));
+        agent.run("hello there").await.expect("run");
+
+        let records = records(dir.path(), "s-blank-title").await;
+        let sources: Vec<&str> = records
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::TitleSet { source, .. } => Some(source.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources, vec!["first_prompt"]);
+    }
+
+    #[tokio::test]
     async fn a_failed_run_still_titles_the_session_and_closes_the_turn() {
         let dir = tempfile::tempdir().unwrap();
         let agent = one_shot(dir.path(), Box::new(BoomModel), "s-boom");
@@ -1446,6 +1558,17 @@ mod one_shot_turn_tests {
         assert_eq!(projection.title.as_deref(), Some("hi"));
         assert_eq!(projection.turns.len(), 1);
         assert_eq!(projection.turns[0].status, TurnStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn the_null_sandbox_is_reachable_from_tool_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = one_shot(dir.path(), Box::new(EchoModel), "s-null");
+        assert!(agent.exec_tool(&["echo".into()]).await.is_err());
+        let sandbox = NullSandbox;
+        let spec = agent_sandbox::ExecSpec::command(vec!["echo".into()]);
+        let handle = sandbox.spawn(&spec).await.unwrap();
+        assert!(sandbox.destroy(handle).await.is_ok());
     }
 
     #[tokio::test]

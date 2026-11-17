@@ -21,6 +21,7 @@ struct FakeSandbox {
     stderr: String,
     spawned_images: Mutex<Vec<Option<String>>>,
     calls: AtomicUsize,
+    exec_error: bool,
 }
 
 impl FakeSandbox {
@@ -31,6 +32,7 @@ impl FakeSandbox {
             stderr: String::new(),
             spawned_images: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
+            exec_error: false,
         })
     }
 
@@ -42,6 +44,19 @@ impl FakeSandbox {
             stderr: stderr.to_string(),
             spawned_images: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
+            exec_error: false,
+        })
+    }
+
+    /// A sandbox whose `exec` transport fails outright.
+    fn exec_broken() -> Arc<Self> {
+        Arc::new(Self {
+            response: String::new(),
+            exit_code: 0,
+            stderr: String::new(),
+            spawned_images: Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+            exec_error: true,
         })
     }
 
@@ -62,6 +77,11 @@ impl Sandbox for FakeSandbox {
         _handle: &SandboxHandle,
         _cmd: &[String],
     ) -> Result<ExecOutput, SandboxError> {
+        if self.exec_error {
+            return Err(SandboxError::Io(std::io::Error::other(
+                "exec transport broke",
+            )));
+        }
         Ok(ExecOutput {
             exit_code: self.exit_code,
             stdout: self.response.clone(),
@@ -103,6 +123,17 @@ fn sandbox(response: &str, kind: BrowserKind) -> Arc<BrowserSandbox> {
 
 fn ctx() -> Arc<dyn ContextStore> {
     MemoryContextStore::new()
+}
+
+#[tokio::test]
+async fn exec_transport_failures_map_to_browser_exec_errors() {
+    let bs = Arc::new(BrowserSandbox::with_catalog(
+        Box::new(Shared(FakeSandbox::exec_broken())),
+        BrowserCatalog::builtin(),
+        BrowserKind::Chromium,
+    ));
+    let err = bs.navigate("https://acme.test").await.unwrap_err();
+    assert!(matches!(err, BrowserError::Exec(_)), "{err:?}");
 }
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
@@ -294,6 +325,7 @@ async fn handler_reports_bad_arguments_and_unknown_tools() {
     for (name, args, needle) in [
         ("browser_navigate", json!({}), "url required"),
         ("browser_click", json!({}), "selector required"),
+        ("browser_fill", json!({}), "selector required"),
         ("browser_fill", json!({"selector": "#q"}), "text required"),
         ("browser_evaluate", json!({}), "js required"),
         (

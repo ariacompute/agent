@@ -170,6 +170,9 @@ mod tests {
             "https://intranet/",
             "https://user:pass@example.com/",
             "https:///nohost",
+            "https://[::1/nohost]",
+            "https://:80/path",
+            "https://0x7f.1/",
             "not-a-url",
         ] {
             assert!(!is_public_url(url), "{url} should be rejected");

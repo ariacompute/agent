@@ -149,4 +149,22 @@ mod tests {
             "array"
         );
     }
+
+    #[tokio::test]
+    async fn unknown_shell_tool_is_invalid() {
+        let h = ShellToolHandler::new(fake(0));
+        let res = h
+            .run(
+                &ToolCall {
+                    id: "c".into(),
+                    name: "shell_other".into(),
+                    arguments: json!({}),
+                },
+                &agent_core::in_memory_context(),
+                "s",
+            )
+            .await;
+        assert!(res.is_error);
+        assert!(res.content.contains("invalid"), "{}", res.content);
+    }
 }

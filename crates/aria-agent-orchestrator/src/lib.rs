@@ -682,6 +682,11 @@ mod tests {
             run(&handler, "subagent_list", json!({})).await.content,
             "(no subagents)"
         );
+        assert!(
+            run(&handler, "subagent_run", json!({"task": "x"}))
+                .await
+                .is_error
+        );
     }
 
     #[tokio::test]
@@ -747,6 +752,8 @@ mod tests {
         let bad = run(&handler, "team_create", json!({"name": "x"})).await;
         assert!(bad.is_error);
         assert!(bad.content.contains("`tasks` must be an array"));
+
+        assert!(run(&handler, "team_nope", json!({})).await.is_error);
     }
 
     #[tokio::test]
@@ -783,6 +790,14 @@ mod tests {
         assert!(!added.is_error, "{}", added.content);
         assert!(added.content.contains("every 60s"), "{}", added.content);
 
+        let at = run(
+            &handler,
+            "schedule_add",
+            json!({"name": "once", "at_ms": 9_000_000_000i64}),
+        )
+        .await;
+        assert!(at.content.contains("at 9000000000"), "{}", at.content);
+
         let listed = run(&handler, "schedule_list", json!({})).await;
         assert!(listed.content.contains("daily"));
 
@@ -797,14 +812,30 @@ mod tests {
         .await;
         assert!(both.is_error);
 
+        assert!(run(&handler, "schedule_nope", json!({})).await.is_error);
         let removed = run(&handler, "schedule_remove", json!({"id": "job-1"})).await;
         assert!(removed.content.contains("removed"));
         let again = run(&handler, "schedule_remove", json!({"id": "job-1"})).await;
         assert!(again.content.contains("no scheduled job"));
+        let removed_at = run(&handler, "schedule_remove", json!({"id": "job-2"})).await;
+        assert!(removed_at.content.contains("removed"));
         assert_eq!(
             run(&handler, "schedule_list", json!({})).await.content,
             "(no scheduled jobs)"
         );
+    }
+
+    #[test]
+    fn schedule_rendering_covers_every_trigger() {
+        let mut at = ScheduleEntry::at("t", "n", 1000);
+        at.next_run_ms = None;
+        let rendered = render_schedule(&at);
+        assert!(rendered.contains("at 1000"), "{rendered}");
+        assert!(rendered.contains("next=-"), "{rendered}");
+        let mut bare = ScheduleEntry::every("t", "n", 1);
+        bare.every_secs = None;
+        bare.at_ms = None;
+        assert!(render_schedule(&bare).contains("unscheduled"));
     }
 
     #[tokio::test]
@@ -836,6 +867,9 @@ mod tests {
             );
         }
         assert_eq!(orch.handlers().len(), 3);
+
+        let ownerless = Orchestrator::in_process(Arc::new(Echo));
+        assert_eq!(ownerless.handlers().len(), 3);
 
         let subagents = orch.subagents.clone().unwrap();
         let handle = subagents

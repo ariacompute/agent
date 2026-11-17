@@ -225,5 +225,16 @@ mod tests {
         assert!(out.contains("Working directory: /w"));
         assert!(out.contains("workspace_write"));
         assert!(out.contains("limited to the working directory"));
+
+        let mut full = SystemPrompt::default();
+        full.push(permissions(PermissionPreset::FullAccess));
+        assert!(full.build().contains("be extra careful"));
+    }
+
+    #[test]
+    fn long_sections_are_truncated_on_char_boundaries() {
+        let mut p = SystemPrompt::new(5);
+        p.push(PromptSection::new("long", 0, "€".repeat(20)));
+        assert!(p.build().contains("[prompt truncated]"));
     }
 }

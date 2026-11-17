@@ -161,7 +161,68 @@ family_handler!(TodoToolHandler);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::context::{
+        ContextError, ContextFragment, ContextStore, GraphRetrieveQuery, GraphRetrieveResult,
+        RecallQuery, Relation, RelationKind,
+    };
     use agent_core::ToolHandler;
+
+    struct FailingStore;
+
+    #[async_trait::async_trait]
+    impl ContextStore for FailingStore {
+        async fn memorize(&self, _frag: ContextFragment) -> Result<(), ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn recall(&self, _q: &RecallQuery) -> Result<Vec<ContextFragment>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn compact(&self, _s: &str) -> Result<ContextFragment, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn get_by_key(
+            &self,
+            _s: &str,
+            _k: &str,
+        ) -> Result<Option<ContextFragment>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn list_session(
+            &self,
+            _s: &str,
+            _k: usize,
+        ) -> Result<Vec<ContextFragment>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn relate(&self, _r: Relation) -> Result<(), ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn get_relations(
+            &self,
+            _s: &str,
+            _f: Option<&str>,
+            _t: Option<&str>,
+            _kind: Option<RelationKind>,
+            _top_k: usize,
+        ) -> Result<Vec<Relation>, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn delete_relations(
+            &self,
+            _s: &str,
+            _f: Option<&str>,
+            _t: Option<&str>,
+            _kind: Option<RelationKind>,
+        ) -> Result<usize, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+        async fn expand(
+            &self,
+            _q: &GraphRetrieveQuery,
+        ) -> Result<GraphRetrieveResult, ContextError> {
+            Err(ContextError::Storage("boom".into()))
+        }
+    }
 
     async fn run(
         h: &TodoToolHandler,
@@ -237,6 +298,65 @@ mod tests {
             .is_error
         );
         assert!(run(&h, "todo_nope", json!({})).await.is_error);
+    }
+
+    #[tokio::test]
+    async fn failing_store_surfaces_every_error() {
+        use agent_core::context::FragmentKind;
+        let store = FailingStore;
+        assert!(store
+            .memorize(ContextFragment::new("s", FragmentKind::Note, "x"))
+            .await
+            .is_err());
+        assert!(store.recall(&RecallQuery::new("s", "x")).await.is_err());
+        assert!(store.compact("s").await.is_err());
+        assert!(store.get_by_key("s", "k").await.is_err());
+        assert!(store.list_session("s", 1).await.is_err());
+        assert!(store
+            .relate(Relation {
+                session: "s".into(),
+                from_id: "a".into(),
+                to_id: "b".into(),
+                kind: RelationKind::Semantic,
+                score: 1.0,
+                provenance: "test".into(),
+                created_at: 0,
+            })
+            .await
+            .is_err());
+        assert!(store.get_relations("s", None, None, None, 1).await.is_err());
+        assert!(store
+            .delete_relations("s", Some("a"), None, None)
+            .await
+            .is_err());
+        assert!(store
+            .expand(&GraphRetrieveQuery {
+                session: "s".into(),
+                seeds: vec!["a".into()],
+                views: vec![],
+                budget: 1,
+                max_hops: 1,
+                top_k: 1,
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn store_errors_are_surfaced() {
+        let h = TodoToolHandler::new(Arc::new(FailingStore));
+        assert!(run(&h, "todo_read", json!({}))
+            .await
+            .content
+            .contains("ERROR [io]"));
+        assert!(run(
+            &h,
+            "todo_write",
+            json!({"todos": [{"id": "1", "content": "x"}]})
+        )
+        .await
+        .content
+        .contains("ERROR [io]"));
     }
 
     #[tokio::test]

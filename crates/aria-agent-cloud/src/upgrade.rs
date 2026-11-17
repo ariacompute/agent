@@ -895,6 +895,15 @@ mod tests {
         let err = extract_archive(&corrupt, tmp.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
+        // A valid central directory with a broken local header: `by_index`
+        // fails even though `ZipArchive::new` succeeded.
+        let broken_entry = zip_file(tmp.path(), "broken-entry.zip", &[("f", b"data")]);
+        let mut bytes = fs::read(&broken_entry).unwrap();
+        bytes[0..4].copy_from_slice(b"XXXX");
+        fs::write(&broken_entry, &bytes).unwrap();
+        let err = extract_archive(&broken_entry, tmp.path()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
         let corrupt_tar = tmp.path().join("corrupt.tar.gz");
         fs::write(&corrupt_tar, b"not gzip").unwrap();
         assert!(extract_archive(&corrupt_tar, tmp.path()).is_err());

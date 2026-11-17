@@ -268,6 +268,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_waits_on_one_child_report_no_pending_task() {
+        struct Blocking;
+        #[async_trait]
+        impl SubagentFactory for Blocking {
+            async fn run(&self, _req: &SubagentRequest, _session: &str) -> SeamResult<String> {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok("late".into())
+            }
+        }
+        let subagents = Arc::new(InProcessSubagents::new(Arc::new(Blocking)));
+        let handle = subagents
+            .spawn(SubagentRequest::new("p", "task"))
+            .await
+            .unwrap();
+
+        let a = subagents.clone();
+        let id = handle.id.clone();
+        let first = tokio::spawn(async move { a.wait(&id).await });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // The first waiter took the task; the second finds no pending task.
+        assert!(matches!(
+            subagents.wait(&handle.id).await,
+            Err(SeamError::Io(_))
+        ));
+        assert_eq!(first.await.unwrap().unwrap(), "late");
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_registry_reports_io_errors() {
+        let (subagents, _) = provider();
+        let r = &subagents;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = r.children.lock().unwrap();
+            panic!("poison children");
+        }));
+        assert!(matches!(subagents.running(), Err(SeamError::Io(_))));
+    }
+
+    #[tokio::test]
     async fn a_failing_child_reports_the_failure() {
         struct Broken;
 

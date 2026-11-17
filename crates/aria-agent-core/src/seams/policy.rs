@@ -184,15 +184,13 @@ impl SandboxPolicy {
                 }
                 return Ok(real);
             }
-            match probe.parent() {
-                Some(parent) => {
-                    if let Some(name) = probe.file_name() {
-                        suffix.push(name);
-                    }
-                    probe = parent;
-                }
-                None => return Err(PolicyError::Escape(requested.to_string())),
-            }
+            // `normalized` starts with the canonicalized `self.root`, so the
+            // walk always reaches it (with a file name) before `parent()` or
+            // `file_name()` can be `None`.
+            let parent = probe.parent().expect("root ancestor is canonicalizable");
+            let name = probe.file_name().expect("non-root path has a file name");
+            suffix.push(name);
+            probe = parent;
         }
     }
 }
@@ -205,6 +203,7 @@ fn normalize(path: &Path) -> PathBuf {
             Component::ParentDir => {
                 out.pop();
             }
+            // `.` carries no path information; see `resolve_path("./file")`.
             Component::CurDir => {}
             other => out.push(other.as_os_str()),
         }
@@ -296,11 +295,10 @@ mod tests {
     #[test]
     fn absolute_path_outside_root_is_rejected() {
         let p = policy();
-        let outside = if cfg!(windows) {
-            "C:\\Windows\\win.ini"
-        } else {
-            "/etc/passwd"
-        };
+        #[cfg(windows)]
+        let outside = "C:\\Windows\\win.ini";
+        #[cfg(not(windows))]
+        let outside = "/etc/passwd";
         assert!(matches!(
             p.resolve_path(outside),
             Err(PolicyError::Escape(_))
@@ -312,6 +310,31 @@ mod tests {
         assert_eq!(
             SandboxPolicy::new("", PermissionPreset::ReadOnly).unwrap_err(),
             PolicyError::NoRoot
+        );
+        assert!(matches!(
+            SandboxPolicy::new("relative/missing/root", PermissionPreset::ReadOnly),
+            Err(PolicyError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn empty_request_and_dot_components_are_handled() {
+        let p = policy();
+        assert!(matches!(
+            p.resolve_path("   "),
+            Err(PolicyError::Invalid(_))
+        ));
+        assert_eq!(
+            normalize(Path::new("./file.txt")),
+            PathBuf::from("file.txt")
+        );
+        assert_eq!(
+            normalize(&p.root().join("./file.txt")),
+            p.root().join("file.txt")
+        );
+        assert_eq!(
+            p.resolve_path("./file.txt").unwrap(),
+            p.root().join("file.txt")
         );
     }
 

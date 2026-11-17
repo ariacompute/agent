@@ -112,12 +112,10 @@ impl MemorySchedule {
         let mut fired = Vec::with_capacity(claimed.len());
         for entry in claimed {
             if let Err(e) = runner.run(&entry).await {
-                tracing::warn!(
-                    job = %entry.id,
-                    name = %entry.name,
-                    error = %e,
-                    "scheduled job failed"
-                );
+                let job = entry.id.as_str();
+                let name = entry.name.as_str();
+                let error = e.to_string();
+                tracing::warn!(job, name, error, "scheduled job failed");
             }
             fired.push(entry.id);
         }
@@ -225,6 +223,40 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn initial_next_run_covers_every_trigger_shape() {
+        let now = 1_000;
+        let mut bare = ScheduleEntry::every("t", "n", 1);
+        bare.every_secs = None;
+        assert_eq!(initial_next_run(&bare, now), None);
+        let mut at = ScheduleEntry::at("t", "n", 42);
+        assert_eq!(initial_next_run(&at, now), Some(42));
+        at.enabled = false;
+        assert_eq!(initial_next_run(&at, now), None);
+    }
+
+    #[test]
+    fn a_poisoned_store_is_reported_instead_of_panicking() {
+        let store = MemorySchedule::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.entries.lock().unwrap();
+            panic!("poison the schedule store");
+        }));
+        assert!(result.is_err());
+        assert!(matches!(store.due(0), Err(SeamError::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn unscheduled_entries_are_skipped_by_claim_due() {
+        let store = MemorySchedule::new();
+        let mut bare = ScheduleEntry::every("t", "n", 1);
+        bare.every_secs = None;
+        bare.at_ms = None;
+        store.entries.lock().unwrap().insert("job-1".into(), bare);
+        let runner = Counting::new(false);
+        assert!(store.tick(1_000, &runner).await.unwrap().is_empty());
     }
 
     #[tokio::test]

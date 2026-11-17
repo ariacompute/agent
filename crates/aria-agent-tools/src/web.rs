@@ -395,12 +395,40 @@ mod tests {
         .await
     }
 
+    struct Empty;
+
+    #[async_trait]
+    impl WebSeam for Empty {
+        async fn search(&self, _query: &str, _limit: usize) -> Result<Vec<WebResult>, SeamError> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, _url: &str) -> Result<String, SeamError> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn prefix_matches_the_web_family() {
+        let h = WebToolHandler::new(Arc::new(Fixed));
+        assert!(h.handles("web_search"));
+        assert!(!h.handles("other"));
+    }
+
     #[tokio::test]
     async fn no_provider_is_fail_closed() {
         let h = WebToolHandler::new(Arc::new(NoWeb));
         let res = run(&h, "web_search", json!({"query": "rust"})).await;
         assert!(res.is_error);
         assert!(res.content.contains("unavailable"), "{}", res.content);
+    }
+
+    #[tokio::test]
+    async fn empty_search_results_are_reported_plainly() {
+        let h = WebToolHandler::new(Arc::new(Empty));
+        let res = run(&h, "web_search", json!({"query": "rust"})).await;
+        assert!(!res.is_error);
+        assert_eq!(res.content, "(no results)");
+        assert_eq!(Empty.fetch("https://example.test").await.unwrap(), "");
     }
 
     #[tokio::test]

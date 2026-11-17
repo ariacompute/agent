@@ -219,6 +219,41 @@ mod tests {
         assert!(run(&h, "job_nope", json!({})).await.is_error);
     }
 
+    struct Pending;
+
+    #[async_trait]
+    impl ShellSeam for Pending {
+        async fn exec(
+            &self,
+            _argv: &[String],
+            _cwd: Option<&str>,
+        ) -> Result<ShellOutput, SeamError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cwd_is_forwarded_and_a_running_job_can_be_killed() {
+        let h = JobsToolHandler::new(Arc::new(LocalJobs::new(Arc::new(Pending))));
+        let started = run(
+            &h,
+            "job_start",
+            json!({"command": ["sleep", "60"], "cwd": "/w"}),
+        )
+        .await;
+        assert!(!started.is_error, "{}", started.content);
+        let id = started
+            .content
+            .trim_start_matches("started job ")
+            .to_string();
+        let _never = Pending.exec(&[], None);
+        let killed = run(&h, "job_kill", json!({"id": id})).await;
+        assert!(!killed.is_error, "{}", killed.content);
+        assert!(killed.content.contains("killed job"), "{}", killed.content);
+        let out = run(&h, "job_output", json!({"id": id})).await;
+        assert!(out.content.contains("(no new output)"), "{}", out.content);
+    }
+
     #[test]
     fn empty_list_renders_marker() {
         assert_eq!(render(&[]), "(no jobs)");
