@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from .memory import (
     CompositeMemoryStore,
@@ -10,7 +10,7 @@ from .memory import (
     build_store,
 )
 from .transport import get_json, post_json, resolve_client
-from .types import ClientOptions, HistoryInput
+from .types import ClientOptions, HistoryInput, SessionTitle
 
 if TYPE_CHECKING:  # pragma: no cover
     from .agent import Agent
@@ -107,6 +107,24 @@ class Session:
         """Read-only server endpoint (AGENTS rule 8): the session's turns."""
         resolved = resolve_client(self.client)
         return get_json(resolved, f"/v1/agents/sessions/{self.id}/turns")
+
+    def get_title(self) -> SessionTitle:
+        """Read the projected title (``404`` before the first turn).
+
+        A delegated child session (``<parent>::sub::<id>``) is readable here too:
+        the server authorises it through the parent that owns it.
+        """
+        resolved = resolve_client(self.client)
+        data: dict[str, Any] = get_json(
+            resolved, f"/v1/agents/sessions/{self.id}/title"
+        )
+        return SessionTitle(
+            object=data["object"],
+            session_id=data["session_id"],
+            title=data["title"],
+            source=data["source"],
+            updated_at=int(data["updated_at"]),
+        )
 
     def record(self, user_input: HistoryInput, output: str) -> None:
         """Append the exchange to the client-side history mirror."""

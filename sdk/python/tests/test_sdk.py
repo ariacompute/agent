@@ -399,5 +399,34 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(calls[0], {"agent": "tutor", "instructions": "be brief"})
 
 
+    def test_get_title_requests_the_title_endpoint(self):
+        calls: list[tuple[str, str]] = []
+
+        def fake_request(client, method, path, body=None, stream=False):
+            calls.append((method, path))
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "object": "agent.session.title",
+                        "session_id": "sess_1",
+                        "title": "summarise the repo",
+                        "source": "first_prompt",
+                        "updated_at": 7,
+                    }
+                ).encode()
+            )
+
+        session = Session("sess_1", ClientOptions(base_url="http://aria.test"))
+        with mock.patch.object(transport, "_request", side_effect=fake_request):
+            title = session.get_title()
+
+        self.assertEqual(calls, [("GET", "/v1/agents/sessions/sess_1/title")])
+        self.assertEqual(title.object, "agent.session.title")
+        self.assertEqual(title.session_id, "sess_1")
+        self.assertEqual(title.title, "summarise the repo")
+        self.assertEqual(title.source, "first_prompt")
+        self.assertEqual(title.updated_at, 7)
+
+
 if __name__ == "__main__":
     unittest.main()

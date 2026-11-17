@@ -55,5 +55,6 @@ export type {
   ToolParameters,
   ToolSpec,
   RunOptions,
+  SessionTitle,
   AriaErrorKind,
 } from "./types.js";

@@ -6,7 +6,14 @@
  * next `run()` continues where the previous one stopped.
  */
 
-import type { ClientOptions, HistoryInput, MemoryBackend, MemoryConfig, MemoryOptions } from "./types.js";
+import type {
+  ClientOptions,
+  HistoryInput,
+  MemoryBackend,
+  MemoryConfig,
+  MemoryOptions,
+  SessionTitle,
+} from "./types.js";
 import type { Agent } from "./agent.js";
 import { getJson, postJson, resolveClient } from "./transport.js";
 import {
@@ -115,6 +122,20 @@ export class Session {
   async getTurns(): Promise<any[]> {
     const resolved = resolveClient(this.client);
     return getJson<any[]>(resolved, `/v1/agents/sessions/${encodeURIComponent(this.id)}/turns`);
+  }
+
+  /**
+   * Read the projected title of this session (`404` before the first turn).
+   *
+   * A delegated child session (`<parent>::sub::<id>`) is readable here too: the
+   * server authorises it through the parent that owns it.
+   */
+  async getTitle(): Promise<SessionTitle> {
+    const resolved = resolveClient(this.client);
+    return getJson<SessionTitle>(
+      resolved,
+      `/v1/agents/sessions/${encodeURIComponent(this.id)}/title`,
+    );
   }
 
   /** Append an exchange to the client-side history mirror. */

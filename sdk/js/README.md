@@ -42,9 +42,12 @@ console.log(result.finalOutput);
 
 Frames use the `agent.*` envelope: `agent.turn.created`, `agent.turn.in_progress`,
 `agent.turn.item.added`, `agent.turn.item.done`, `agent.turn.output_text.delta`,
-`agent.turn.output_text.done`, `agent.turn.completed` / `agent.turn.failed`.
-`agent.turn.completed` (or `agent.turn.failed`) is the **only** terminal event —
-there is no `data: [DONE]` sentinel.
+`agent.turn.output_text.done`, `agent.turn.approval.requested`,
+`agent.turn.approval.resolved`, `agent.turn.usage`, `agent.turn.completed` /
+`agent.turn.failed`. `agent.turn.completed` (or `agent.turn.failed`) is the
+**only** terminal event — there is no `data: [DONE]` sentinel. A completed
+result carries `result.usage` (`TokenUsage`: input / output / total tokens and
+model) when the server reports it.
 
 ## Sessions
 
@@ -52,7 +55,15 @@ there is no `data: [DONE]` sentinel.
 const session = await Session.create(agent);
 await run(agent, "hello", { session });
 await run(agent, "and then?", { session }); // continues the same conversation
+
+const title = await session.getTitle(); // { session_id, title, source, updated_at }
+const items = await session.getItems();
+const turns = await session.getTurns();
 ```
+
+`getTitle()` reads the projected session title; before the first turn it throws
+a 404. A delegated child session (`<parent>::sub::<id>`) is readable through the
+same method as long as the caller owns the parent.
 
 ## Configuration
 

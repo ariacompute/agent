@@ -49,6 +49,7 @@ from .types import (
     RunResult,
     StreamedRunResult,
     TokenUsage,
+    SessionTitle,
     ToolSpec,
 )
 
@@ -68,6 +69,7 @@ __all__ = [
     "RunResult",
     "StreamedRunResult",
     "TokenUsage",
+    "SessionTitle",
     "ToolSpec",
     "AriaError",
     "AriaErrorKind",

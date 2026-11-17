@@ -88,6 +88,18 @@ export interface TokenUsage {
   model?: string;
 }
 
+/** Projected session title (`GET /v1/agents/sessions/{id}/title`). */
+export interface SessionTitle {
+  object: string;
+  /** Session that owns the title (a child session is `<parent>::sub::<id>`). */
+  session_id: string;
+  title: string;
+  /** `first_prompt` (deterministic) or `provider` (async override). */
+  source: string;
+  /** Epoch milliseconds of the last write. */
+  updated_at: number;
+}
+
 /** Streaming events decoded from the SSE `agent.*` frames. */
 export type StreamEvent =
   | { type: "agent.turn.created"; turnId?: string; raw: Record<string, any> }

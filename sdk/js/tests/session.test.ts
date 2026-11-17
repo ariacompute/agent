@@ -40,6 +40,35 @@ describe("Session getItems / getTurns (read-only)", () => {
     expect(calls[0].url).toBe("http://aria.test/v1/agents/sessions/sess_1/turns");
   });
 
+  test("getTitle hits the title endpoint and keeps the wire payload", async () => {
+    const payload = {
+      object: "agent.session.title",
+      session_id: "sess_1",
+      title: "summarise the repo",
+      source: "first_prompt",
+      updated_at: 7,
+    };
+    const { impl, calls } = fakeFetch(() => jsonResponse(payload));
+    const session = new Session("sess_1", { ...client, fetch: impl });
+    expect(await session.getTitle()).toEqual(payload);
+    expect(calls[0].url).toBe("http://aria.test/v1/agents/sessions/sess_1/title");
+    expect(calls[0].init.method).toBe("GET");
+  });
+
+  test("child session ids are encoded in the title path", async () => {
+    const payload = {
+      object: "agent.session.title",
+      session_id: "sess_1::sub::c1",
+      title: "child task",
+      source: "first_prompt",
+      updated_at: 8,
+    };
+    const { impl, calls } = fakeFetch(() => jsonResponse(payload));
+    const session = new Session("sess_1::sub::c1", { ...client, fetch: impl });
+    expect((await session.getTitle()).title).toBe("child task");
+    expect(calls[0].url).toContain("sess_1%3A%3Asub%3A%3Ac1/title");
+  });
+
   test("read-only endpoints propagate typed auth errors", async () => {
     const { impl } = fakeFetch(() => jsonResponse({ error: "forbidden" }, 403));
     const session = new Session("sess_1", { ...client, fetch: impl });

@@ -57,9 +57,11 @@ result = await streamed.completed
 print(result.final_output)
 ```
 
-Frames use the `agent.*` envelope; `agent.turn.completed` (or
-`agent.turn.failed`) is the **only** terminal event — there is no
-`data: [DONE]` sentinel.
+Frames use the `agent.*` envelope, including `agent.turn.approval.requested` /
+`agent.turn.approval.resolved` and `agent.turn.usage`. A completed result carries
+`result.usage` (`TokenUsage`: input / output / total tokens and model) when the
+server reports it. `agent.turn.completed` (or `agent.turn.failed`) is the
+**only** terminal event — there is no `data: [DONE]` sentinel.
 
 ## Sessions
 
@@ -67,7 +69,15 @@ Frames use the `agent.*` envelope; `agent.turn.completed` (or
 session = Session.create(agent)
 await Runner.run(agent, "hello", session=session)
 await Runner.run(agent, "and then?", session=session)
+
+title = session.get_title()  # SessionTitle(session_id, title, source, updated_at)
+items = session.get_items()
+turns = session.get_turns()
 ```
+
+`get_title()` reads the projected session title; before the first turn it raises
+a 404. A delegated child session (`<parent>::sub::<id>`) is readable through the
+same method as long as the caller owns the parent.
 
 ## Configuration
 

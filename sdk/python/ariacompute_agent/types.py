@@ -66,6 +66,17 @@ class TokenUsage:
 
 
 @dataclass
+class SessionTitle:
+    """Projected session title (``GET /v1/agents/sessions/{id}/title``)."""
+
+    object: str
+    session_id: str  # a child session is ``<parent>::sub::<id>``
+    title: str
+    source: str  # ``first_prompt`` (deterministic) or ``provider`` (override)
+    updated_at: int  # epoch milliseconds of the last write
+
+
+@dataclass
 class RunResult:
     """Result of a completed run (mirrors ``RunResult`` in the Agents SDK)."""
 
