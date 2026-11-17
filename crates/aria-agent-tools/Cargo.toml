@@ -1,0 +1,30 @@
+[package]
+name = "aria-agent-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Built-in tool families (fs / shell / jobs / terminal / skills / web / ask / plan / todo) routed through the capability seams."
+
+[features]
+default = []
+# Interactive terminals via a real PTY. Off by default: mobile bindings must not
+# link a PTY implementation, and the family degrades to `Unsupported` without it.
+pty = ["dep:portable-pty"]
+# Web search / fetch. Off by default so the default build stays network-free.
+web = ["dep:reqwest"]
+
+[dependencies]
+aria-agent-core.workspace = true
+aria-agent-plugin.workspace = true
+aria-agent-sandbox.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+portable-pty = { version = "0.8", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"

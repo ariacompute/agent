@@ -1,6 +1,7 @@
-//! The long-term memory tool family exposed to the agentic loop, and the
-//! [`MemoToolHandler`] that routes `memo_*` tool calls to the agent's
-//! [`ContextStore`].
+//! The long-term memory tool family (`memo_*`).
+//!
+//! Lives here (not in `aria-agent-core`) so the kernel keeps depending on the
+//! `storage` seam only — never on a store implementation (AGENTS.md rule 13).
 //!
 //! The four tools let the model **actively** manage its own memory during a run:
 //! `memo_store` / `memo_get` (write / read a keyed long-term memory),
@@ -11,8 +12,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::context::{ContextError, ContextFragment, ContextStore, FragmentKind, RecallQuery};
-use crate::{Tool, ToolCall, ToolHandler, ToolResult};
+use agent_core::context::{ContextError, ContextFragment, ContextStore, FragmentKind, RecallQuery};
+use agent_core::{Tool, ToolCall, ToolHandler, ToolResult};
 
 /// Build the long-term memory tools the model can call. Mirrors the frozen tool
 /// contract (`Tool { name, description, parameters }`). These are appended to (not
@@ -179,7 +180,7 @@ impl ToolHandler for MemoToolHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{
+    use agent_core::context::{
         GraphRetrieveQuery, GraphRetrieveResult, MemoryContextStore, Relation, RelationKind,
     };
 

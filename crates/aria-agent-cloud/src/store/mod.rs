@@ -10,6 +10,7 @@
 
 pub mod memory;
 pub mod pg;
+pub mod pg_orchestration;
 
 pub use memory::MemoryStore;
 pub use pg::{ensure_schema, PgStore};
@@ -144,6 +145,32 @@ pub trait SessionStore: Send + Sync {
         principal: &Principal,
         session: &str,
     ) -> Result<Vec<ItemRow>, AppError>;
+}
+
+/// One row of `session_titles`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleRow {
+    pub session_id: String,
+    pub title: String,
+    /// `first_prompt` (deterministic fallback) or `provider` (async override).
+    pub source: String,
+    /// Epoch milliseconds of the last write.
+    pub updated_at: i64,
+}
+
+/// Session titles, scoped by `principal_id`.
+///
+/// Written by the runtime's title projection (`SessionEvent::TitleSet` → row)
+/// and read by `GET /v1/agents/sessions/{id}/title`. The raw event stream stays
+/// the source of truth: this table is a projection (ADR-0015).
+#[async_trait]
+pub trait TitleStore: Send + Sync {
+    async fn put_title(&self, principal: &Principal, row: &TitleRow) -> Result<(), AppError>;
+    async fn get_title(
+        &self,
+        principal: &Principal,
+        session: &str,
+    ) -> Result<Option<TitleRow>, AppError>;
 }
 
 /// Self-serve API keys (admin-managed) plus the resolution path used by auth.

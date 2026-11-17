@@ -1,15 +1,20 @@
 # AGENTS.md — contribution & architecture conventions
 
-This repo is a Rust workspace that wraps the OpenAI **codex** harness and ships a
-cloud API (OpenAI **beta Agents** compatible) plus native (Swift/Kotlin) and
-language (JS/Python) SDKs.
+This repo is a Rust workspace: a capability-seam agent runtime (`aria-agent-protocol`
+seams + plugin registry) that ships a cloud API (OpenAI **beta Agents** compatible),
+native (Swift/Kotlin) and language (JS/Python) SDKs. There is **no vendored harness**:
+every capability is a seam with a default provider, and boot fails closed when the
+wiring is inconsistent.
 
 ## Workspace layout
 
-* `crates/aria-agent-core`, `aria-agent-sandbox`, `aria-agent-memo` (aria memo),
-  `ariacompute-agent`, `aria-agent-cloud`, `aria-agent-ffigen`,
-  `aria-agent-browser` (browser sandbox: six-image `BrowserCatalog` +
-  `BrowserSandbox` + browser tool family)
+* `crates/aria-agent-core` (loop, seams, session event stream, prompt assembly,
+  token meter), `aria-agent-plugin` (manifest + registry + freeze),
+  `aria-agent-tools` (fs/shell/jobs/terminal/skills/web/ask/plan/todo/memo families),
+  `aria-agent-orchestrator` (sub-agents, teams, scheduled jobs), `aria-agent-sandbox`,
+  `aria-agent-memo` (aria memo), `ariacompute-agent`, `aria-agent-cloud`,
+  `aria-agent-ffigen`, `aria-agent-browser` (browser sandbox: six-image
+  `BrowserCatalog` + `BrowserSandbox` + browser tool family)
 * `bindings/swift` (`Package.swift` SwiftPM + `AriaComputeAgent.podspec` CocoaPods),
   `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
   Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
@@ -20,7 +25,6 @@ language (JS/Python) SDKs.
   goes through `webpki-roots` (pinned `>=1.0.10` in `aria-agent-cloud` — removes the
   compromised emSign roots); the JS SDK is built/tested with **bun >=1.4.4**; the
   Python SDK bundles no trust store and relies on the host/container `ca-certificates`.
-* `codex/` is a **git submodule** (do not add it to the Cargo workspace).
 * `crates/aria-agent-cloud/src/event_envelope.rs` is the frozen SSE envelope:
   `AgentEvent` → OpenAI **beta Agents** streaming frames (see rule 9).
 
@@ -47,15 +51,22 @@ language (JS/Python) SDKs.
    (session-less happy path) are specified in `docs/adr/0008-sdk-interface.md`.
 3. **Sandbox is pluggable.** Add providers by implementing the `Sandbox` trait
    and registering them in `from_provider`. Docker is the default. The cloud
-   selects the **codex** backend (`sandbox_provider = "codex"`), resolved by this
-   runtime to `codex_sandbox::CodexSandbox` (ADR-0005); Docker/Kata/Cube remain
-   available through `from_provider`. The **browser** provider
+   default is **docker** (ADR-0003/ADR-0018); Kata/Cube remain available through
+   `from_provider`, and an unknown provider name (including the removed `codex`
+   value) is a hard configuration error, never a silent fallback. The **browser** provider
    (`sandbox_provider = "browser"`) is backed by `aria-agent-browser`'s
    `BrowserSandbox`, which reuses the same Docker/Kata container path and
    `SandboxResourceLimits`. See `docs/adr/0003-sandbox-providers.md`,
-   `docs/adr/0005-codex-integration.md`, and `docs/adr/0012-browser-sandbox.md`.
-4. **Submodule discipline.** Keep `codex` out of the workspace member list;
-   reference codex crate shapes by design. See `docs/adr/0001-submodule-strategy.md`.
+   `docs/adr/0003-sandbox-providers.md` and `docs/adr/0012-browser-sandbox.md`.
+4. **Capability seams + plugin registry.** Every capability is a seam
+   (`llm`, `sandbox`, `fs`, `shell`, `jobs`, `storage`, `sessionPersistence`,
+   `sessionQuery`, `approvals`, `skills`, `web`, `userQuestions`, `subagents`,
+   `schedule`). Providers register in `aria-agent-plugin`; assembly topo-sorts
+   `requires`, rejects duplicates/cycles and enforces one provider per `core` key at
+   boot. Resolve seams **once** in `Agent::with_handlers` — never per tool call.
+   Tools run through `ToolExecutionPipeline`: resolve → permission preset →
+   approval → dispatch → post-process; **no approval provider means denied**, and
+   the reason is fed back to the model. See ADR-0014/ADR-0016.
 5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key, raw user content,
    or embedding vectors.
 6. **Tests.** `cargo test --workspace` must pass; JS SDK via `just sdk-js-test`
@@ -75,7 +86,8 @@ language (JS/Python) SDKs.
    `GET|POST|DELETE /v1/agents/sessions/{id}`,
    `POST /v1/agents/sessions/{id}/events`,
    `POST /v1/agents/sessions/{id}/events/stream`, read-only `…/items`,
-   `…/turns`, `…/subagents`. `vaults`, `agents/environments` (+files/templates)
+   `…/turns`, `…/subagents`, `…/title`, plus `/v1/agent-teams` and
+   `/v1/scheduled-jobs`. `vaults`, `agents/environments` (+files/templates)
    and `…/artifacts` return **501**. Requests may carry `OpenAI-Beta: agents=v1`.
    See `docs/adr/0009-openai-beta-agents-api.md`.
 9. **Streaming contract is the beta Agents envelope and is frozen.**
@@ -127,6 +139,26 @@ language (JS/Python) SDKs.
     **not** depend on `aria-agent-memo` — it only depends on the `ContextStore`
     trait, so local (SQLite) and cloud (pgvector) backends are interchangeable.
     See `docs/adr/0013-agent-memo-integration.md`.
+    14. **The session event stream is the source of truth.** `SessionEvent`
+     (`turn_started` / `step` / `item_added` / `item_done` / `text_delta` /
+     `text_done` / `approval` / `usage` / `compacted` / `title_set` /
+     `turn_completed` / `turn_failed`) is append-only; `SessionProjection::replay`
+     folds it into turns/items/title/usage, and the Postgres `session_turns` /
+     `session_items` tables are a **projection**, never a second source. Local
+     persistence is one JSONL file per session, flushed once per turn. **Every**
+    entry point records the same vocabulary — `run_event_stream`, `run` and
+    `run_stream` all emit `turn_started` + `title_set` (flushed before the model
+    is called, so a slow or failing provider cannot lose the title) and a
+    terminal event. Usage comes
+     from the provider when reported and is only estimated locally as a fallback;
+     an overflow report compacts once and retries once. See ADR-0015.
+    15. **Orchestration is tenant-scoped.** Sub-agents get their own session id
+     (`<parent>::sub::<id>`) and never share the parent's event stream; a team is a
+     validated task DAG (unknown ids, duplicates and cycles are refused *before*
+     any claim); scheduled jobs fire through a single-flight ticker that advances
+     `next_run_ms` **before** running. `agent_teams`, `scheduled_jobs` and
+     `session_titles` all carry `principal_id` and every query filters on it. See
+     ADR-0017.
 
 ## SDK（js / python）
 
@@ -182,8 +214,8 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
 * **Gate**: `just cov-check` (`scripts/coverage.sh`) must stay at 100% of lcov
   `DA:` lines outside `docs/coverage.md`. CI runs fmt + `clippy -D warnings` +
   `cargo test --workspace` + the gate.
-* **Exclusions are a budget, not a habit**: `codex/`, `aria-agent-ffigen`,
-  cloud `main.rs`, `store/pg.rs`, `context/pg.rs`. Adding business logic to that
+* **Exclusions are a budget, not a habit**: `aria-agent-ffigen`, cloud `main.rs`,
+  `store/pg.rs`, `store/pg_orchestration.rs`, `context/pg.rs`. Adding business logic to that
   list requires editing `docs/coverage.md` with a reason that is not "hard".
 * **No live dependencies**: `wiremock`/loopback for HTTP, an in-crate TCP stub for
   the Docker Engine API (`DockerSandbox::with_client`), `store/memory.rs` for the
@@ -216,8 +248,10 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
   `publish-maven.yml` (Maven Central), `publish-npm.yml`, `publish-pypi.yml`;
   Swift via CocoaPods `bindings/swift/AriaComputeAgent.podspec`.
 
-Windows build (release matrix `windows-x86_64`): `aria-agent-cloud` pulls
-`codex-utils-pty`, whose conpty code mixes `winapi::ctypes::c_void` with
-`std::ffi::c_void`. Those are the same type **only** with winapi's `std`
-feature, so the crate declares a Windows-only `winapi = { features = ["std"] }`
-dependency — do not remove it, or the Windows build fails with three E0308s.
+Windows build (release matrix `windows-x86_64`): the optional `pty` feature of
+`aria-agent-tools` pulls `portable-pty`, whose conpty code mixes
+`winapi::ctypes::c_void` with `std::ffi::c_void`. Those are the same type **only**
+with winapi's `std` feature, so that crate declares a Windows-only
+`winapi = { features = ["std"] }` dependency — do not remove it, or the Windows
+build fails with three E0308s. The `pty` and `web` features are **off by default**
+so mobile builds do not compile them.

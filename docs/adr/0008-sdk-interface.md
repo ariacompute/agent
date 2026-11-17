@@ -12,8 +12,8 @@ the caller. That is more verbose than the upstream ergonomics we want to match:
 * The **OpenAI Agents SDK** quickstart runs `run(agent, input)` (JS) /
   `Runner.run(agent, input)` (Python) with no explicit session in the happy path,
   and returns `result.finalOutput` / `result.final_output`.
-* The **codex** agents SDK follows the same shape: create an agent, call `run`
-  with input, get a result.
+* Hosted agent SDKs follow the same shape: create an agent, call `run` with
+  input, get a result — no session plumbing in the happy path.
 
 ## Decision
 

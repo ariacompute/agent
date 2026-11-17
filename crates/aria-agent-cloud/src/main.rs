@@ -1,171 +1,10 @@
-//! `aria-agent` binary — CLI parsing, process startup and the codex sandbox
-//! backend. All request handling, storage and upgrade logic lives in the
-//! library (`aria_agent_cloud`).
+//! `aria-agent` binary — CLI parsing and process startup. All request handling,
+//! storage, plugin assembly and upgrade logic lives in the library
+//! (`aria_agent_cloud`).
 //!
 //! This file is **excluded from the coverage gate**: it is the process entry
-//! point (`main` / `run` / `cmd_*`), signal/stdio interaction and the
-//! external-process sandbox seam, none of which can be exercised in-process.
-
-mod codex_sandbox {
-    use agent_sandbox::{ExecOutput, ExecSpec, Sandbox, SandboxError, SandboxHandle};
-    use async_trait::async_trait;
-    use codex_protocol::config_types::WindowsSandboxLevel;
-    use codex_protocol::models::PermissionProfile;
-    use codex_sandboxing::spawn_process;
-    use codex_sandboxing::SandboxCommand;
-    use codex_sandboxing::SandboxManager;
-    use codex_sandboxing::SandboxTransformRequest;
-    use codex_sandboxing::SandboxType;
-    use codex_utils_absolute_path::AbsolutePathBuf;
-    use codex_utils_path_uri::PathUri;
-    use codex_utils_pty::ChildFds;
-    use std::collections::HashMap;
-    use std::convert::TryFrom;
-    use std::ffi::OsString;
-
-    /// Deep codex integration (ADR-0005 §Decision): the codex-backed sandbox
-    /// backend. Lives in this `publish = false` runtime on purpose — it depends
-    /// on codex's git-only crates, which crates.io cannot resolve.
-    pub struct CodexSandbox;
-
-    impl CodexSandbox {
-        pub fn new() -> Self {
-            Self
-        }
-    }
-
-    impl Default for CodexSandbox {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    #[async_trait]
-    impl Sandbox for CodexSandbox {
-        async fn spawn(&self, _spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
-            Ok(SandboxHandle { id: "codex".into() })
-        }
-
-        async fn exec(
-            &self,
-            _handle: &SandboxHandle,
-            cmd: &[String],
-        ) -> Result<ExecOutput, SandboxError> {
-            if cmd.is_empty() {
-                return Err(SandboxError::Exec("empty command".into()));
-            }
-            run_via_codex(cmd).await
-        }
-
-        async fn destroy(&self, _handle: SandboxHandle) -> Result<(), SandboxError> {
-            Ok(())
-        }
-    }
-
-    /// Run `cmd` through codex's `SandboxManager` and capture its output.
-    async fn run_via_codex(cmd: &[String]) -> Result<ExecOutput, SandboxError> {
-        let cwd = std::env::current_dir().map_err(|e| SandboxError::Exec(e.to_string()))?;
-        let abs = AbsolutePathBuf::try_from(cwd.as_path())
-            .map_err(|_| SandboxError::Exec("current dir is not absolute".into()))?;
-        let uri = PathUri::from_abs_path(&abs);
-
-        let (program, args) = cmd
-            .split_first()
-            .expect("non-empty command checked by caller");
-        let command = SandboxCommand {
-            program: OsString::from(program.as_str()),
-            args: args.to_vec(),
-            cwd: uri.clone(),
-            env: HashMap::new(),
-            managed_network: None,
-            additional_permissions: None,
-        };
-
-        let request = SandboxManager::new()
-            .transform(SandboxTransformRequest {
-                command,
-                permissions: &PermissionProfile::default(),
-                // Default profile has no symbolic `:workspace_roots` rules to bind.
-                workspace_roots: None,
-                sandbox: SandboxType::None,
-                enforce_managed_network: false,
-                environment_id: None,
-                network: None,
-                sandbox_policy_cwd: &uri,
-                sandbox_exe: None,
-                use_legacy_landlock: false,
-                windows_sandbox_level: WindowsSandboxLevel::default(),
-            })
-            .map_err(|e| SandboxError::Exec(e.to_string()))?;
-
-        let mut spawned = spawn_process(codex_sandboxing::SpawnRequest {
-            command: &request.command,
-            cwd: request
-                .cwd
-                .to_abs_path()
-                .map_err(|e| SandboxError::Exec(e.to_string()))?
-                .as_path(),
-            env: &request.env,
-            arg0: &request.arg0,
-            sandbox: request.sandbox,
-            windows_sandbox: None,
-            tty: false,
-            stdin_open: false,
-            inherited_fds: ChildFds::Inherited(&[]),
-        })
-        .await
-        .map_err(|e| SandboxError::Exec(e.to_string()))?;
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        while let Some(chunk) = spawned.stdout_rx.recv().await {
-            stdout.extend_from_slice(&chunk);
-        }
-        while let Some(chunk) = spawned.stderr_rx.recv().await {
-            stderr.extend_from_slice(&chunk);
-        }
-        let exit_code = spawned.exit_rx.await.unwrap_or(-1);
-        Ok(ExecOutput {
-            exit_code,
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
-        })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[tokio::test]
-        async fn codex_sandbox_exec_runs_command_through_codex_manager() {
-            // Exercises the deep codex integration (ADR-0005): the command is run
-            // via codex's `SandboxManager`, not a bespoke CLI seam.
-            let sandbox = CodexSandbox::new();
-            let handle = sandbox
-                .spawn(&ExecSpec::command(vec!["echo".into(), "hi".into()]))
-                .await
-                .unwrap();
-            let out = sandbox
-                .exec(&handle, &["echo".into(), "codex-sandbox".into()])
-                .await
-                .expect("codex SandboxManager spawn must succeed");
-            assert!(out.stdout.contains("codex-sandbox"));
-            assert_eq!(out.exit_code, 0);
-            sandbox.destroy(handle).await.unwrap();
-        }
-
-        #[tokio::test]
-        async fn codex_sandbox_rejects_empty_command() {
-            let sandbox = CodexSandbox::new();
-            let handle = sandbox
-                .spawn(&ExecSpec::command(vec!["true".into()]))
-                .await
-                .unwrap();
-            let res = sandbox.exec(&handle, &[]).await;
-            assert!(matches!(res, Err(SandboxError::Exec(_))));
-        }
-    }
-}
+//! point (`main` / `run` / `cmd_*`) and signal/stdio interaction, neither of
+//! which can be exercised in-process.
 
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
@@ -390,9 +229,10 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Real model for production; tests inject a stub via `make_model`.
     let make_model: aria_agent_cloud::MakeModel =
         Arc::new(|| Box::new(OpenAiModel::new(DEFAULT_MODEL)) as Box<dyn ModelClient>);
-    // Tool execution goes through codex's real `SandboxManager` (ADR-0005).
+    // Tool execution goes through the pluggable sandbox seam. Docker is the
+    // default backend (ADR-0003); the run body may still select kata/cube/browser.
     let make_sandbox: aria_agent_cloud::MakeSandbox =
-        Arc::new(|| Arc::new(codex_sandbox::CodexSandbox::new()) as Arc<dyn Sandbox>);
+        Arc::new(|| Arc::new(agent_sandbox::DockerSandbox::new()) as Arc<dyn Sandbox>);
     // Tenant-scoped Postgres context stores.
     let context_pool = pool.clone();
     let make_context: aria_agent_cloud::MakeContext = Arc::new(move |p| {
@@ -400,11 +240,19 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             as Arc<dyn agent_core::context::ContextStore>
     });
 
+    // One Postgres store implements the metadata, team and schedule seams; each
+    // table is `principal_id`-scoped, so no extra wiring is needed here.
     let pg = Arc::new(PgStore::new(pool));
+    let teams: Arc<dyn aria_agent_orchestrator::teams::TeamStore> = pg.clone();
+    let schedule: Arc<dyn agent_core::seams::ScheduleSeam> = pg.clone();
+    let titles: Arc<dyn aria_agent_cloud::store::TitleStore> = pg.clone();
     let state = AppState {
         agents: pg.clone(),
         sessions: pg.clone(),
         keys: pg,
+        teams,
+        schedule,
+        titles,
         key_cache,
         make_model,
         make_sandbox,

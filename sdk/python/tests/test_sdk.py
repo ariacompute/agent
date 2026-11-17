@@ -154,6 +154,82 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(result.turn_id, "turn_1")
         self.assertEqual(result.to_input_list()[0]["content"], "Rome?")
 
+    def test_run_streamed_collects_usage_and_approvals(self):
+        frames = [
+            {"type": "agent.turn.created", "turn_id": "turn_9", "sequence_number": 1},
+            {
+                "type": "agent.turn.approval.requested",
+                "approval_id": "call_1",
+                "tool": "shell",
+                "sequence_number": 2,
+            },
+            {
+                "type": "agent.turn.approval.resolved",
+                "approval_id": "call_1",
+                "tool": "shell",
+                "decision": "unavailable",
+                "reason": "no approval provider configured",
+                "sequence_number": 3,
+            },
+            {
+                "type": "agent.turn.usage",
+                "usage": {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13},
+                "model": "gpt-4o-mini",
+                "sequence_number": 4,
+            },
+            {
+                "type": "agent.turn.completed",
+                "turn": {"id": "turn_9", "status": "completed", "output": "denied"},
+                "sequence_number": 5,
+            },
+        ]
+
+        def fake_request(client, method, path, body=None, stream=False):
+            if path.endswith("/v1/agents/sessions"):
+                return FakeResponse(json.dumps({"id": "sess_1"}).encode())
+            return FakeResponse(sse_payload(frames))
+
+        agent = Agent(name="tutor", client=ClientOptions(base_url="http://aria.test"))
+
+        async def main():
+            with mock.patch.object(transport, "_request", side_effect=fake_request):
+                streamed = await Runner.run_streamed(agent, "go")
+                seen = []
+                decisions = []
+                async for ev in streamed.events:
+                    seen.append(ev["type"])
+                    if ev["type"] == "agent.turn.approval.resolved":
+                        decisions.append(ev["decision"])
+                result = await streamed.completed
+            return seen, decisions, result
+
+        seen, decisions, result = asyncio.run(main())
+        self.assertIn("agent.turn.approval.requested", seen)
+        self.assertEqual(decisions, ["unavailable"])
+        self.assertIsNotNone(result.usage)
+        self.assertEqual(result.usage.input_tokens, 9)
+        self.assertEqual(result.usage.output_tokens, 4)
+        self.assertEqual(result.usage.total_tokens, 13)
+        self.assertEqual(result.usage.model, "gpt-4o-mini")
+
+    def test_a_stream_without_usage_reports_none(self):
+        def fake_request(client, method, path, body=None, stream=False):
+            if path.endswith("/v1/agents/sessions"):
+                return FakeResponse(json.dumps({"id": "sess_1"}).encode())
+            return FakeResponse(
+                sse_payload(
+                    [{"type": "agent.turn.output_text.done", "text": "hi", "sequence_number": 1}]
+                )
+            )
+
+        agent = Agent(name="tutor", client=ClientOptions(base_url="http://aria.test"))
+
+        async def main():
+            with mock.patch.object(transport, "_request", side_effect=fake_request):
+                return await (await Runner.run_streamed(agent, "go")).completed
+
+        self.assertIsNone(asyncio.run(main()).usage)
+
     def test_run_streamed_raises_on_failure(self):
         def fake_request(client, method, path, body=None, stream=False):
             if path.endswith("/v1/agents/sessions"):

@@ -11,15 +11,8 @@
 //! seam the rest of the platform depends on
 //! (see `docs/adr/0003-sandbox-providers.md`).
 //!
-//! The deep codex integration (ADR-0005 §Decision) — running tool commands
-//! through codex's real `SandboxManager` — lives in the `aria-agent-cloud`
-//! runtime crate (`publish = false`) as `codex_sandbox::CodexSandbox`. Keeping
-//! it out of this published crate avoids dragging codex's unpublished git
-//! dependencies into the crates.io manifest (crates.io requires every
-//! dependency to resolve from the registry). `SandboxProvider::Codex` remains a
-//! valid selector so config stays forward-compatible; `from_provider` returns
-//! [`SandboxError::NotConfigured`] for it and the cloud runtime injects the real
-//! backend via `agent_core::Agent::with_sandbox`.
+//! Providers implement the `sandbox` capability seam (ADR-0014) so tool families
+//! never depend on a concrete backend.
 
 use async_trait::async_trait;
 use bollard::container::{
@@ -217,24 +210,23 @@ pub enum SandboxProvider {
     Docker,
     Kata,
     Cube,
-    /// Deep codex integration: run tool commands through codex's `SandboxManager`
-    /// (ADR-0005). This is the production backend for the agent runtime.
-    Codex,
     /// Browser sandbox: the agent's tool calls are served by an embedded browser
     /// running in a dedicated container. The `BrowserSandbox` backend lives in the
-    /// `aria-agent-browser` crate (publish = false concerns aside, it is selected
-    /// by the cloud/FFI runtimes and injected via `Agent::with_handlers`), so
-    /// `from_provider` returns `NotConfigured` here — mirroring `Codex`.
+    /// `aria-agent-browser` crate and is selected by the cloud/FFI runtimes and
+    /// injected via `Agent::with_handlers`, so `from_provider` returns
+    /// `NotConfigured` here.
     Browser,
 }
 
 impl SandboxProvider {
+    /// Parse a provider selector. `codex` was removed (ADR-0018) and deliberately
+    /// returns `None` so a stale config fails loudly instead of silently falling
+    /// back to docker.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "docker" => Some(SandboxProvider::Docker),
             "kata" => Some(SandboxProvider::Kata),
             "cube" => Some(SandboxProvider::Cube),
-            "codex" => Some(SandboxProvider::Codex),
             "browser" => Some(SandboxProvider::Browser),
             _ => None,
         }
@@ -245,7 +237,6 @@ impl SandboxProvider {
             SandboxProvider::Docker => "docker",
             SandboxProvider::Kata => "kata",
             SandboxProvider::Cube => "cube",
-            SandboxProvider::Codex => "codex",
             SandboxProvider::Browser => "browser",
         }
     }
@@ -753,24 +744,15 @@ pub fn default_sandbox() -> Box<dyn Sandbox> {
 
 /// Build a sandbox from a provider selector (config-driven).
 ///
-/// Returns [`SandboxError::NotConfigured`] for [`SandboxProvider::Codex`]: the
-/// codex backend (`codex_sandbox::CodexSandbox`) is provided by the
-/// `aria-agent-cloud` runtime (publish = false) so the published SDK stays free
-/// of codex's unpublished git dependencies. The cloud runtime injects it via
-/// `agent_core::Agent::with_sandbox`.
+/// The browser backend lives in the `aria-agent-browser` crate; the cloud/FFI
+/// runtimes construct `BrowserSandbox` and inject it as a `ToolHandler` (via
+/// `Agent::with_handlers`) alongside the regular shell sandbox, so this function
+/// returns [`SandboxError::NotConfigured`] for it.
 pub fn from_provider(provider: SandboxProvider) -> Result<Box<dyn Sandbox>, SandboxError> {
     match provider {
         SandboxProvider::Docker => Ok(Box::new(DockerSandbox::new())),
         SandboxProvider::Kata => Ok(Box::new(KataSandbox::new())),
         SandboxProvider::Cube => Ok(Box::new(CubeSandbox::new())),
-        SandboxProvider::Codex => Err(SandboxError::NotConfigured(
-            "codex sandbox backend is provided by the aria-agent-cloud runtime; \
-             construct it there and inject via Agent::with_sandbox"
-                .into(),
-        )),
-        // The browser backend lives in the `aria-agent-browser` crate; the cloud/FFI
-        // runtimes construct `BrowserSandbox` and inject it as a `ToolHandler`
-        // (via `Agent::with_handlers`) alongside the regular shell sandbox.
         SandboxProvider::Browser => Err(SandboxError::NotConfigured(
             "browser sandbox backend is provided by the aria-agent-browser crate; \
              construct it and inject via Agent::with_handlers"
@@ -900,7 +882,6 @@ mod tests {
             SandboxProvider::Docker,
             SandboxProvider::Kata,
             SandboxProvider::Cube,
-            SandboxProvider::Codex,
         ] {
             let s = p.as_str();
             assert_eq!(SandboxProvider::parse(s), Some(p));
@@ -914,10 +895,8 @@ mod tests {
             Some(SandboxProvider::Docker)
         );
         assert_eq!(SandboxProvider::parse("Kata"), Some(SandboxProvider::Kata));
-        assert_eq!(
-            SandboxProvider::parse("codex"),
-            Some(SandboxProvider::Codex)
-        );
+        // `codex` was removed (ADR-0018): it must not resolve to a provider.
+        assert_eq!(SandboxProvider::parse("codex"), None);
         assert_eq!(SandboxProvider::parse("podman"), None);
         assert_eq!(SandboxProvider::parse(""), None);
     }
@@ -931,12 +910,6 @@ mod tests {
         ] {
             let _ = from_provider(p).expect("published provider must build");
         }
-        // `codex` is intentionally not constructible here (backend lives in the
-        // cloud runtime); the selector is still parsed/serialized for config compat.
-        assert!(matches!(
-            from_provider(SandboxProvider::Codex),
-            Err(SandboxError::NotConfigured(_))
-        ));
         let _ = CubeSandbox::new();
         let _ = KataSandbox::new();
     }
@@ -1094,12 +1067,11 @@ mod tests {
             SandboxProvider::Docker,
             SandboxProvider::Kata,
             SandboxProvider::Cube,
-            SandboxProvider::Codex,
             SandboxProvider::Browser,
         ] {
             assert_eq!(SandboxProvider::parse(p.as_str()), Some(p));
         }
-        // Browser and codex are out-of-crate backends: selectable, not buildable.
+        // Browser is an out-of-crate backend: selectable, not buildable.
         assert!(matches!(
             from_provider(SandboxProvider::Browser),
             Err(SandboxError::NotConfigured(msg)) if msg.contains("browser")

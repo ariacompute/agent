@@ -48,6 +48,7 @@ from .types import (
     HistoryItem,
     RunResult,
     StreamedRunResult,
+    TokenUsage,
     ToolSpec,
 )
 
@@ -66,6 +67,7 @@ __all__ = [
     "HistoryInput",
     "RunResult",
     "StreamedRunResult",
+    "TokenUsage",
     "ToolSpec",
     "AriaError",
     "AriaErrorKind",

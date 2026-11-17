@@ -1,9 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/aria-agent-plugin",
     "crates/aria-agent-memo",
     "crates/aria-agent-sandbox",
     "crates/aria-agent-core",
+    "crates/aria-agent-tools",
+    "crates/aria-agent-orchestrator",
     "crates/aria-agent-browser",
     "crates/ariacompute-agent",
     "crates/aria-agent-cloud",
@@ -11,16 +14,10 @@ members = [
     "tests",
 ]
 
-# codex is consumed as a git submodule (see .gitmodules). We intentionally do
-# NOT pull codex-rs into this workspace as a member; our crates reference the
-# codex harness/sandbox/memories through the documented integration seam in
-# `agent-core` / `agent-sandbox` / `agent-memo` (see docs/adr/*).
-
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/openai/codex"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -33,17 +30,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cross-cutting crates (path deps within this workspace)
+aria-agent-plugin = { path = "crates/aria-agent-plugin" }
 aria-agent-memo = { path = "crates/aria-agent-memo" }
 aria-agent-sandbox = { path = "crates/aria-agent-sandbox" }
 aria-agent-core = { path = "crates/aria-agent-core" }
+aria-agent-tools = { path = "crates/aria-agent-tools" }
+aria-agent-orchestrator = { path = "crates/aria-agent-orchestrator" }
 aria-agent-browser = { path = "crates/aria-agent-browser", version = "0.1.0" }
 
 [profile.release]
 opt-level = 2
-
-# Replay codex-rs's crates.io forks so the `rama-*` proxy stack (pulled in via
-# `codex-network-proxy`) resolves to the same sources codex pins in its lockfile.
-# Required for the deep codex integration (ADR-0005 §Decision).
-[patch.crates-io]
-tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

@@ -104,10 +104,7 @@ impl ModelClient for ToolCallModel {
         _tools: &[agent_core::Tool],
     ) -> Result<agent_core::ModelTurn, CoreError> {
         if req.context.contains("TOOL_RESULT") {
-            Ok(agent_core::ModelTurn {
-                text: "done after tool".into(),
-                tool_calls: Vec::new(),
-            })
+            Ok(agent_core::ModelTurn::reply("done after tool"))
         } else {
             Ok(agent_core::ModelTurn {
                 text: String::new(),
@@ -116,6 +113,7 @@ impl ModelClient for ToolCallModel {
                     name: "shell".into(),
                     arguments: json!({"command": ["echo", "hi"]}),
                 }],
+                usage: None,
             })
         }
     }
@@ -148,7 +146,10 @@ pub fn harness_with(
     let state = AppState {
         agents: mem.clone(),
         sessions: mem.clone(),
-        keys: mem,
+        keys: mem.clone(),
+        teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+        schedule: Arc::new(aria_agent_orchestrator::MemorySchedule::new()),
+        titles: mem.clone(),
         key_cache: KeyCache::new(Duration::from_secs(60)),
         make_model,
         make_sandbox,
@@ -181,7 +182,10 @@ pub fn harness_with_context(fail_recall: bool, fail_relations: bool) -> Harness 
     let state = AppState {
         agents: mem.clone(),
         sessions: mem.clone(),
-        keys: mem,
+        keys: mem.clone(),
+        teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+        schedule: Arc::new(aria_agent_orchestrator::MemorySchedule::new()),
+        titles: mem.clone(),
         key_cache: KeyCache::new(Duration::from_secs(60)),
         make_model,
         make_sandbox,
@@ -1284,20 +1288,27 @@ async fn every_sandbox_provider_builds_and_unknown_is_rejected() {
     let _env = env_admin().await;
     let h = harness();
     let principal = Principal::admin();
-    for provider in ["codex", "browser", "docker", "kata", "cube"] {
+    for provider in ["browser", "docker", "kata", "cube"] {
         let mut cfg = crate::app::agent_config("a", "", "s");
         cfg.sandbox_provider = provider.into();
         if let Err(e) = crate::app::build_agent_with_config(&h.state, cfg, &principal).await {
             panic!("{provider} should build: {e:?}");
         }
     }
-    let mut bad = crate::app::agent_config("a", "", "s");
-    bad.sandbox_provider = "nope".into();
-    assert!(
-        crate::app::build_agent_with_config(&h.state, bad, &principal)
-            .await
-            .is_err()
-    );
+    // The codex backend was removed (ADR-0018): selecting it must fail loudly
+    // instead of silently falling back to docker.
+    for bad in ["nope", "codex"] {
+        let mut cfg = crate::app::agent_config("a", "", "s");
+        cfg.sandbox_provider = bad.into();
+        let err = match crate::app::build_agent_with_config(&h.state, cfg, &principal).await {
+            Ok(_) => panic!("{bad} provider must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:?}").contains("unknown sandbox"),
+            "{bad} should report unknown sandbox, got {err:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1858,6 +1869,9 @@ mod faulty {
             agents: broken.clone(),
             sessions: broken.clone(),
             keys: broken,
+            teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+            schedule: Arc::new(aria_agent_orchestrator::MemorySchedule::new()),
+            titles: mem.clone(),
             key_cache: KeyCache::new(Duration::from_secs(60)),
             make_model,
             make_sandbox,
@@ -1946,6 +1960,9 @@ pub fn harness_with_session_failure(fail: &'static [&'static str]) -> Harness {
         agents: flaky.clone(),
         sessions: flaky.clone(),
         keys: flaky,
+        teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+        schedule: Arc::new(aria_agent_orchestrator::MemorySchedule::new()),
+        titles: mem.clone(),
         key_cache: KeyCache::new(Duration::from_secs(60)),
         make_model: Arc::new(|| Box::new(StubModel::new("agent"))),
         make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
@@ -2298,4 +2315,445 @@ fn store_scope_string_helpers() {
     assert_eq!(scopes_to_string(ApiKeyScopes::all()), "admin,read,write");
     assert_eq!(scopes_from_string("read,,write,"), vec!["read", "write"]);
     assert!(scopes_from_string("").is_empty());
+}
+// ------------------------------------------------- orchestration HTTP surface
+
+#[tokio::test]
+async fn agent_teams_are_dependency_gated_over_http() {
+    let _env = env_admin().await;
+    let h = harness();
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/v1/agent-teams",
+        Some(ADMIN_KEY),
+        Some(json!({
+            "name": "release",
+            "tasks": [
+                {"title": "spec"},
+                {"title": "impl", "depends_on": ["t1"]}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let team = body["id"].as_str().expect("team id").to_string();
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["done"], 0);
+
+    // `impl` waits for `spec`.
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        &format!("/v1/agent-teams/{team}/tasks/t2/claim"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        &format!("/v1/agent-teams/{team}/tasks/t1/claim"),
+        Some(ADMIN_KEY),
+        Some(json!({"worker": "w1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["tasks"][0]["state"], "claimed");
+    assert_eq!(body["tasks"][0]["claimed_by"], "w1");
+
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        &format!("/v1/agent-teams/{team}/tasks/t1/complete"),
+        Some(ADMIN_KEY),
+        Some(json!({"result": "spec ok"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["done"], 1);
+
+    let (status, body) = send(&h.app, "GET", "/v1/agent-teams", Some(ADMIN_KEY), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"].as_array().expect("data").len(), 1);
+
+    let (status, body) = send(
+        &h.app,
+        "GET",
+        "/v1/agent-teams/missing",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // A cyclic DAG is refused before it is stored.
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/v1/agent-teams",
+        Some(ADMIN_KEY),
+        Some(json!({
+            "name": "broken",
+            "tasks": [
+                {"id": "a", "title": "a", "depends_on": ["b"]},
+                {"id": "b", "title": "b", "depends_on": ["a"]}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn scheduled_jobs_round_trip_and_validate_their_trigger() {
+    let _env = env_admin().await;
+    let h = harness();
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/v1/scheduled-jobs",
+        Some(ADMIN_KEY),
+        Some(json!({"name": "daily", "every_secs": 60, "payload": {"prompt": "hi"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_str().expect("job id").to_string();
+    assert_eq!(body["every_secs"], 60);
+    assert!(body["next_run_ms"].as_i64().expect("next run") > 0);
+
+    for bad in [
+        json!({"name": "neither"}),
+        json!({"name": "both", "every_secs": 5, "at_ms": 10}),
+    ] {
+        let (status, body) = send(
+            &h.app,
+            "POST",
+            "/v1/scheduled-jobs",
+            Some(ADMIN_KEY),
+            Some(bad),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    let (status, body) = send(&h.app, "GET", "/v1/scheduled-jobs", Some(ADMIN_KEY), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"].as_array().expect("data").len(), 1);
+
+    let (status, body) = send(
+        &h.app,
+        "DELETE",
+        &format!("/v1/scheduled-jobs/{id}"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = send(
+        &h.app,
+        "DELETE",
+        &format!("/v1/scheduled-jobs/{id}"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ------------------------------------------------------- session title projection
+
+#[tokio::test]
+async fn session_title_is_projected_from_the_event_stream() {
+    let _env = env_admin().await;
+    let h = harness();
+    let agent_id = create_agent(&h, "titler").await;
+    let session = create_session(&h, &agent_id).await;
+
+    // No turn yet: the title is absent, not invented.
+    let (status, body) = send(
+        &h.app,
+        "GET",
+        &format!("/v1/agents/sessions/{session}/title"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let input = "Explain the plugin registry in detail";
+    let (status, _) = send_bytes(
+        &h.app,
+        "POST",
+        &format!("/v1/agents/sessions/{session}/events/stream"),
+        Some(ADMIN_KEY),
+        Some(json!({"input": input})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        &h.app,
+        "GET",
+        &format!("/v1/agents/sessions/{session}/title"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["object"], "agent.session.title");
+    assert_eq!(body["session_id"], session.clone());
+    assert_eq!(body["title"], input);
+    assert_eq!(body["source"], "first_prompt");
+    assert!(body["updated_at"].as_i64().expect("updated_at") > 0);
+
+    // A second turn does not overwrite the deterministic title.
+    let (status, _) = send_bytes(
+        &h.app,
+        "POST",
+        &format!("/v1/agents/sessions/{session}/events/stream"),
+        Some(ADMIN_KEY),
+        Some(json!({"input": "and the seams?"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(
+        &h.app,
+        "GET",
+        &format!("/v1/agents/sessions/{session}/title"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["title"], input);
+
+    // Unknown sessions are a 404 rather than a leaked title.
+    let (status, _) = send(
+        &h.app,
+        "GET",
+        "/v1/agents/sessions/sess-missing/title",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ------------------------------------------------------------- cloud subagents
+
+#[tokio::test]
+async fn cloud_subagents_run_a_child_agent_in_its_own_session() {
+    let _env = env_admin().await;
+    let h = harness();
+    let principal = Principal::admin();
+    let agent = crate::app::build_agent_with_config(
+        &h.state,
+        crate::app::agent_config("parent", "you are a parent", "sess-sub"),
+        &principal,
+    )
+    .await
+    .expect("parent agent");
+
+    // The family is offered to the model ...
+    assert!(
+        agent.tools().iter().any(|t| t.name == "subagent_run"),
+        "subagent tools must be registered"
+    );
+
+    // ... and the handler really runs a child agent in a namespaced session.
+    let handler = agent
+        .handlers()
+        .iter()
+        .find(|hd| hd.handles("subagent_run"))
+        .expect("subagent handler")
+        .clone();
+    let ctx = agent.context();
+    let run = handler
+        .run(
+            &agent_core::ToolCall {
+                id: "call-sub".into(),
+                name: "subagent_run".into(),
+                arguments: json!({"task": "summarise the repo"}),
+            },
+            &ctx,
+            "sess-sub",
+        )
+        .await;
+    assert!(!run.is_error, "{}", run.content);
+    assert!(run.content.contains("::sub::"), "{}", run.content);
+    assert!(
+        run.content.contains("summarise the repo"),
+        "{}",
+        run.content
+    );
+
+    let listed = handler
+        .run(
+            &agent_core::ToolCall {
+                id: "call-list".into(),
+                name: "subagent_list".into(),
+                arguments: json!({}),
+            },
+            &ctx,
+            "sess-sub",
+        )
+        .await;
+    assert!(!listed.is_error, "{}", listed.content);
+    assert!(
+        listed.content.contains("sess-sub::sub::"),
+        "{}",
+        listed.content
+    );
+}
+
+#[tokio::test]
+async fn a_child_agent_is_built_without_the_subagent_family() {
+    let _env = env_admin().await;
+    let h = harness();
+    let principal = Principal::admin();
+    // Depth one: the child build drops the family, so delegation cannot recurse.
+    let child = crate::app::build_agent_inner(
+        &h.state,
+        crate::app::agent_config("child", "you are a child", "parent::sub::c1"),
+        &principal,
+        false,
+    )
+    .await
+    .expect("child agent");
+
+    assert!(
+        !child.tools().iter().any(|t| t.name == "subagent_run"),
+        "a child must not be offered subagent tools"
+    );
+    assert!(!child.handlers().iter().any(|hd| hd.handles("subagent_run")));
+    // Teams and schedules stay available one level down.
+    assert!(child.tools().iter().any(|t| t.name == "team_create"));
+}
+
+#[tokio::test]
+async fn a_child_session_title_is_readable_through_its_parent() {
+    let _env = env_admin().await;
+    let h = harness();
+    let agent_id = create_agent(&h, "delegator").await;
+    let session = create_session(&h, &agent_id).await;
+    let principal = Principal::admin();
+    let agent =
+        crate::app::build_agent(&h.state, "delegator", "you delegate", &session, &principal)
+            .await
+            .expect("parent agent");
+
+    // Delegate once: the child runs `run()` on a namespaced session, which now
+    // records a `title_set` like the streaming loop does.
+    let handler = agent
+        .handlers()
+        .iter()
+        .find(|hd| hd.handles("subagent_run"))
+        .expect("subagent handler")
+        .clone();
+    let ctx = agent.context();
+    let run = handler
+        .run(
+            &agent_core::ToolCall {
+                id: "call-sub".into(),
+                name: "subagent_run".into(),
+                arguments: json!({"task": "summarise the repo"}),
+            },
+            &ctx,
+            &session,
+        )
+        .await;
+    assert!(!run.is_error, "{}", run.content);
+    let child = run
+        .content
+        .lines()
+        .next()
+        .and_then(|line| line.split("(session ").nth(1))
+        .and_then(|rest| rest.split(')').next())
+        .expect("child session id in the tool output")
+        .to_string();
+    assert!(child.starts_with(&format!("{session}::sub::")), "{child}");
+
+    let (status, body) = send(
+        &h.app,
+        "GET",
+        &format!("/v1/agents/sessions/{child}/title"),
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["session_id"], child.clone());
+    // The child's title is its task — the deterministic first prompt.
+    assert_eq!(body["title"], "summarise the repo");
+    assert_eq!(body["source"], "first_prompt");
+
+    // A child of a session nobody owns stays invisible.
+    let (status, _) = send(
+        &h.app,
+        "GET",
+        "/v1/agents/sessions/sess-missing::sub::c1/title",
+        Some(ADMIN_KEY),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn child_session_visibility_follows_the_parent_tenant() {
+    let _env = env_admin().await;
+    let h = harness();
+    let owner = Principal {
+        id: "tenant-a".into(),
+        kind: PrincipalKind::User,
+        scopes: ApiKeyScopes::read_write(),
+    };
+    let other = Principal {
+        id: "tenant-b".into(),
+        kind: PrincipalKind::User,
+        scopes: ApiKeyScopes::read_write(),
+    };
+    h.state
+        .sessions
+        .insert_session(
+            &owner,
+            &crate::store::SessionRow {
+                id: "sess-a".into(),
+                principal_id: owner.id.clone(),
+                agent_id: "agent-a".into(),
+                instructions: None,
+                status: "idle".into(),
+                created_at: 1,
+            },
+        )
+        .await
+        .expect("session inserted");
+
+    // Own child, and a grandchild (walks up twice).
+    for child in ["sess-a::sub::c1", "sess-a::sub::c1::sub::c2"] {
+        assert!(
+            crate::api::sessions::ensure_session_visible(&h.state, &owner, child)
+                .await
+                .is_ok(),
+            "{child} should be visible to its parent's tenant"
+        );
+    }
+    // Another tenant sees neither the root nor its children.
+    for id in ["sess-a", "sess-a::sub::c1"] {
+        assert!(
+            matches!(
+                crate::api::sessions::ensure_session_visible(&h.state, &other, id).await,
+                Err(crate::AppError::NotFound)
+            ),
+            "{id} must not leak across tenants"
+        );
+    }
+    // An unknown root is a 404 even though it looks like a parent.
+    assert!(matches!(
+        crate::api::sessions::ensure_session_visible(&h.state, &owner, "ghost::sub::c1").await,
+        Err(crate::AppError::NotFound)
+    ));
 }

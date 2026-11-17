@@ -2,10 +2,13 @@
 
 Six modules compose the agent platform. Each maps to a crate/deliverable.
 
-## 1. codex submodule
-* `https://github.com/openai/codex.git` is a git submodule at `codex/`.
-* Pinned to a stable release tag (not `main`) for reproducibility.
-* Not a Cargo workspace member; our crates reference codex's shapes by design.
+## 1. Plugin registry & capability seams
+* Every capability is a seam (`llm`, `sandbox`, `fs`, `shell`, `jobs`, `storage`,
+  `sessionPersistence`, `sessionQuery`, `approvals`, `skills`, `web`,
+  `userQuestions`, `subagents`, `schedule`) with a default provider.
+* `aria-agent-plugin` assembles providers from `PluginManifest`s: one provider per
+  `core` key, topo-sorted `requires`, duplicate/cycle detection, frozen snapshot.
+* Any assembly failure is a boot error (`PluginError`), never a runtime surprise.
 
 ## 2. Agents Cloud API (Rust + Postgres + pgvector)
 * axum HTTP service exposing the **OpenAI beta Agents** resource surface:
@@ -74,13 +77,12 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   覆盖正常 + 异常路径；不改 `event_envelope.rs`（冻结 SSE 契约），不引入 memo
   记忆内部实现。
 
-## 4. Pluggable Sandbox (docker / kata / cubesandbox / codex / browser)
+## 4. Pluggable Sandbox (docker / kata / cubesandbox / browser)
 * `Sandbox` trait (`spawn` / `exec` / `destroy`) with `ExecSpec` / `ExecOutput`
-  mirroring codex's `sandboxing`.
+  (argv-only commands, resource limits).
 * Providers: `DockerSandbox` (default), `KataSandbox`, `CubeSandbox`;
-  config-driven selection.
-* **`CodexSandbox`** is provided by the `aria-agent-cloud` runtime (ADR-0005) and
-  is the backend the cloud selects for agentic tool execution.
+  config-driven selection. An unknown provider is a hard configuration error
+  (ADR-0018).
 * **Browser sandbox** (`aria-agent-browser`): reuses the same Docker/Kata
   container path and `SandboxResourceLimits` via a `BrowserSandbox` that
   implements both `Sandbox` and `BrowserEngine`. A `BrowserCatalog` registers six

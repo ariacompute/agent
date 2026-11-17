@@ -1,13 +1,14 @@
 # Agent platform task runner.
 # Usage: just <recipe>
 
-# Initialize the codex submodule (shallow) if not present.
-init:
-    git submodule update --init --depth 1 codex
-
 # Build all rust crates.
 build:
     cargo build --workspace
+
+# Full pre-merge gate: build + clippy + tests.
+check: build
+    cargo clippy --workspace --all-targets
+    cargo test --workspace
 
 # Run all rust tests.
 test:

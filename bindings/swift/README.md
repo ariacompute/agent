@@ -44,7 +44,11 @@ let agent = try createAgentWith(config: SdkAgentConfig(
         localDbPath: "~/.ariacompute/memo.db", // aria memo
         cloudBaseUrl: "http://localhost:3000",
         cloudApiKey: ""
-    )
+    ),
+    // Permission preset: read_only | workspace_write | danger_full_access.
+    permissionPreset: "workspace_write",
+    // Approval mode: auto (trusted local run) | deny (fail-closed).
+    approvalMode: "auto"
 ))
 let session = agent.session()
 try session.memorize(key: "user_name", value: "Ada", backend: nil)   // both

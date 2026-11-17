@@ -1,0 +1,12 @@
+[package]
+name = "aria-agent-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Capability-seam plugin kernel: manifests, roles, registry assembly with fail-closed validation."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -2,7 +2,7 @@
 //!
 //! This crate compiles to a native `cdylib` (`libaria-agent_ffi`) that Swift and
 //! Kotlin consume through generated bindings (see `just ffi`). It wraps
-//! `agent-core` (the codex-harness runtime) and `agent-memo`, exposing a small,
+//! `agent-core` (the agent runtime) and `agent-memo`, exposing a small,
 //! stable surface: [`SdkAgent`] and [`SdkSession`].
 //!
 //! FFI boundary stability rule (docs/adr/0002-ffi-boundary.md): any change here
@@ -16,9 +16,10 @@ use agent_browser::{BrowserCatalog, BrowserSandbox, BrowserToolHandler};
 use agent_core::context::{
     CompositeContextStore, ContextFragment, ContextStore, FragmentKind, MemoryBackend,
 };
-use agent_core::{memo_tools, Agent, AgentConfig, AgentEvent, MemoToolHandler, Tool, ToolHandler};
+use agent_core::{Agent, AgentConfig, AgentEvent, Tool, ToolHandler};
 use agent_memo::MemoContextStore;
 use agent_sandbox::DockerSandbox;
+use aria_agent_tools::{memo_tools, MemoToolHandler};
 use futures::StreamExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,6 +83,11 @@ pub struct SdkAgentConfig {
     pub model: String,
     pub sandbox_provider: String,
     pub memory: SdkMemoryConfig,
+    /// `read_only` | `workspace_write` | `danger_full_access` (default
+    /// `workspace_write`, the trusted-local preset).
+    pub permission_preset: String,
+    /// `auto` (default, trusted local run) | `deny` (fail-closed).
+    pub approval_mode: String,
 }
 
 impl Default for SdkAgentConfig {
@@ -92,6 +98,8 @@ impl Default for SdkAgentConfig {
             sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
             memory: SdkMemoryConfig::default(),
+            permission_preset: "workspace_write".to_string(),
+            approval_mode: "auto".to_string(),
         }
     }
 }
@@ -313,12 +321,18 @@ fn pick_default(
 }
 
 /// Build an [`SdkAgent`] with an auto-assigned, isolated session scope.
+///
+/// `permission_preset` / `approval_mode` come from [`SdkAgentConfig`]; the
+/// quickstart entries keep the trusted-local defaults (`workspace_write` +
+/// `auto`), since a headless FFI caller cannot answer an approval prompt.
 fn make_agent(
     agent_name: String,
     instructions: String,
     model: String,
     sandbox_provider: String,
     memory: SdkMemoryConfig,
+    permission_preset: String,
+    approval_mode: String,
 ) -> Result<Arc<SdkAgent>, SdkError> {
     let (context, local, cloud, backend) = build_stores(&memory)?;
 
@@ -332,6 +346,12 @@ fn make_agent(
         instructions: instructions.clone(),
         memory_graph: true,
         memory_compact_threshold: 32,
+        // On-device SDK: the user runs the agent locally, so mutating tools are
+        // approved by the trusted-local preset instead of an interactive broker
+        // (which a headless FFI caller cannot provide). ADR-0016.
+        approval_mode,
+        permission_preset,
+        ..AgentConfig::default()
     };
 
     // Always wire the long-term-memory tool family as a `ToolHandler` so the agent
@@ -369,12 +389,15 @@ fn make_agent(
 /// (aria memo). Streaming is via [`SdkAgent::run_stream`].
 #[uniffi::export]
 pub fn create_agent(agent_name: String, model: String) -> Result<Arc<SdkAgent>, SdkError> {
+    let defaults = SdkAgentConfig::default();
     make_agent(
         agent_name,
         String::new(),
         model,
         "docker".to_string(),
         SdkMemoryConfig::default(),
+        defaults.permission_preset,
+        defaults.approval_mode,
     )
 }
 
@@ -388,6 +411,8 @@ pub fn create_agent_with(config: SdkAgentConfig) -> Result<Arc<SdkAgent>, SdkErr
         config.model,
         config.sandbox_provider,
         config.memory,
+        config.permission_preset,
+        config.approval_mode,
     )
 }
 
@@ -401,12 +426,15 @@ pub fn create_agent_for_tenant(
     model: String,
 ) -> Result<Arc<SdkAgent>, SdkError> {
     let memory = tenant_memory(&tenant_id, SdkMemoryConfig::default());
+    let defaults = SdkAgentConfig::default();
     make_agent(
         agent_name,
         String::new(),
         model,
         "docker".to_string(),
         memory,
+        defaults.permission_preset,
+        defaults.approval_mode,
     )
 }
 
@@ -423,6 +451,8 @@ pub fn create_agent_for_tenant_with(
         config.model,
         config.sandbox_provider,
         memory,
+        config.permission_preset,
+        config.approval_mode,
     )
 }
 
@@ -463,6 +493,19 @@ pub enum SdkStreamEvent {
         name: String,
         arguments: String,
         result: Option<String>,
+    },
+    /// An approval decision for a tool call (`allow` / `deny` / `unavailable`).
+    Approval {
+        id: String,
+        tool: String,
+        decision: String,
+        reason: Option<String>,
+    },
+    /// Token accounting for one model call.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        model: String,
     },
     /// Terminal event carrying the full final reply.
     Done { text: String },
@@ -523,6 +566,26 @@ pub fn map_event(ev: &AgentEvent) -> SdkStreamEvent {
             name: name.clone(),
             arguments: serde_json::to_string(arguments).unwrap_or_default(),
             result: Some(result.content.clone()),
+        },
+        AgentEvent::Approval {
+            id,
+            tool,
+            decision,
+            reason,
+        } => SdkStreamEvent::Approval {
+            id: id.clone(),
+            tool: tool.clone(),
+            decision: decision.clone(),
+            reason: reason.clone(),
+        },
+        AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            model,
+        } => SdkStreamEvent::Usage {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+            model: model.clone(),
         },
         AgentEvent::Done { text } => SdkStreamEvent::Done { text: text.clone() },
     }
@@ -893,6 +956,7 @@ mod tests {
                 local_db_path: dir.join("t2.db").to_string_lossy().into_owned(),
                 ..SdkMemoryConfig::default()
             },
+            ..SdkAgentConfig::default()
         };
         let agent = create_agent_for_tenant_with("acme".into(), config).unwrap();
         assert_eq!(agent.memory_backend(), "local");
@@ -1198,10 +1262,15 @@ mod tests {
             model: "gpt-test".into(),
             sandbox_provider: "browser".into(),
             memory: SdkMemoryConfig::default(),
+            permission_preset: "read_only".into(),
+            approval_mode: "deny".into(),
         };
         let agent = create_agent_with(config).unwrap();
         assert_eq!(agent.memory_backend(), "local");
         assert!(agent.session_id().starts_with("sess-"));
+        // The tightened preset reaches the core config (fail-closed by default).
+        assert_eq!(agent.inner.config().permission_preset, "read_only");
+        assert_eq!(agent.inner.config().approval_mode, "deny");
     }
 
     #[test]
@@ -1230,10 +1299,11 @@ mod tests {
 /// growth. Mirrors the SDK's default config (`memory_graph = true`, threshold 32).
 #[cfg(test)]
 mod memo_integration_tests {
+    use crate::MemoToolHandler;
     use agent_core::context::{ContextStore, RecallQuery};
     use agent_core::{
-        Agent as CoreAgent, AgentConfig as CoreAgentConfig, MemoToolHandler, ModelClient,
-        StubModel, ToolCall, ToolHandler,
+        Agent as CoreAgent, AgentConfig as CoreAgentConfig, ModelClient, StubModel, ToolCall,
+        ToolHandler,
     };
     use agent_memo::MemoContextStore;
     use agent_sandbox::DockerSandbox;

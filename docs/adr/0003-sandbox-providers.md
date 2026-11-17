@@ -4,13 +4,15 @@
 Accepted.
 
 ## Context
-Tool execution must be isolated and swappable between environments. codex ships
-`linux-sandbox` / `bwrap` / `mxc-sandbox` but **not** docker / kata / cubesandbox,
-which the platform requires.
+Tool execution must be isolated and swappable between environments, and the
+runtime must not depend on any particular isolation mechanism. The deployment
+targets (containers, Kata, Cube) are all reachable from the Docker Engine API /
+container runtimes, none of which is built into the language runtime.
 
 ## Decision
 * Define a single `Sandbox` trait (`spawn` / `exec` / `destroy`) with an
-  `ExecSpec` / `ExecOutput` shape mirroring codex's `sandboxing` crate.
+  `ExecSpec` / `ExecOutput` shape (`spawn` / `exec` / `destroy`,
+  argv-only commands, resource limits).
 * Ship three providers behind one abstraction:
   * `DockerSandbox` — **default**, talks to the Docker **Engine API** over
     `bollard` (no `docker` CLI needed).
@@ -24,8 +26,10 @@ which the platform requires.
   (`/var/run/docker.sock`, `~/.docker/run/docker.sock` for **Docker Desktop on
   macOS**, Colima, rootless Podman). If none is reachable, the call returns
   `SandboxError::NotConfigured` instead of aborting the process.
-* When deeper integration is wanted, `aria-agent-sandbox` can depend on codex's
-  `sandboxing` / `linux-sandbox` crates as precise path dependencies.
+* A single root directory (`SandboxPolicy::workspace`) bounds `fs`, `shell` and
+  `jobs` alike, so a provider cannot widen the agent's reach (ADR-0016).
+* An unknown provider name is a hard configuration error — there is no silent
+  fallback to docker (ADR-0018).
 
 ## Consequences
 * Providers assume the corresponding CLI/daemon is installed or reachable on the

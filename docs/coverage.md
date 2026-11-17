@@ -26,11 +26,13 @@ needs a reason that does not depend on "it was hard":
 
 | Path | Why it is excluded |
 | --- | --- |
-| `codex/**` | git submodule, not this repository's source |
 | `crates/aria-agent-ffigen/**` | binding *generator* binary; its output is verified by `just ffi` and the committed Swift/Kotlin sources |
-| `crates/aria-agent-cloud/src/main.rs` | process entrypoint: `main`/`run`/`cmd_setup*`/`cmd_serve`, signal handling and the external `codex_sandbox` wiring |
+| `crates/aria-agent-cloud/src/main.rs` | process entrypoint: `main`/`run`, signal handling and the Postgres/OpenAI wiring |
 | `crates/aria-agent-cloud/src/store/pg.rs` | Postgres metadata backend: needs a live database. The `DATABASE_URL`-gated tests stay in place (`#[tokio::test]` + early `return` when unset) so a real deployment can still exercise them — they never fake a result |
 | `crates/aria-agent-cloud/src/context/pg.rs` | pgvector context backend, same reasoning as above |
+| `crates/aria-agent-cloud/src/store/pg_orchestration.rs` | Postgres teams/schedule/title backends; the same semantics are covered by the in-memory providers in `api_tests.rs` |
+| `crates/aria-agent-tools/src/terminal.rs` (`pty`) | real PTY sessions need a terminal device; the non-`pty` build (and its fail-closed path) is covered |
+| `crates/aria-agent-tools/src/web.rs` (`web`) | live HTTP; only the pure parts (SSRF gate, content-type whitelist, URL expansion, provider wiring) are covered |
 
 The cloud's business logic is **not** excluded: `api/*`, `app.rs`, `auth.rs`,
 `store/memory.rs`, `store/mod.rs`, `upgrade.rs`, `cli_config.rs`,

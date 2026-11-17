@@ -106,3 +106,67 @@ describe("runStreamed maxTurns", () => {
     expect((err as AriaError).kind).toBe("api");
   });
 });
+
+describe("approval and usage frames", () => {
+  const frames = [
+    { type: "agent.turn.created", turn_id: "turn_1", sequence_number: 1 },
+    {
+      type: "agent.turn.approval.requested",
+      approval_id: "call_1",
+      tool: "shell",
+      sequence_number: 2,
+    },
+    {
+      type: "agent.turn.approval.resolved",
+      approval_id: "call_1",
+      tool: "shell",
+      decision: "unavailable",
+      reason: "no approval provider configured",
+      sequence_number: 3,
+    },
+    {
+      type: "agent.turn.usage",
+      usage: { input_tokens: 12, output_tokens: 5, total_tokens: 17 },
+      model: "gpt-4o-mini",
+      sequence_number: 4,
+    },
+    { type: "agent.turn.output_text.done", text: "denied", sequence_number: 5 },
+    { type: "agent.turn.completed", turn: { output: "denied" }, sequence_number: 6 },
+  ];
+
+  test("decodes approval and usage events", async () => {
+    const { impl } = fakeFetch((url: string) => {
+      if (url.endsWith("/v1/agents/sessions")) return jsonResponse({ id: "sess_1" });
+      return sseResponse(frames);
+    });
+    const agent = new Agent({ name: "tutor", client: { ...client, fetch: impl } });
+    const streamed = await runStreamed(agent, "go");
+    const seen: string[] = [];
+    let decision: string | undefined;
+    for await (const ev of streamed.events) {
+      seen.push(ev.type);
+      if (ev.type === "agent.turn.approval.resolved") decision = ev.decision;
+    }
+    expect(seen).toContain("agent.turn.approval.requested");
+    expect(decision).toBe("unavailable");
+    const result = await streamed.completed;
+    expect(result.usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 5,
+      totalTokens: 17,
+      model: "gpt-4o-mini",
+    });
+  });
+
+  test("a stream without usage reports none", async () => {
+    const { impl } = fakeFetch((url: string) => {
+      if (url.endsWith("/v1/agents/sessions")) return jsonResponse({ id: "sess_1" });
+      return sseResponse([
+        { type: "agent.turn.output_text.done", text: "hi", sequence_number: 1 },
+      ]);
+    });
+    const agent = new Agent({ name: "tutor", client: { ...client, fetch: impl } });
+    const result = await (await runStreamed(agent, "go")).completed;
+    expect(result.usage).toBeUndefined();
+  });
+});

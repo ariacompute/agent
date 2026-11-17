@@ -51,6 +51,7 @@ export type {
   RunResult,
   StreamEvent,
   StreamedRunResult,
+  TokenUsage,
   ToolParameters,
   ToolSpec,
   RunOptions,

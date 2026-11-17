@@ -56,6 +56,16 @@ class ClientOptions:
 
 
 @dataclass
+class TokenUsage:
+    """Token accounting reported by the model for one call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    model: Optional[str] = None
+
+
+@dataclass
 class RunResult:
     """Result of a completed run (mirrors ``RunResult`` in the Agents SDK)."""
 
@@ -64,6 +74,7 @@ class RunResult:
     last_agent: Optional[Any] = None
     session_id: Optional[str] = None
     turn_id: Optional[str] = None
+    usage: Optional[TokenUsage] = None
 
     def to_input_list(self) -> list[dict[str, str]]:
         """Flatten the history into OpenAI-style message dicts."""

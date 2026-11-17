@@ -79,6 +79,15 @@ export interface HistoryItem {
 /** One entry of the run history (mirrors `result.history` in the Agents SDK). */
 export type HistoryInput = HistoryItem | string;
 
+/** Token accounting reported by the model for one call. */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** Model the provider reported (may differ from the requested one). */
+  model?: string;
+}
+
 /** Streaming events decoded from the SSE `agent.*` frames. */
 export type StreamEvent =
   | { type: "agent.turn.created"; turnId?: string; raw: Record<string, any> }
@@ -87,6 +96,22 @@ export type StreamEvent =
   | { type: "agent.turn.item.done"; item?: Record<string, any>; raw: Record<string, any> }
   | { type: "agent.turn.output_text.delta"; delta: string; raw: Record<string, any> }
   | { type: "agent.turn.output_text.done"; text: string; raw: Record<string, any> }
+  | {
+      type: "agent.turn.approval.requested";
+      approvalId?: string;
+      tool?: string;
+      raw: Record<string, any>;
+    }
+  | {
+      type: "agent.turn.approval.resolved";
+      approvalId?: string;
+      tool?: string;
+      /** `allow` | `deny` | `unavailable`. */
+      decision?: string;
+      reason?: string | null;
+      raw: Record<string, any>;
+    }
+  | { type: "agent.turn.usage"; usage?: TokenUsage; raw: Record<string, any> }
   | { type: "agent.turn.completed"; output?: string; raw: Record<string, any> }
   | { type: "agent.turn.failed"; error?: string; raw: Record<string, any> }
   | { type: string; raw: Record<string, any> };
@@ -103,6 +128,8 @@ export interface RunResult {
   sessionId?: string;
   /** Server-side turn id. */
   turnId?: string;
+  /** Token usage accumulated across the run's model calls. */
+  usage?: TokenUsage;
 }
 
 /** Handle returned by `runStreamed`. */

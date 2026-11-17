@@ -13,15 +13,15 @@ use futures::StreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::app::{agent_tools, build_agent, build_sse_stream, AppState};
+use crate::app::{build_agent, build_sse_stream, AppState};
 use crate::auth::{Principal, PrincipalKind};
 use crate::store::{ItemRow, SessionRow, TurnRow};
 use crate::types::{
     Agent, AgentSession, CreateRelationRequest, CreateSessionRequest, GraphRetrieveResponse,
     ListResponse, MemoryItem, PutMemoryRequest, RelationDeleted, RelationGraphQuery, RelationItem,
     RelationListParams, RetrieveTraceWire, ScoredMemoryItem, SessionAgent, SessionDeleted,
-    SessionInputEvent, SessionItem, SessionTurn, Subagent, UpdateSessionRequest, ITEM_OBJECT,
-    SESSION_OBJECT, TURN_OBJECT,
+    SessionInputEvent, SessionItem, SessionTitle, SessionTurn, Subagent, UpdateSessionRequest,
+    ITEM_OBJECT, SESSION_OBJECT, SESSION_TITLE_OBJECT, TURN_OBJECT,
 };
 use crate::util::{new_id, now_ms};
 use crate::AppError;
@@ -252,6 +252,65 @@ pub async fn create_session_events(
     }))
 }
 
+/// Depth guard for `<parent>::sub::<id>` walking (the cloud delegates one level,
+/// so a handful of hops is already more than any real session).
+const MAX_PARENT_HOPS: usize = 8;
+
+/// Prove the caller may look at `session`.
+///
+/// A root session is checked directly. A **child** session
+/// (`<parent>::sub::<id>`) is not a first-class row — it exists only in the
+/// runtime — so ownership is proven through its parent, walking up one level per
+/// hop. Unknown ids and other tenants both end in `404` (no existence leak), and
+/// a storage failure is reported instead of being masked as "missing".
+pub(crate) async fn ensure_session_visible(
+    state: &AppState,
+    principal: &Principal,
+    session: &str,
+) -> Result<(), AppError> {
+    let mut current = session;
+    for _ in 0..=MAX_PARENT_HOPS {
+        match state.sessions.get_session(principal, current).await {
+            Ok(_) => return Ok(()),
+            Err(AppError::NotFound) => {}
+            Err(other) => return Err(other),
+        }
+        match agent_core::seams::parent_session(current) {
+            Some(parent) => current = parent,
+            None => return Err(AppError::NotFound),
+        }
+    }
+    Err(AppError::NotFound)
+}
+
+/// `GET /v1/agents/sessions/{id}/title` — the projected title of a session.
+///
+/// The title comes from the event stream (`SessionEvent::TitleSet`): the
+/// deterministic first-prompt fallback, optionally replaced by the async title
+/// provider. Nothing is invented here — a session without a recorded title is a
+/// `404`. Child sessions (`<parent>::sub::<id>`) are readable through the same
+/// route as long as the caller owns the parent.
+pub async fn get_session_title(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    principal: Principal,
+) -> Result<Json<SessionTitle>, AppError> {
+    // Ownership first: an unknown or foreign session must not leak a title.
+    ensure_session_visible(&state, &principal, &session_id).await?;
+    let row = state
+        .titles
+        .get_title(&principal, &session_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(SessionTitle {
+        object: SESSION_TITLE_OBJECT.into(),
+        session_id: row.session_id,
+        title: row.title,
+        source: row.source,
+        updated_at: row.updated_at,
+    }))
+}
+
 /// `POST /v1/agents/sessions/{id}/events/stream` — run one turn, streaming
 /// events as they happen (SSE). Terminal event is `agent.turn.completed` /
 /// `agent.turn.failed`; there is no `[DONE]` sentinel.
@@ -272,7 +331,8 @@ pub async fn stream_session_events(
 
     let agent_name = agent.name.clone().unwrap_or_else(|| agent.id.clone());
     let agent_rt = build_agent(&state, &agent_name, &instructions, &session_id, &principal).await?;
-    let tools = agent_tools();
+    // Schemas come from the tool families actually registered for this run.
+    let tools = agent_rt.tools().to_vec();
     let event_stream = agent_rt
         .run_event_stream(&input, &tools)
         .await

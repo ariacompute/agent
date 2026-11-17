@@ -3,7 +3,7 @@ name = "aria-agent-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Unified agent runtime: wraps the codex harness loop, injects recalled context (ContextStore contract), isolates tools in a sandbox."
+description = "Unified agent runtime: pluggable capability seams, recalled context (ContextStore contract), sandboxed tool execution."
 
 [lib]
 name = "agent_core"
@@ -17,6 +17,7 @@ async-trait.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 aria-agent-sandbox.workspace = true
+aria-agent-plugin.workspace = true
 futures = "0.3"
 async-stream = "0.3"
 async-openai = { version = "0.24", optional = true }
@@ -28,3 +29,4 @@ openai = ["dep:async-openai"]
 
 [dev-dependencies]
 wiremock = "0.6"
+tempfile = "3"

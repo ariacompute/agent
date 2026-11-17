@@ -399,6 +399,22 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -834,15 +850,33 @@ public struct SdkAgentConfig {
     public var model: String
     public var sandboxProvider: String
     public var memory: SdkMemoryConfig
+    /**
+     * `read_only` | `workspace_write` | `danger_full_access` (default
+     * `workspace_write`, the trusted-local preset).
+     */
+    public var permissionPreset: String
+    /**
+     * `auto` (default, trusted local run) | `deny` (fail-closed).
+     */
+    public var approvalMode: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(agentName: String, instructions: String, model: String, sandboxProvider: String, memory: SdkMemoryConfig) {
+    public init(agentName: String, instructions: String, model: String, sandboxProvider: String, memory: SdkMemoryConfig, 
+        /**
+         * `read_only` | `workspace_write` | `danger_full_access` (default
+         * `workspace_write`, the trusted-local preset).
+         */permissionPreset: String, 
+        /**
+         * `auto` (default, trusted local run) | `deny` (fail-closed).
+         */approvalMode: String) {
         self.agentName = agentName
         self.instructions = instructions
         self.model = model
         self.sandboxProvider = sandboxProvider
         self.memory = memory
+        self.permissionPreset = permissionPreset
+        self.approvalMode = approvalMode
     }
 }
 
@@ -865,6 +899,12 @@ extension SdkAgentConfig: Equatable, Hashable {
         if lhs.memory != rhs.memory {
             return false
         }
+        if lhs.permissionPreset != rhs.permissionPreset {
+            return false
+        }
+        if lhs.approvalMode != rhs.approvalMode {
+            return false
+        }
         return true
     }
 
@@ -874,6 +914,8 @@ extension SdkAgentConfig: Equatable, Hashable {
         hasher.combine(model)
         hasher.combine(sandboxProvider)
         hasher.combine(memory)
+        hasher.combine(permissionPreset)
+        hasher.combine(approvalMode)
     }
 }
 
@@ -889,7 +931,9 @@ public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
                 instructions: FfiConverterString.read(from: &buf), 
                 model: FfiConverterString.read(from: &buf), 
                 sandboxProvider: FfiConverterString.read(from: &buf), 
-                memory: FfiConverterTypeSdkMemoryConfig.read(from: &buf)
+                memory: FfiConverterTypeSdkMemoryConfig.read(from: &buf), 
+                permissionPreset: FfiConverterString.read(from: &buf), 
+                approvalMode: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -899,6 +943,8 @@ public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.model, into: &buf)
         FfiConverterString.write(value.sandboxProvider, into: &buf)
         FfiConverterTypeSdkMemoryConfig.write(value.memory, into: &buf)
+        FfiConverterString.write(value.permissionPreset, into: &buf)
+        FfiConverterString.write(value.approvalMode, into: &buf)
     }
 }
 
@@ -1112,6 +1158,16 @@ public enum SdkStreamEvent {
     case toolCall(id: String, name: String, arguments: String, result: String?
     )
     /**
+     * An approval decision for a tool call (`allow` / `deny` / `unavailable`).
+     */
+    case approval(id: String, tool: String, decision: String, reason: String?
+    )
+    /**
+     * Token accounting for one model call.
+     */
+    case usage(inputTokens: UInt64, outputTokens: UInt64, model: String
+    )
+    /**
      * Terminal event carrying the full final reply.
      */
     case done(text: String
@@ -1143,10 +1199,16 @@ public struct FfiConverterTypeSdkStreamEvent: FfiConverterRustBuffer {
         case 3: return .toolCall(id: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf), arguments: try FfiConverterString.read(from: &buf), result: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 4: return .done(text: try FfiConverterString.read(from: &buf)
+        case 4: return .approval(id: try FfiConverterString.read(from: &buf), tool: try FfiConverterString.read(from: &buf), decision: try FfiConverterString.read(from: &buf), reason: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 5: return .error(message: try FfiConverterString.read(from: &buf)
+        case 5: return .usage(inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), model: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 6: return .done(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 7: return .error(message: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -1176,13 +1238,28 @@ public struct FfiConverterTypeSdkStreamEvent: FfiConverterRustBuffer {
             FfiConverterOptionString.write(result, into: &buf)
             
         
-        case let .done(text):
+        case let .approval(id,tool,decision,reason):
             writeInt(&buf, Int32(4))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(tool, into: &buf)
+            FfiConverterString.write(decision, into: &buf)
+            FfiConverterOptionString.write(reason, into: &buf)
+            
+        
+        case let .usage(inputTokens,outputTokens,model):
+            writeInt(&buf, Int32(5))
+            FfiConverterUInt64.write(inputTokens, into: &buf)
+            FfiConverterUInt64.write(outputTokens, into: &buf)
+            FfiConverterString.write(model, into: &buf)
+            
+        
+        case let .done(text):
+            writeInt(&buf, Int32(6))
             FfiConverterString.write(text, into: &buf)
             
         
         case let .error(message):
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(message, into: &buf)
             
         }

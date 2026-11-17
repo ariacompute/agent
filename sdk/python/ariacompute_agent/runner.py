@@ -20,7 +20,23 @@ from .types import (
     HistoryItem,
     RunResult,
     StreamedRunResult,
+    TokenUsage,
 )
+
+
+def _token_usage(frame: dict[str, Any]) -> TokenUsage:
+    """Normalise an ``agent.turn.usage`` frame (``snake_case`` on the wire)."""
+    raw = frame.get("usage") or {}
+    input_tokens = int(raw.get("input_tokens") or 0)
+    output_tokens = int(raw.get("output_tokens") or 0)
+    total = int(raw.get("total_tokens") or (input_tokens + output_tokens))
+    model = frame.get("model") or None
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total,
+        model=model,
+    )
 
 
 def _validate_max_turns(max_turns: Optional[int]) -> None:
@@ -124,7 +140,7 @@ class Runner:
         text = _to_text(input)
 
         cap = max_turns if max_turns is not None else None
-        state: dict[str, Any] = {"text": "", "turn_id": None, "error": None}
+        state: dict[str, Any] = {"text": "", "turn_id": None, "error": None, "usage": None}
         buffered: list[dict[str, Any]] = []
         drained = asyncio.Event()
 
@@ -137,6 +153,9 @@ class Runner:
                 out = frame.get("text") or (frame.get("turn") or {}).get("output")
                 if isinstance(out, str) and out:
                     state["text"] = out
+            elif kind == "agent.turn.usage":
+                # Usage frames are cumulative on the server: the last one wins.
+                state["usage"] = _token_usage(frame)
             elif kind == "agent.turn.failed":
                 state["error"] = (frame.get("error") or {}).get("message") or "run failed"
 
@@ -179,6 +198,7 @@ class Runner:
                 last_agent=agent,
                 session_id=sess.id,
                 turn_id=state["turn_id"],
+                usage=state["usage"],
             )
 
         return StreamedRunResult(events=events(), completed=completed())

@@ -1059,6 +1059,29 @@ object NoPointer
 /**
  * @suppress
  */
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
+
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
+
+    override fun allocationSize(value: ULong) = 8UL
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1829,7 +1852,16 @@ data class SdkAgentConfig (
     var `instructions`: kotlin.String, 
     var `model`: kotlin.String, 
     var `sandboxProvider`: kotlin.String, 
-    var `memory`: SdkMemoryConfig
+    var `memory`: SdkMemoryConfig, 
+    /**
+     * `read_only` | `workspace_write` | `danger_full_access` (default
+     * `workspace_write`, the trusted-local preset).
+     */
+    var `permissionPreset`: kotlin.String, 
+    /**
+     * `auto` (default, trusted local run) | `deny` (fail-closed).
+     */
+    var `approvalMode`: kotlin.String
 ) {
     
     companion object
@@ -1846,6 +1878,8 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterTypeSdkMemoryConfig.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
@@ -1854,7 +1888,9 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.allocationSize(value.`instructions`) +
             FfiConverterString.allocationSize(value.`model`) +
             FfiConverterString.allocationSize(value.`sandboxProvider`) +
-            FfiConverterTypeSdkMemoryConfig.allocationSize(value.`memory`)
+            FfiConverterTypeSdkMemoryConfig.allocationSize(value.`memory`) +
+            FfiConverterString.allocationSize(value.`permissionPreset`) +
+            FfiConverterString.allocationSize(value.`approvalMode`)
     )
 
     override fun write(value: SdkAgentConfig, buf: ByteBuffer) {
@@ -1863,6 +1899,8 @@ public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentCon
             FfiConverterString.write(value.`model`, buf)
             FfiConverterString.write(value.`sandboxProvider`, buf)
             FfiConverterTypeSdkMemoryConfig.write(value.`memory`, buf)
+            FfiConverterString.write(value.`permissionPreset`, buf)
+            FfiConverterString.write(value.`approvalMode`, buf)
     }
 }
 
@@ -2022,6 +2060,27 @@ sealed class SdkStreamEvent {
     }
     
     /**
+     * An approval decision for a tool call (`allow` / `deny` / `unavailable`).
+     */
+    data class Approval(
+        val `id`: kotlin.String, 
+        val `tool`: kotlin.String, 
+        val `decision`: kotlin.String, 
+        val `reason`: kotlin.String?) : SdkStreamEvent() {
+        companion object
+    }
+    
+    /**
+     * Token accounting for one model call.
+     */
+    data class Usage(
+        val `inputTokens`: kotlin.ULong, 
+        val `outputTokens`: kotlin.ULong, 
+        val `model`: kotlin.String) : SdkStreamEvent() {
+        companion object
+    }
+    
+    /**
      * Terminal event carrying the full final reply.
      */
     data class Done(
@@ -2061,10 +2120,21 @@ public object FfiConverterTypeSdkStreamEvent : FfiConverterRustBuffer<SdkStreamE
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
-            4 -> SdkStreamEvent.Done(
+            4 -> SdkStreamEvent.Approval(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            5 -> SdkStreamEvent.Usage(
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
                 FfiConverterString.read(buf),
                 )
-            5 -> SdkStreamEvent.Error(
+            6 -> SdkStreamEvent.Done(
+                FfiConverterString.read(buf),
+                )
+            7 -> SdkStreamEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -2095,6 +2165,25 @@ public object FfiConverterTypeSdkStreamEvent : FfiConverterRustBuffer<SdkStreamE
                 + FfiConverterString.allocationSize(value.`name`)
                 + FfiConverterString.allocationSize(value.`arguments`)
                 + FfiConverterOptionalString.allocationSize(value.`result`)
+            )
+        }
+        is SdkStreamEvent.Approval -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterString.allocationSize(value.`tool`)
+                + FfiConverterString.allocationSize(value.`decision`)
+                + FfiConverterOptionalString.allocationSize(value.`reason`)
+            )
+        }
+        is SdkStreamEvent.Usage -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterULong.allocationSize(value.`inputTokens`)
+                + FfiConverterULong.allocationSize(value.`outputTokens`)
+                + FfiConverterString.allocationSize(value.`model`)
             )
         }
         is SdkStreamEvent.Done -> {
@@ -2134,13 +2223,28 @@ public object FfiConverterTypeSdkStreamEvent : FfiConverterRustBuffer<SdkStreamE
                 FfiConverterOptionalString.write(value.`result`, buf)
                 Unit
             }
-            is SdkStreamEvent.Done -> {
+            is SdkStreamEvent.Approval -> {
                 buf.putInt(4)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterString.write(value.`tool`, buf)
+                FfiConverterString.write(value.`decision`, buf)
+                FfiConverterOptionalString.write(value.`reason`, buf)
+                Unit
+            }
+            is SdkStreamEvent.Usage -> {
+                buf.putInt(5)
+                FfiConverterULong.write(value.`inputTokens`, buf)
+                FfiConverterULong.write(value.`outputTokens`, buf)
+                FfiConverterString.write(value.`model`, buf)
+                Unit
+            }
+            is SdkStreamEvent.Done -> {
+                buf.putInt(6)
                 FfiConverterString.write(value.`text`, buf)
                 Unit
             }
             is SdkStreamEvent.Error -> {
-                buf.putInt(5)
+                buf.putInt(7)
                 FfiConverterString.write(value.`message`, buf)
                 Unit
             }

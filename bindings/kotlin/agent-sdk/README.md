@@ -51,7 +51,11 @@ val agent = createAgentWith(
             localDbPath = "~/.ariacompute/memo.db", // aria memo
             cloudBaseUrl = "http://localhost:3000",
             cloudApiKey = ""
-        )
+        ),
+        // Permission preset: read_only | workspace_write | danger_full_access.
+        permissionPreset = "workspace_write",
+        // Approval mode: auto (trusted local run) | deny (fail-closed).
+        approvalMode = "auto"
     )
 )
 val session = agent.session()

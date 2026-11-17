@@ -1,6 +1,6 @@
 //! `agent-core` — the unified agent runtime.
 //!
-//! It wraps the codex harness-style agent loop and guarantees the **context
+//! It implements a pluggable agent loop and guarantees the **context
 //! contract**: every [`Agent::run`] first [`recall`](context::ContextStore::recall)s
 //! context from the store (vector/semantic recall — see [`context::embed`]), then
 //! after producing a reply [`memorize`](context::ContextStore::memorize)s
@@ -15,17 +15,23 @@
 //! is the default so the runtime is runnable without an API key. Enable the
 //! `openai` feature to use the real OpenAI Responses/Chat API.
 
+pub mod agent_loop;
+/// Re-exported plugin kernel so downstream crates share one import path.
+pub use aria_agent_plugin as plugin;
 pub mod context;
-pub mod tools;
-pub use tools::memo::{memo_tools, MemoToolHandler};
+pub mod prompt;
+pub mod seams;
+pub mod session;
+pub mod token_meter;
 
 use agent_sandbox::{default_sandbox, Sandbox, SandboxProvider};
 use async_trait::async_trait;
-use context::{
-    now_ms, ContextFragment, ContextStore, FragmentKind, GraphRetrieveQuery, RecallQuery, Relation,
-    RelationKind,
-};
-use futures::stream::{BoxStream, StreamExt};
+#[cfg(test)]
+use context::RecallQuery;
+use context::{now_ms, ContextFragment, ContextStore, FragmentKind, Relation, RelationKind};
+use futures::stream::BoxStream;
+#[cfg(test)]
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -114,6 +120,26 @@ pub trait ToolHandler: Send + Sync {
 pub struct ModelTurn {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Token accounting reported by the backend for this call. The loop prefers
+    /// it over the local estimate, which is only a fallback (ADR-0015).
+    pub usage: Option<seams::TokenUsage>,
+}
+
+impl ModelTurn {
+    /// A text-only reply with no usage reported.
+    pub fn reply(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tool_calls: Vec::new(),
+            usage: None,
+        }
+    }
+
+    /// Attach provider-reported usage.
+    pub fn with_usage(mut self, usage: seams::TokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
 }
 
 /// Events emitted by [`Agent::run_event_stream`] so callers can render a live
@@ -136,6 +162,22 @@ pub enum AgentEvent {
     },
     /// A model text delta.
     Token { text: String },
+    /// One approval decision for a tool call (ADR-0016).
+    Approval {
+        id: String,
+        tool: String,
+        /// `allow` | `deny` | `unavailable`.
+        decision: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// Token accounting for one model call (ADR-0015).
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        #[serde(default)]
+        model: String,
+    },
     /// Terminal event carrying the full final reply.
     Done { text: String },
 }
@@ -169,10 +211,7 @@ pub trait ModelClient: Send + Sync {
         _tools: &[Tool],
     ) -> Result<ModelTurn, CoreError> {
         let resp = self.complete(req).await?;
-        Ok(ModelTurn {
-            text: resp.text,
-            tool_calls: Vec::new(),
-        })
+        Ok(ModelTurn::reply(resp.text))
     }
 }
 
@@ -274,7 +313,7 @@ mod openai_impl {
     /// Build the OpenAI `tools` argument from our tool contract using the modern
     /// `tools`/`tool_choice` API (async-openai 0.24.1). The response is parsed as
     /// real `tool_calls` below.
-    fn build_codex_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
+    fn build_chat_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
         tools
             .iter()
             .map(|t| ChatCompletionTool {
@@ -429,7 +468,7 @@ mod openai_impl {
                     ..Default::default()
                 }),
             ];
-            let tools = build_codex_tools(tools);
+            let tools = build_chat_tools(tools);
             let mut args = CreateChatCompletionRequestArgs::default();
             let mut b = args.model(self.model.clone()).messages(messages);
             if !tools.is_empty() {
@@ -450,7 +489,18 @@ mod openai_impl {
                 .ok_or_else(|| CoreError::Model("empty choices from model".into()))?;
             let text = choice.message.content.clone().unwrap_or_default();
             let tool_calls = parse_response_calls(&choice.message);
-            Ok(ModelTurn { text, tool_calls })
+            let usage = resp.usage.as_ref().map(|u| {
+                seams::TokenUsage::new(
+                    u.prompt_tokens as u64,
+                    u.completion_tokens as u64,
+                    self.model.clone(),
+                )
+            });
+            Ok(ModelTurn {
+                text,
+                tool_calls,
+                usage,
+            })
         }
     }
 
@@ -464,7 +514,7 @@ mod openai_impl {
         use async_openai::types::Role;
 
         #[test]
-        fn build_codex_tools_maps_schema() {
+        fn build_chat_tools_maps_schema() {
             let tools = vec![Tool {
                 name: "shell".into(),
                 description: "run a command".into(),
@@ -473,7 +523,7 @@ mod openai_impl {
                     "properties": { "command": { "type": "string" } }
                 }),
             }];
-            let out = build_codex_tools(&tools);
+            let out = build_chat_tools(&tools);
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].r#type, ChatCompletionToolType::Function);
             assert_eq!(out[0].function.name, "shell");
@@ -844,6 +894,40 @@ pub struct AgentConfig {
     /// (0 = disabled). Only meaningful when `memory_graph` is also enabled.
     #[serde(default)]
     pub memory_compact_threshold: usize,
+    /// Permission preset (`read_only` / `workspace_write` / `danger_full_access`).
+    #[serde(default = "default_preset")]
+    pub permission_preset: String,
+    /// Approval mode: `deny` (fail-closed, default) or `auto` (trusted).
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
+    /// Single execution root for fs/shell (`""` → process cwd).
+    #[serde(default)]
+    pub workspace_root: String,
+    /// Directory for per-session JSONL event artifacts (`""` → disabled).
+    #[serde(default)]
+    pub session_log_dir: String,
+    /// Context window used by the token meter for pressure detection.
+    #[serde(default = "default_context_limit")]
+    pub context_limit: u64,
+    /// Cap for a single tool result before truncation/spill.
+    #[serde(default = "default_tool_max_bytes")]
+    pub tool_result_max_bytes: usize,
+}
+
+fn default_preset() -> String {
+    "workspace_write".to_string()
+}
+
+fn default_approval_mode() -> String {
+    "deny".to_string()
+}
+
+fn default_context_limit() -> u64 {
+    token_meter::DEFAULT_CONTEXT_LIMIT
+}
+
+fn default_tool_max_bytes() -> usize {
+    seams::tools::DEFAULT_MAX_RESULT_BYTES
 }
 
 impl Default for AgentConfig {
@@ -852,16 +936,53 @@ impl Default for AgentConfig {
             session: "default".to_string(),
             agent_name: "agent".to_string(),
             instructions: String::new(),
-            // Default to the self-contained Docker sandbox. The codex backend
-            // (ADR-0005 §Decision) is provided by the `aria-agent-cloud` runtime
-            // and injected via `Agent::with_sandbox`; tests use `with_sandbox`
-            // with a local `Sandbox` too.
+            // Default to the self-contained Docker sandbox. Other backends
+            // (kata/cube/browser) are resolved through the `sandbox` seam;
+            // tests inject a local `Sandbox` via `with_sandbox`.
             sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
             memory_graph: false,
             memory_compact_threshold: 0,
+            permission_preset: default_preset(),
+            approval_mode: default_approval_mode(),
+            workspace_root: String::new(),
+            session_log_dir: String::new(),
+            context_limit: default_context_limit(),
+            tool_result_max_bytes: default_tool_max_bytes(),
         }
     }
+}
+
+/// Resolve the deployment policy from [`AgentConfig`] (fail-closed on bad input).
+pub fn build_policy(config: &AgentConfig) -> Result<Option<Arc<seams::SandboxPolicy>>, CoreError> {
+    let preset = seams::PermissionPreset::parse(&config.permission_preset).ok_or_else(|| {
+        CoreError::Config(format!(
+            "unknown permission_preset: {} (expected read_only|workspace_write|danger_full_access)",
+            config.permission_preset
+        ))
+    })?;
+    let root = if config.workspace_root.trim().is_empty() {
+        std::env::current_dir()
+            .map_err(|e| CoreError::Config(format!("workspace root unavailable: {e}")))?
+    } else {
+        std::path::PathBuf::from(config.workspace_root.trim())
+    };
+    let policy = seams::SandboxPolicy::new(root, preset)
+        .map_err(|e| CoreError::Config(format!("sandbox policy: {e}")))?;
+    Ok(Some(Arc::new(policy)))
+}
+
+/// Assemble the static prompt sections (per-run sections such as skills/plan are
+/// appended by the loop through [`prompt::SystemPrompt::push`]).
+pub fn build_prompt(config: &AgentConfig) -> prompt::SystemPrompt {
+    let mut assembled = prompt::SystemPrompt::default();
+    assembled.push(prompt::identity(&config.agent_name));
+    assembled.push(prompt::instructions(&config.instructions));
+    if let Ok(Some(policy)) = build_policy(config) {
+        assembled.push(prompt::permissions(policy.preset()));
+        assembled.push(prompt::working_directory(&policy.root().to_string_lossy()));
+    }
+    assembled
 }
 
 /// Construct the default model backend for `config`: the OpenAI model when the
@@ -881,22 +1002,33 @@ pub fn default_model(config: &AgentConfig) -> Box<dyn ModelClient> {
     }
 }
 
-/// The unified agent. Holds the model client, context store and sandbox.
+/// The unified agent. Holds the model client, context store and sandbox, plus the
+/// assembled views derived from [`AgentConfig`]: the system prompt, the tool
+/// execution pipeline (preset + approvals + post-exec) and the session log.
 ///
-/// The system prompt is static: the agent name plus optional `instructions`.
-/// `handlers` provides pluggable tool dispatch (see [`ToolHandler`]) consulted
-/// before the default shell sandbox execution.
+/// Every seam is resolved **once** here, so the hot loop never touches a registry
+/// (ADR-0014 §决定).
 pub struct Agent {
     config: AgentConfig,
     model: Arc<dyn ModelClient>,
     context: Arc<dyn ContextStore>,
     sandbox: Arc<dyn Sandbox>,
     handlers: Vec<Arc<dyn ToolHandler>>,
+    prompt: prompt::SystemPrompt,
+    pipeline: Arc<seams::ToolExecutionPipeline>,
+    session_log: Option<Arc<dyn session::SessionPersistence>>,
+    /// Model-facing tool schemas for the enabled families. Populated by the
+    /// runtime (cloud/FFI) from its `ToolSet`; empty by default.
+    tools: Vec<Tool>,
+    /// Whether the deterministic session title still needs to be recorded.
+    title_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Optional async title provider; the deterministic fallback always exists.
+    title_provider: Arc<dyn session::SessionTitleProvider>,
 }
 
 impl Agent {
     /// Build with an explicit sandbox backend (e.g. a local test sandbox or a
-    /// codex-backed [`Sandbox`](agent_sandbox::Sandbox)). Useful when the
+    /// browser-backed [`Sandbox`](agent_sandbox::Sandbox)). Useful when the
     /// provider string alone does not describe the execution environment.
     pub fn with_sandbox(
         config: AgentConfig,
@@ -904,13 +1036,7 @@ impl Agent {
         context: Arc<dyn ContextStore>,
         sandbox: Arc<dyn Sandbox>,
     ) -> Result<Self, CoreError> {
-        Ok(Self {
-            config,
-            model: Arc::from(model),
-            context,
-            sandbox,
-            handlers: Vec::new(),
-        })
+        Self::with_handlers(config, model, context, sandbox, Vec::new())
     }
 
     /// Build with an explicit sandbox backend **and** a set of pluggable tool
@@ -923,7 +1049,43 @@ impl Agent {
         sandbox: Arc<dyn Sandbox>,
         handlers: Vec<Arc<dyn ToolHandler>>,
     ) -> Result<Self, CoreError> {
+        let policy = build_policy(&config)?;
+        let approvals: Arc<dyn seams::ApprovalBroker> = match config.approval_mode.as_str() {
+            "auto" => Arc::new(seams::AutoAllow),
+            "deny" | "" => Arc::new(seams::DenyAll),
+            other => {
+                return Err(CoreError::Config(format!(
+                    "unknown approval_mode: {other} (expected deny|auto)"
+                )))
+            }
+        };
+        let post = match &policy {
+            Some(p) => seams::PostExecPolicy::default()
+                .with_max_bytes(config.tool_result_max_bytes)
+                .with_spill_dir(p.root().join(".aria/spill")),
+            None => seams::PostExecPolicy::default().with_max_bytes(config.tool_result_max_bytes),
+        };
+        let mut pipeline = seams::ToolExecutionPipeline::new(handlers.clone())
+            .with_approvals(approvals)
+            .with_post_exec(post);
+        if let Some(p) = &policy {
+            pipeline = pipeline.with_policy(p.clone());
+        }
+        let session_log: Option<Arc<dyn session::SessionPersistence>> =
+            if config.session_log_dir.trim().is_empty() {
+                None
+            } else {
+                Some(Arc::new(session::JsonlPersistence::new(
+                    config.session_log_dir.trim(),
+                )))
+            };
         Ok(Self {
+            prompt: build_prompt(&config),
+            tools: Vec::new(),
+            title_pending: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            title_provider: Arc::new(session::FallbackOnly),
+            pipeline: Arc::new(pipeline),
+            session_log,
             config,
             model: Arc::from(model),
             context,
@@ -942,9 +1104,8 @@ impl Agent {
         let provider = SandboxProvider::parse(&config.sandbox_provider).ok_or_else(|| {
             CoreError::Config(format!("unknown sandbox: {}", config.sandbox_provider))
         })?;
-        // The `codex` backend is constructed by the `aria-agent-cloud` runtime
-        // (publish = false) and injected via `with_sandbox`; the published SDK
-        // returns `NotConfigured` for it here.
+        // The browser backend is constructed by the runtime and injected via
+        // `with_handlers`; `from_provider` returns `NotConfigured` for it here.
         let sandbox = Arc::from(
             agent_sandbox::from_provider(provider)
                 .map_err(|e| CoreError::Config(format!("sandbox {}: {}", provider.as_str(), e)))?,
@@ -952,369 +1113,53 @@ impl Agent {
         Self::with_sandbox(config, model, context, sandbox)
     }
 
+    /// Attach the family schemas the model may call (built from the runtime's
+    /// [`ToolSet`](https://docs.rs) so the list matches the registered handlers).
+    pub fn with_tools(mut self, tools: Vec<Tool>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Model-facing tool schemas for the enabled families.
+    pub fn tools(&self) -> &[Tool] {
+        &self.tools
+    }
+
+    /// Append runtime-provided prompt sections (skills catalog, plan, …).
+    pub fn with_prompt_sections(mut self, sections: Vec<prompt::PromptSection>) -> Self {
+        for section in sections {
+            self.prompt.push(section);
+        }
+        self
+    }
+
+    /// Install an async session-title provider. The deterministic fallback is
+    /// recorded first, so a provider that declines (or fails) never blocks a
+    /// turn and the session still has a title.
+    pub fn with_title_provider(mut self, provider: Arc<dyn session::SessionTitleProvider>) -> Self {
+        self.title_provider = provider;
+        self
+    }
+
+    /// The installed title provider (for diagnostics/tests).
+    pub fn title_provider(&self) -> &Arc<dyn session::SessionTitleProvider> {
+        &self.title_provider
+    }
+
+    /// Replace the session persistence backend.
+    ///
+    /// A local run keeps the JSONL backend configured by `session_log_dir`; the
+    /// cloud installs a projection (see `aria-agent-cloud`'s title store) so the
+    /// same `SessionEvent` stream feeds its tables instead of a per-session file.
+    pub fn with_session_log(mut self, log: Arc<dyn session::SessionPersistence>) -> Self {
+        self.session_log = Some(log);
+        self
+    }
+
     /// Build using the default model (stub unless `openai` feature is on).
     pub fn new(config: AgentConfig, context: Arc<dyn ContextStore>) -> Result<Self, CoreError> {
         let model = default_model(&config);
         Self::with_model(config, model, context)
-    }
-
-    pub fn session(&self) -> &str {
-        &self.config.session
-    }
-
-    /// The static system prompt sent to the model (agent name + optional
-    /// session/agent instructions).
-    pub fn system_text(&self) -> String {
-        let base = format!("You are {}.", self.config.agent_name);
-        if self.config.instructions.trim().is_empty() {
-            base
-        } else {
-            format!("{}\n\n{}", base, self.config.instructions.trim())
-        }
-    }
-
-    /// Shared context store (used by the SDK to expose `Session`).
-    pub fn context(&self) -> Arc<dyn ContextStore> {
-        self.context.clone()
-    }
-
-    /// Supplement vector recall with bounded graph expansion from `seeds`.
-    /// Returns fragments not already present in `fragments`. No-op when the
-    /// memory graph is disabled or there are no seeds, so the frozen recall
-    /// contract is unchanged by default.
-    async fn graph_expand(&self, seeds: Vec<String>, top_k: usize) -> Vec<ContextFragment> {
-        if !self.config.memory_graph || seeds.is_empty() {
-            return Vec::new();
-        }
-        match self
-            .context
-            .expand(&GraphRetrieveQuery {
-                session: self.config.session.clone(),
-                seeds,
-                views: Vec::new(),
-                budget: 32,
-                max_hops: 2,
-                top_k,
-            })
-            .await
-        {
-            Ok(res) => res.items.into_iter().map(|s| s.fragment).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// Run one turn. Injects recalled context, calls the model, persists both turns.
-    pub async fn run(&self, input: &str) -> Result<String, CoreError> {
-        let session = self.config.session.clone();
-        // 1) recall context from memo (+ optional graph expansion).
-        let mut fragments = self
-            .context
-            .recall(&RecallQuery::new(&session, input))
-            .await?;
-        let extra = self
-            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
-            .await;
-        for f in extra {
-            if !fragments.iter().any(|x| x.id == f.id) {
-                fragments.push(f);
-            }
-        }
-        let context = fragments
-            .iter()
-            .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // 2) persist the user turn.
-        let user = ContextFragment::new(&session, FragmentKind::Message, input);
-        let user_id = user.id.clone();
-        self.context.memorize(user).await?;
-
-        // 3) call the model.
-        let system = self.system_text();
-        let req = ModelRequest {
-            system,
-            context,
-            input: input.to_string(),
-        };
-        let resp = self.model.complete(&req).await?;
-
-        // 4) persist the assistant reply (+ graph edge + maybe compact).
-        let asst = ContextFragment::new(&session, FragmentKind::Message, resp.text.clone());
-        let asst_id = asst.id.clone();
-        self.context.memorize(asst).await?;
-        graph_relate_store(
-            &self.context,
-            &session,
-            &user_id,
-            &asst_id,
-            RelationKind::Temporal,
-        )
-        .await;
-        maybe_compact_store(
-            &self.context,
-            &session,
-            self.config.memory_compact_threshold,
-        )
-        .await;
-
-        Ok(resp.text)
-    }
-
-    /// Run a shell command inside the sandbox and remember the result.
-    pub async fn exec_tool(&self, command: &[String]) -> Result<String, CoreError> {
-        let spec = agent_sandbox::ExecSpec::command(command.to_vec());
-        let handle = self.sandbox.spawn(&spec).await?;
-        let out = self.sandbox.exec(&handle, command).await?;
-        self.sandbox.destroy(handle).await?;
-        let captured = format!(
-            "exit={} stdout={} stderr={}",
-            out.exit_code, out.stdout, out.stderr
-        );
-        self.context
-            .memorize(ContextFragment::new(
-                &self.config.session,
-                FragmentKind::ToolResult,
-                captured.clone(),
-            ))
-            .await?;
-        Ok(captured)
-    }
-
-    /// Stream one turn token-by-token. Mirrors [`Agent::run`] for the memo
-    /// contract (recall before / persist both turns after) but emits model
-    /// tokens as they arrive. The returned stream is `'static` and owns its
-    /// memo handle and model client, so the [`Agent`] may be dropped.
-    pub async fn run_stream(
-        &self,
-        input: &str,
-    ) -> Result<BoxStream<'static, Result<String, CoreError>>, CoreError> {
-        let session = self.config.session.clone();
-        // 1) recall context from memo (+ optional graph expansion).
-        let mut fragments = self
-            .context
-            .recall(&RecallQuery::new(&session, input))
-            .await?;
-        let extra = self
-            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
-            .await;
-        for f in extra {
-            if !fragments.iter().any(|x| x.id == f.id) {
-                fragments.push(f);
-            }
-        }
-        let context = fragments
-            .iter()
-            .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // 2) persist the user turn.
-        let user = ContextFragment::new(&session, FragmentKind::Message, input);
-        let user_id = user.id.clone();
-        self.context.memorize(user).await?;
-
-        // 3) call the model (streaming). The returned stream is owned / 'static.
-        let system = self.system_text();
-        let req = ModelRequest {
-            system,
-            context,
-            input: input.to_string(),
-        };
-        let upstream = self.model.stream(&req).await?;
-
-        // 4) wrap so we can collect + persist the assistant reply (and graph it).
-        let memo = self.context.clone();
-        let graph_enabled = self.config.memory_graph;
-        let threshold = self.config.memory_compact_threshold;
-        let session_for_relate = session.clone();
-        let wrapped = async_stream::stream! {
-            let mut collected = String::new();
-            let mut upstream = upstream;
-            while let Some(item) = upstream.next().await {
-                match item {
-                    Ok(tok) => {
-                        collected.push_str(&tok);
-                        yield Ok(tok);
-                    }
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
-                }
-            }
-            // persist the assistant reply as a single memo fragment.
-            let asst = ContextFragment::new(&session_for_relate, FragmentKind::Message, collected.clone());
-            let asst_id = asst.id.clone();
-            let _ = memo.memorize(asst).await;
-            if graph_enabled {
-                graph_relate_store(&memo, &session_for_relate, &user_id, &asst_id, RelationKind::Temporal).await;
-                maybe_compact_store(&memo, &session_for_relate, threshold).await;
-            }
-        };
-        Ok(Box::pin(wrapped))
-    }
-
-    /// Upper bound on model↔tool iterations within one turn (loop-guard).
-    pub const MAX_AGENTIC_STEPS: usize = 8;
-
-    /// Execute a single tool call inside the sandbox and return its captured
-    /// output. The command is taken from the `command` argument (a JSON array
-    /// of strings); the result is persisted to memo as a `ToolResult` fragment
-    /// so subsequent turns can recall it.
-    pub async fn exec_tool_call(&self, call: &ToolCall) -> Result<ToolResult, CoreError> {
-        Ok(dispatch_tool(
-            &self.sandbox,
-            &self.handlers,
-            call,
-            &self.context,
-            &self.config.session,
-        )
-        .await)
-    }
-
-    /// Run an agentic turn as an event stream: recall memo context → call the
-    /// model (with `tools`) → execute any requested tool calls in the sandbox →
-    /// refill memo → repeat until the model emits a final reply. The returned
-    /// stream is `'static` and owns every dependency, so the [`Agent`] may be
-    /// dropped while it is still consumed.
-    ///
-    /// Tool execution is delegated to codex's real `SandboxManager` via the
-    /// `CodexSandbox` backend (ADR-0005 §Decision) — never a bespoke
-    /// in-process executor. Tests inject a local [`Sandbox`](agent_sandbox::Sandbox)
-    /// through [`Agent::with_sandbox`].
-    pub async fn run_event_stream(
-        &self,
-        input: &str,
-        tools: &[Tool],
-    ) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
-        let memo = self.context.clone();
-        let model = self.model.clone();
-        let sandbox = self.sandbox.clone();
-        let handlers = self.handlers.clone();
-        let system = self.system_text();
-        let session = self.config.session.clone();
-        let tools: Vec<Tool> = tools.to_vec();
-        let input = input.to_string();
-        let graph_enabled = self.config.memory_graph;
-        let threshold = self.config.memory_compact_threshold;
-
-        // 1) recall context from memo (+ optional graph expansion).
-        let mut fragments = memo.recall(&RecallQuery::new(&session, &input)).await?;
-        let extra = self
-            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
-            .await;
-        for f in extra {
-            if !fragments.iter().any(|x| x.id == f.id) {
-                fragments.push(f);
-            }
-        }
-        let initial_context = fragments
-            .iter()
-            .map(|f| format!("[{}] {}", f.kind.as_str(), f.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        // 2) persist the user turn.
-        let user = ContextFragment::new(&session, FragmentKind::Message, input.clone());
-        let user_id = user.id.clone();
-        memo.memorize(user).await?;
-
-        let wrapped = async_stream::stream! {
-            yield Ok(AgentEvent::Step { phase: "recall".into(), label: None });
-            let mut tool_log = String::new();
-            let mut step = 0usize;
-
-            loop {
-                step += 1;
-                if step > Agent::MAX_AGENTIC_STEPS {
-                    yield Ok(AgentEvent::Step {
-                        phase: "loop_guard".into(),
-                        label: Some("max agentic steps exceeded".into()),
-                    });
-                    yield Ok(AgentEvent::Done { text: String::new() });
-                    break;
-                }
-
-                yield Ok(AgentEvent::Step { phase: "model".into(), label: None });
-                let system = system.clone();
-                let context = if tool_log.is_empty() {
-                    initial_context.clone()
-                } else {
-                    format!("{}\n{}", initial_context, tool_log)
-                };
-                let req = ModelRequest {
-                    system,
-                    context,
-                    input: input.clone(),
-                };
-                let turn = match model.complete_with_tools(&req, &tools).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
-                };
-
-                if turn.tool_calls.is_empty() {
-                    // 3) final reply: stream the token then terminate.
-                    yield Ok(AgentEvent::Token { text: turn.text.clone() });
-                    let asst = ContextFragment::new(
-                        &session,
-                        FragmentKind::Message,
-                        turn.text.clone(),
-                    );
-                    let asst_id = asst.id.clone();
-                    let _ = memo.memorize(asst).await;
-                    if graph_enabled {
-                        graph_relate_store(
-                            &memo,
-                            &session,
-                            &user_id,
-                            &asst_id,
-                            RelationKind::Temporal,
-                        )
-                        .await;
-                        maybe_compact_store(&memo, &session, threshold).await;
-                    }
-                    yield Ok(AgentEvent::Done { text: turn.text });
-                    break;
-                }
-
-                // 4) execute each requested tool call in the sandbox.
-                for call in &turn.tool_calls {
-                    yield Ok(AgentEvent::Step {
-                        phase: "tool_exec".into(),
-                        label: Some(call.name.clone()),
-                    });
-                    let result = dispatch_tool(&sandbox, &handlers, call, &memo, &session).await;
-                    tool_log.push_str(&format!(
-                        "\n\nTOOL_RESULT[{}]: {}",
-                        call.name, result.content
-                    ));
-                    yield Ok(AgentEvent::ToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                        result,
-                    });
-                }
-            }
-        };
-        Ok(Box::pin(wrapped))
-    }
-
-    /// Run an agentic turn and fold the event stream into the final text.
-    pub async fn run_agentic(&self, input: &str, tools: &[Tool]) -> Result<String, CoreError> {
-        let stream = self.run_event_stream(input, tools).await?;
-        let mut out = String::new();
-        let mut stream = stream;
-        while let Some(ev) = stream.next().await {
-            if let AgentEvent::Done { text } = ev? {
-                out = text;
-                break;
-            }
-        }
-        Ok(out)
     }
 }
 
@@ -1365,32 +1210,6 @@ async fn sandbox_exec(
         content,
         is_error: false,
     })
-}
-
-/// Route a tool call to the first handler that claims it, falling back to the
-/// default shell sandbox execution ([`sandbox_exec`]). Errors from the fallback
-/// are encoded as an `is_error` [`ToolResult`] rather than propagated, so a bad
-/// tool call never aborts the agentic turn.
-async fn dispatch_tool(
-    sandbox: &Arc<dyn Sandbox>,
-    handlers: &[Arc<dyn ToolHandler>],
-    call: &ToolCall,
-    context: &Arc<dyn ContextStore>,
-    session: &str,
-) -> ToolResult {
-    for h in handlers {
-        if h.handles(&call.name) {
-            return h.run(call, context, session).await;
-        }
-    }
-    match sandbox_exec(sandbox, context, session, call).await {
-        Ok(r) => r,
-        Err(e) => ToolResult {
-            call_id: call.id.clone(),
-            content: e.to_string(),
-            is_error: true,
-        },
-    }
 }
 
 /// Convenience: an in-process context store for quick local use.
@@ -1541,7 +1360,9 @@ mod tests {
             in_memory_context(),
         )
         .unwrap();
-        assert_eq!(agent.system_text(), "You are agent.");
+        let text = agent.system_text();
+        assert!(text.starts_with("You are agent."), "{text}");
+        assert!(text.contains("Permission preset"), "{text}");
     }
 
     #[test]
@@ -1551,7 +1372,8 @@ mod tests {
             ..AgentConfig::default()
         };
         let agent = Agent::with_model(cfg, Box::new(EchoModel), in_memory_context()).unwrap();
-        assert_eq!(agent.system_text(), "You are agent.\n\nBe terse.");
+        let text = agent.system_text();
+        assert!(text.starts_with("You are agent.\n\nBe terse."), "{text}");
     }
 
     #[tokio::test]
@@ -1599,13 +1421,13 @@ mod tests {
     }
 
     fn local_agent(model: Box<dyn ModelClient>) -> Agent {
-        Agent::with_sandbox(
-            AgentConfig::default(),
-            model,
-            in_memory_context(),
-            Arc::new(LocalSandbox),
-        )
-        .unwrap()
+        // Tests exercise the sandbox, not the approval gate: opt into the
+        // trusted mode explicitly (the default stays fail-closed).
+        let cfg = AgentConfig {
+            approval_mode: "auto".into(),
+            ..AgentConfig::default()
+        };
+        Agent::with_sandbox(cfg, model, in_memory_context(), Arc::new(LocalSandbox)).unwrap()
     }
 
     #[test]
@@ -1775,8 +1597,12 @@ mod tests {
     #[tokio::test]
     async fn exec_tool_call_runs_in_sandbox_and_persists() {
         let memo = in_memory_context();
+        let cfg = AgentConfig {
+            approval_mode: "auto".into(),
+            ..AgentConfig::default()
+        };
         let agent = Agent::with_sandbox(
-            AgentConfig::default(),
+            cfg,
             Box::new(StubModel::new("agent")),
             memo.clone(),
             Arc::new(LocalSandbox),
@@ -1838,11 +1664,13 @@ mod tests {
                         name: "shell".into(),
                         arguments: serde_json::json!({ "command": ["echo", "hello"] }),
                     }],
+                    usage: Some(seams::TokenUsage::new(7, 3, "stub")),
                 })
             } else {
                 Ok(ModelTurn {
                     text: format!("final reply for: {}", req.input),
                     tool_calls: vec![],
+                    usage: Some(seams::TokenUsage::new(9, 4, "stub")),
                 })
             }
         }
@@ -1874,11 +1702,13 @@ mod tests {
                         name: "shell".into(),
                         arguments: serde_json::json!({}),
                     }],
+                    usage: None,
                 })
             } else {
                 Ok(ModelTurn {
                     text: "recovered".into(),
                     tool_calls: vec![],
+                    usage: None,
                 })
             }
         }
@@ -1906,6 +1736,7 @@ mod tests {
                     name: "shell".into(),
                     arguments: serde_json::json!({ "command": ["echo", "x"] }),
                 }],
+                usage: None,
             })
         }
     }
@@ -1935,8 +1766,12 @@ mod tests {
     #[tokio::test]
     async fn with_handlers_dispatches_to_the_matching_handler() {
         let memo = in_memory_context();
+        let cfg = AgentConfig {
+            approval_mode: "auto".into(),
+            ..AgentConfig::default()
+        };
         let agent = Agent::with_handlers(
-            AgentConfig::default(),
+            cfg,
             Box::new(StubModel::new("agent")),
             memo.clone(),
             Arc::new(LocalSandbox),

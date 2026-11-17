@@ -3,12 +3,14 @@
 //! * [`agents`] — `POST/GET/POST{id}/DELETE /v1/agents[/{id}]`
 //! * [`sessions`] — `…/v1/agents/sessions[/{id}]`, `…/events`, `…/events/stream`,
 //!   plus the read-only `items` / `turns` / `subagents` listings
+//! * [`orchestration`] — agent teams and scheduled jobs
 //! * [`keys`] — self-serve API keys (`/v1/api-keys`)
 //! * [`stubs`] — resources that are recognised but not implemented (501):
 //!   vaults (+credentials), environments (+files/templates), artifacts
 
 pub mod agents;
 pub mod keys;
+pub mod orchestration;
 pub mod sessions;
 pub mod stubs;
 

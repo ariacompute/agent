@@ -29,6 +29,13 @@ pub mod event_type {
     pub const SESSION_ERROR: &str = "agent.session.error";
     #[allow(dead_code)]
     pub const OUTPUT_COMMAND_DELTA: &str = "agent.output.command_execution_output.delta";
+    /// A tool call needs a decision (ADR-0016).
+    pub const TURN_APPROVAL_REQUESTED: &str = "agent.turn.approval.requested";
+    /// The decision taken for that request. Decisions are synchronous, so
+    /// `requested` and `resolved` are always emitted as a pair.
+    pub const TURN_APPROVAL_RESOLVED: &str = "agent.turn.approval.resolved";
+    /// Token accounting for one model call (ADR-0015).
+    pub const TURN_USAGE: &str = "agent.turn.usage";
 }
 
 /// Message item type (an assistant reply).
@@ -101,6 +108,17 @@ impl EventEnvelope {
                 result,
             } => self.tool_call(id, name, arguments, result),
             AgentEvent::Token { text } => self.token(text),
+            AgentEvent::Approval {
+                id,
+                tool,
+                decision,
+                reason,
+            } => self.approval(id, tool, decision, reason.as_deref()),
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                model,
+            } => self.usage(*input_tokens, *output_tokens, model),
             AgentEvent::Done { text } => self.finish(text),
         }
     }
@@ -193,6 +211,62 @@ impl EventEnvelope {
                 "item": done_item,
             }),
         ]
+    }
+
+    /// An approval pair: `requested` then `resolved`. Both carry the same
+    /// approval id and the tool name; `resolved` carries the decision so a client
+    /// can render why a call ran (or did not).
+    fn approval(
+        &mut self,
+        id: &str,
+        tool: &str,
+        decision: &str,
+        reason: Option<&str>,
+    ) -> Vec<Value> {
+        let requested_seq = self.next_seq();
+        let resolved_seq = self.next_seq();
+        vec![
+            json!({
+                "type": event_type::TURN_APPROVAL_REQUESTED,
+                "event_id": format!("event_{requested_seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": requested_seq,
+                "approval_id": id,
+                "tool": tool,
+                "item_id": id,
+            }),
+            json!({
+                "type": event_type::TURN_APPROVAL_RESOLVED,
+                "event_id": format!("event_{resolved_seq}"),
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "sequence_number": resolved_seq,
+                "approval_id": id,
+                "tool": tool,
+                "item_id": id,
+                "decision": decision,
+                "reason": reason,
+            }),
+        ]
+    }
+
+    /// Token accounting frame (`agent.turn.usage`).
+    fn usage(&mut self, input_tokens: u64, output_tokens: u64, model: &str) -> Vec<Value> {
+        let seq = self.next_seq();
+        vec![json!({
+            "type": event_type::TURN_USAGE,
+            "event_id": format!("event_{seq}"),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "sequence_number": seq,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens.saturating_add(output_tokens),
+            },
+            "model": model,
+        })]
     }
 
     /// A streamed text delta. Opens the assistant message item on first delta.
@@ -345,6 +419,47 @@ mod tests {
         assert_eq!(frames[0]["type"], json!(event_type::TURN_IN_PROGRESS));
         assert_eq!(frames[0]["phase"], json!("tool_exec"));
         assert_eq!(frames[0]["label"], json!("shell"));
+    }
+
+    #[test]
+    fn approval_emits_requested_then_resolved_pair() {
+        let mut env = envelope();
+        let frames = env.push(&AgentEvent::Approval {
+            id: "call-1".into(),
+            tool: "shell".into(),
+            decision: "deny".into(),
+            reason: Some("no approval provider".into()),
+        });
+        assert_eq!(
+            types(&frames),
+            vec![
+                event_type::TURN_APPROVAL_REQUESTED.to_string(),
+                event_type::TURN_APPROVAL_RESOLVED.to_string()
+            ]
+        );
+        assert_eq!(frames[0]["approval_id"], json!("call-1"));
+        assert_eq!(frames[0]["tool"], json!("shell"));
+        assert!(frames[0].get("decision").is_none());
+        assert_eq!(frames[1]["decision"], json!("deny"));
+        assert_eq!(frames[1]["reason"], json!("no approval provider"));
+        // Both frames carry a distinct, increasing sequence number.
+        assert_eq!(frames[0]["sequence_number"], json!(1));
+        assert_eq!(frames[1]["sequence_number"], json!(2));
+    }
+
+    #[test]
+    fn usage_frame_reports_totals_and_model() {
+        let mut env = envelope();
+        let frames = env.push(&AgentEvent::Usage {
+            input_tokens: 12,
+            output_tokens: 5,
+            model: "gpt-4o-mini".into(),
+        });
+        assert_eq!(types(&frames), vec![event_type::TURN_USAGE.to_string()]);
+        assert_eq!(frames[0]["usage"]["input_tokens"], json!(12));
+        assert_eq!(frames[0]["usage"]["output_tokens"], json!(5));
+        assert_eq!(frames[0]["usage"]["total_tokens"], json!(17));
+        assert_eq!(frames[0]["model"], json!("gpt-4o-mini"));
     }
 
     #[test]

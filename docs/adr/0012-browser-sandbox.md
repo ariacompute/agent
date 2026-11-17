@@ -53,7 +53,7 @@ and its resource limits.
    consult handlers **before** falling back to the default shell sandbox
    (`sandbox_exec`). The `AgentEvent` contract is unchanged.
 8. **Provider wiring**: `agent-sandbox` gains `SandboxProvider::Browser` (parse /
-   as_str), but `from_provider` returns `NotConfigured` — mirroring `Codex` — because
+   as_str), but `from_provider` returns `NotConfigured` because
    the `BrowserSandbox` lives in `aria-agent-browser`. The cloud and FFI runtimes
    special‑case `sandbox_provider == "browser"`, construct a `BrowserSandbox`, wrap
    it as a `BrowserToolHandler`, and inject it via `Agent::with_handlers` while the
@@ -70,7 +70,7 @@ and its resource limits.
 - `agent-core` depends only on the abstract `ToolHandler`; browser code is fully
   quarantined in `aria-agent-browser`.
 - The frozen streaming/SSE contract and the FFI boundary are preserved.
-- The cloud runtime's deep codex integration (`CodexSandbox`) is unchanged in shape;
-  `Browser` follows the same "constructed by the runtime, injected via
-  `with_handlers`" pattern.
+- `Browser` follows the "constructed by the runtime, injected via
+  `with_handlers`" pattern, which is also how the `sandbox` seam is registered in
+  the plugin registry (ADR-0014).
 - New tool families can be added in the future by implementing `ToolHandler` only.

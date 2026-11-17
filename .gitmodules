@@ -1,4 +1,0 @@
-[submodule "codex"]
-	path = codex
-	url = https://github.com/ariacompute/codex.git
-	branch = main

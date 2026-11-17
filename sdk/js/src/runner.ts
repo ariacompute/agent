@@ -13,6 +13,7 @@ import type {
   RunResult,
   StreamEvent,
   StreamedRunResult,
+  TokenUsage,
 } from "./types.js";
 import type { Agent } from "./agent.js";
 import { Session } from "./session.js";
@@ -126,6 +127,8 @@ export async function runStreamed(
   let collected = "";
   let turnId: string | undefined;
   let failed: string | undefined;
+  // Usage frames are cumulative on the server, so the last frame wins.
+  let usage: TokenUsage | undefined;
 
   // The upstream SSE body is single-consumer, so it is drained once into a
   // buffer that both `events` and `completed` can iterate independently.
@@ -164,6 +167,9 @@ export async function runStreamed(
           }
           break;
         }
+        case "agent.turn.usage":
+          usage = toTokenUsage(frame.usage, frame.model);
+          break;
         case "agent.turn.failed":
           failed = (frame.error && frame.error.message) ?? "run failed";
           break;
@@ -194,10 +200,28 @@ export async function runStreamed(
       lastAgent: agent,
       sessionId: session.id,
       turnId,
+      ...(usage ? { usage } : {}),
     };
   })();
 
   return { events: events(), completed };
+}
+
+/** Normalise a `usage` object from a frame (`snake_case` on the wire). */
+export function toTokenUsage(
+  raw: Record<string, any> | undefined,
+  model?: string,
+): TokenUsage | undefined {
+  if (!raw) return undefined;
+  const inputTokens = Number(raw.input_tokens ?? 0);
+  const outputTokens = Number(raw.output_tokens ?? 0);
+  const totalTokens = Number(raw.total_tokens ?? inputTokens + outputTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    ...(model ? { model } : {}),
+  };
 }
 
 /** Narrow a raw frame to the typed union (unknown types pass through). */
@@ -215,6 +239,19 @@ export function decodeEvent(frame: Record<string, any>): StreamEvent {
       return { type, delta: String(frame.delta ?? ""), raw: frame };
     case "agent.turn.output_text.done":
       return { type, text: String(frame.text ?? ""), raw: frame };
+    case "agent.turn.approval.requested":
+      return { type, approvalId: frame.approval_id, tool: frame.tool, raw: frame };
+    case "agent.turn.approval.resolved":
+      return {
+        type,
+        approvalId: frame.approval_id,
+        tool: frame.tool,
+        decision: frame.decision,
+        reason: frame.reason ?? null,
+        raw: frame,
+      };
+    case "agent.turn.usage":
+      return { type, usage: toTokenUsage(frame.usage, frame.model), raw: frame };
     case "agent.turn.completed":
       return { type, output: frame.turn?.output, raw: frame };
     case "agent.turn.failed":

@@ -14,6 +14,7 @@ pub const SESSION_OBJECT: &str = "agent.session";
 pub const TURN_OBJECT: &str = "agent.session.turn";
 pub const ITEM_OBJECT: &str = "agent.session.item";
 pub const SUBAGENT_OBJECT: &str = "agent.session.subagent";
+pub const SESSION_TITLE_OBJECT: &str = "agent.session.title";
 pub const LIST_OBJECT: &str = "list";
 
 /// Amount of reasoning effort used by an agent.
@@ -134,6 +135,18 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateSessionRequest {
     pub instructions: Option<String>,
+}
+
+/// Projected session title (`session_titles`, ADR-0015).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionTitle {
+    pub object: String,
+    pub session_id: String,
+    pub title: String,
+    /// `first_prompt` (deterministic fallback) or `provider` (async override).
+    pub source: String,
+    /// Epoch milliseconds of the last write.
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

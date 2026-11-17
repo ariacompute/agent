@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use crate::auth::{ApiKeyScopes, Principal, PrincipalKind};
 use crate::store::{
     AgentStore, ApiKeyRow, ApiKeyStore, ItemRow, NewApiKeyRow, ResolvedKey, SessionRow,
-    SessionStore, TurnRow,
+    SessionStore, TitleRow, TitleStore, TurnRow,
 };
 use crate::types::{Agent, AGENT_OBJECT};
 use crate::AppError;
@@ -30,10 +30,12 @@ struct Inner {
     turns: Vec<TurnRow>,
     items: Vec<ItemRow>,
     keys: Vec<(NewApiKeyRow, Option<String>)>,
+    /// `(principal_id, row)` pairs: one title per session per tenant.
+    titles: Vec<(String, TitleRow)>,
 }
 
-/// One lock-backed store implementing [`AgentStore`], [`SessionStore`] and
-/// [`ApiKeyStore`]. Cheap `Clone` is not provided on purpose: wrap it in an
+/// One lock-backed store implementing [`AgentStore`], [`SessionStore`],
+/// [`TitleStore`] and [`ApiKeyStore`]. Cheap `Clone` is not provided on purpose: wrap it in an
 /// `Arc` and coerce to the trait objects.
 #[derive(Default)]
 pub struct MemoryStore {
@@ -258,6 +260,34 @@ impl SessionStore for MemoryStore {
             .collect();
         rows.sort_by_key(|i| (i.seq, i.created_at));
         Ok(rows.into_iter().cloned().collect())
+    }
+}
+
+#[async_trait]
+impl TitleStore for MemoryStore {
+    async fn put_title(&self, principal: &Principal, row: &TitleRow) -> Result<(), AppError> {
+        let mut g = self.inner.lock().unwrap();
+        match g
+            .titles
+            .iter_mut()
+            .find(|(owner, t)| owner == &principal.id && t.session_id == row.session_id)
+        {
+            Some((_, existing)) => *existing = row.clone(),
+            None => g.titles.push((principal.id.clone(), row.clone())),
+        }
+        Ok(())
+    }
+
+    async fn get_title(
+        &self,
+        principal: &Principal,
+        session: &str,
+    ) -> Result<Option<TitleRow>, AppError> {
+        let g = self.inner.lock().unwrap();
+        Ok(g.titles
+            .iter()
+            .find(|(owner, t)| t.session_id == session && can_see(principal, owner))
+            .map(|(_, t)| t.clone()))
     }
 }
 

@@ -5,16 +5,15 @@
 
 **面向 AI Agent 的分层 agent 平台**
 
-基于 OpenAI [`codex`](https://github.com/openai/codex) harness 构建，向上提供 (a)<br/>
+以能力接缝（capability seams）组合的 agent 运行时，向上提供 (a)<br/>
 **Rust + 云端 API**（对应 **OpenAI beta Agents** 资源面）、(b) **JS / Python<br/>
 SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** —— 它们共享<br/>
 同一套 `recall → model → memorize` 运行时与可插拔 sandbox。
 
-[English](./README.md) · **简体中文** · [文档](./docs/adr/0001-submodule-strategy.md)
+[English](./README.md) · **简体中文** · [文档](./docs/architecture.md)
 
 [![][release-shield]][release-link] [![][language-shield]][language-link] [![][license-shield]][license-link] [![][lastcommit-shield]][lastcommit-link]
 <br/>
-[![][sdks-shield]][sdks-link] [![][tests-shield]][tests-link] [![][docs-shield]][docs-link] [![][codex-shield]][codex-link]
 </div>
 
 <details>
@@ -35,7 +34,6 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 
 **架构与 SDK**
 
-- [🔗 codex 子模块](#-codex-子模块)
 - [🌐 浏览器 sandbox](#-浏览器-sandbox)
 - [🧠 记忆图与 memo 工具族](#-记忆图与-memo-工具族)
 - [🔌 OpenAI Agents API 兼容性](#-openai-agents-api-兼容性)
@@ -60,7 +58,8 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 继续对话并流式输出——而运行时自行决定记忆存于何处、工具在何处执行：
 
 - 🧩 **分层 agent 运行时** —— `aria-agent-core` 运行 `recall → model → memorize`；工具在可插拔的 `Sandbox`（Docker / Kata / Cube / Browser）中执行。
-- 🔗 **深度 codex 集成** —— OpenAI 的 `codex` harness 以 git 子模块方式引入（含 sandboxing + memories），并通过一个小补丁提升为仓库根 Cargo 工作区。
+- 🔌 **能力接缝** —— 模型、sandbox、存储、会话、工具、审批、子智能体与调度都是可替换接缝，由插件注册表在启动期装配并 fail-closed（`aria-agent-plugin`，ADR-0014）。
+- 🛠️ **统一工具管线** —— 解析 → 权限预设 → 审批 → 分发 → 结果后处理（截断 + 外置），无审批方时拒绝并回灌原因而不是放行（`aria-agent-tools`，ADR-0016）。
 - ☁️ **云端 API** —— `aria-agent-cloud` 是一个 axum 服务，讲 OpenAI **beta Agents** 资源面，Postgres + pgvector 同时保存元数据与上下文，并支持 SSE 流式。
 - 📱 **端侧存储** —— `aria-agent-memo`（aria memo / SQLite）保存 local-first 的上下文副本，与云端后端通过同一个 `ContextStore` trait 互换。
 - 🌐 **五语言 SDK** —— JS / Python 镜像 OpenAI Agents SDK；Rust / Swift / Kotlin 把运行时嵌入进程内，无需服务端、无需网络。
@@ -76,11 +75,13 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 
 | 模块 | 说明 |
 |------|------|
-| **codex submodule** | `openai/codex`，位于 `codex/`（harness、sandboxing、memories）。 |
 | **aria-agent-memo** | 端侧/嵌入式**上下文存储**（aria memo / SQLite，与 `aria-memo` CLI 同款 `memories` 表结构），实现 `aria-agent-core::context` 契约。 |
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube / Browser。 |
 | **aria-agent-browser** | 浏览器 sandbox：六镜像 `BrowserCatalog` + `BrowserSandbox`（复用 Docker/Kata）+ 浏览器工具族。 |
-| **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`，工具在 sandbox 中执行。 |
+| **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`、接缝定义、会话事件流、工具管线。 |
+| **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
+| **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
+| **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
 | **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
 | **bindings** | `bindings/swift`（SwiftPM）与 `bindings/kotlin`（Android）。 |
@@ -89,7 +90,7 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 
 > **存储边界：** **云端**把对话 / 长期上下文保存在 Postgres + pgvector
 >（`context_fragments`，按 principal 分片）—— pgvector 为必需，缺少则启动失败。
-> **端侧** SDK 则保留其嵌入式 sled 存储。详见
+> **端侧** SDK 则保留其 aria memo（SQLite）存储。详见
 >`docs/adr/0010-context-storage-pgvector.md`。
 
 <div align="right">
@@ -101,24 +102,20 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 ## 🚀 快速开始
 
 ```bash
-# 1. codex 子模块 + 根工作区补丁（见上文「codex 子模块」）
-git submodule update --init --depth 1 codex
-git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
-
-# 2. 构建
+# 1. 构建
 cargo build --workspace
 
-# 3. 测试
+# 2. 测试
 cargo test --workspace
 
-# 4. lint
+# 3. lint
 cargo clippy --workspace --all-targets -- -D warnings
 
-# 5. 生成 Swift/Kotlin 绑定
+# 4. 生成 Swift/Kotlin 绑定
 # = cargo run -p aria-agent-ffigen
 just ffi
 
-# 6. 运行云端服务
+# 5. 运行云端服务
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/agent
 export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
@@ -349,44 +346,6 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | 卷 | 对应路径 | 用途 |
 |----|----------|------|
 | `pgdata` | Postgres（pgvector） | `agents` / `runs` 元数据 **与** `context_fragments`（上下文记忆）。 |
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## 🔗 codex 子模块
-
-本仓库以 git 子模块方式依赖 OpenAI 的
-[`codex`](https://github.com/openai/codex)，位于 `codex/`。上游 codex 的
-Rust 工作区位于 `codex/codex-rs/`，**仓库根目录没有 `Cargo.toml`**，因此通过
-git 依赖（`package = "codex-*"`）无法解析，必须打一个补丁。
-
-`patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch` 把
-`codex-rs` 的工作区定义提升到仓库根目录（并把内部的 `path` 依赖统一加上
-`codex-rs/` 前缀）。这正是 `ariacompute/codex` fork（branch `main`）
-所做的改动。在检出后，于 **`codex/` 子模块内部**应用该补丁：
-
-```bash
-# 1. 克隆子模块（浅克隆）
-git submodule update --init --depth 1 codex
-
-# 2. 在子模块内部应用根工作区补丁
-git -C codex apply ../patch/0001-ARIACOMPUTE-PATCH-make-codex-a-root-cargo-workspace.patch
-```
-
-应用后，`codex/Cargo.toml` 会出现在仓库根目录，cargo 即可传递性地解析
-`codex-*` 各个 crate。该补丁**不会**提交进子模块——它存放在仓库根的
-`patch/` 目录——因此每次重新初始化子模块时都需重新执行。如需撤销补丁并恢复
-子模块原状：
-
-```bash
-git -C codex checkout -- . && git -C codex clean -fd
-```
-
-> 该补丁是 `docs/adr/0005-codex-integration.md` 描述的深度编译集成所必需的。
-> 若你只构建不依赖 codex crate 的本仓库 crate，可以跳过此步。
 
 <div align="right">
 
@@ -773,7 +732,11 @@ do {
             localDbPath: "~/.ariacompute/memo.db",
             cloudBaseUrl: "http://localhost:3000",
             cloudApiKey: ""
-        )
+        ),
+        // Permission preset: read_only | workspace_write | danger_full_access.
+        permissionPreset: "workspace_write",
+        // Approval mode: auto (trusted local run) | deny (fail-closed).
+        approvalMode: "auto"
     ))
 
     // 1) 一次性运行
@@ -819,7 +782,11 @@ fun main() {
                 localDbPath = "~/.ariacompute/memo.db",
                 cloudBaseUrl = "http://localhost:3000",
                 cloudApiKey = ""
-            )
+            ),
+            // Permission preset: read_only | workspace_write | danger_full_access.
+            permissionPreset = "workspace_write",
+            // Approval mode: auto (trusted local run) | deny (fail-closed).
+            approvalMode = "auto"
         )
     )
 
@@ -944,8 +911,6 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 | `aria-agent serve` | 启动云端 HTTP 服务（默认子命令） |
 | `aria-agent setup` / `upgrade` | 配置 Releases 源 / 自更新二进制与 cdylib |
 
-任何依赖 `codex-*` 的 crate 在构建前都必须初始化 `codex` 子模块（并应用根工作区补丁）——
-参见 [codex 子模块](#-codex-子模块)。不依赖 codex 的 crate 无需子模块即可构建。
 
 <div align="right">
 
@@ -959,11 +924,9 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 
 | 文档 | 覆盖内容 |
 |---|---|
-| [子模块策略](./docs/adr/0001-submodule-strategy.md) | 为何 `codex` 不进 workspace、以设计方式引用 |
 | [FFI 边界](./docs/adr/0002-ffi-boundary.md) | `ariacompute-agent` 稳定导出面与重新生成规则 |
 | [Sandbox 提供者](./docs/adr/0003-sandbox-providers.md) | Docker / Kata / Cube / Browser provider trait |
 | [Memo 存储](./docs/adr/0004-memo-storage.md) | `aria-agent-memo` 端侧存储表结构 |
-| [codex 集成](./docs/adr/0005-codex-integration.md) | 与 `codex` 子模块的深度编译集成 |
 | [多租户 API Key](./docs/adr/0007-multi-tenant-api-keys.md) | 管理员 / 租户密钥模型与 `POST /v1/api-keys` |
 | [SDK 接口](./docs/adr/0008-sdk-interface.md) | 无会话的 happy-path SDK 人体工学 |
 | [OpenAI beta Agents API](./docs/adr/0009-openai-beta-agents-api.md) | 流式事件信封契约 |
@@ -1021,7 +984,6 @@ This project is [MIT](./LICENSE) licensed.
 [sdks-link]: #-sdk-示例
 [tests-link]: ./justfile
 [docs-link]: ./docs/adr
-[codex-link]: #-codex-子模块
 
 [release-shield]: https://img.shields.io/github/v/release/ariacompute/agent?style=flat-square&labelColor=black&color=555
 [language-shield]: https://img.shields.io/badge/language-Rust%20%2F%20Swift%20%2F%20Kotlin-555?style=flat-square&labelColor=black
@@ -1030,6 +992,5 @@ This project is [MIT](./LICENSE) licensed.
 [sdks-shield]: https://img.shields.io/badge/SDKs-5_languages-555?style=flat-square&labelColor=black
 [tests-shield]: https://img.shields.io/badge/tests-cargo_test--workspace-555?style=flat-square&labelColor=black
 [docs-shield]: https://img.shields.io/badge/docs-12_ADRs-555?style=flat-square&labelColor=black
-[codex-shield]: https://img.shields.io/badge/codex-submodule-555?style=flat-square&labelColor=black
 
 [back-to-top]: https://img.shields.io/badge/-BACK_TO_TOP-151515?style=flat-square

@@ -1,8 +1,7 @@
 # Tasks & milestones
 
-## Milestone 1 — scaffold & submodule
-- [x] Add `codex` submodule (`git submodule add`).
-- [x] Root `Cargo.toml` workspace (`crates/*`), `justfile`, `.gitmodules`.
+## Milestone 1 — scaffold
+- [x] Root `Cargo.toml` workspace (`crates/*`), `justfile`, `rust-toolchain`.
 
 ## Milestone 2 — cross-cutting capabilities
 - [x] `aria-agent-memo`: `MemoStore` (sled) — `memorize`/`recall`/`compact`/`get_by_key`;
@@ -92,8 +91,7 @@ see `docs/followups/*` for the downstream cleanups.
       frame leaks, and that the last frame is always terminal.
 - [x] `aria-agent-cloud`: `run_agent_stream` drives
       `Agent::run_event_stream(input, agent_tools())` with a `shell` tool,
-      executed by the codex sandbox backend (`sandbox_provider = "codex"`,
-      ADR-0005).
+      executed by the docker sandbox backend (ADR-0003/ADR-0018).
 - [x] `aria-agent-cloud`: `GET /v1/agents` list (admins see all, tenants their
       own) + idempotent default agent seed `agent-demo` / `Agent Demo` with an
       in-place rename of the legacy `playground-demo` row.
@@ -211,7 +209,7 @@ see `docs/followups/*` for the downstream cleanups.
       `browser_use`) + `BrowserToolHandler`; `browser_use` drives
       `BrowserSandbox::switch_to` for runtime engine switching.
 - [x] `aria-agent-sandbox`: `SandboxProvider::Browser` variant (parse / as_str),
-      `from_provider` returns `NotConfigured` (mirrors `Codex`, no heavy dep).
+      `from_provider` returns `NotConfigured` (no heavy dep in the sandbox crate).
 - [x] `aria-agent-cloud`: `build_agent` special-cases `sandbox_provider =
       "browser"` to inject `BrowserSandbox` as a `ToolHandler` while the shell
       fallback stays on Docker; `agent_tools()` appends `browser_tools()`.
@@ -311,9 +309,76 @@ cargo test --workspace   # green
 just cov-check           # 100% lines outside docs/coverage.md exclusions
 ```
 
+## Milestone 8 — remove codex
+- [x] Deleted the `codex/` submodule, `.gitmodules`, the codex git dependencies,
+      the exact `rama-*` pins, the `[patch.crates-io]` section and the Windows
+      `winapi` patch entry.
+- [x] Deleted `CodexSandbox` / `SandboxProvider::Codex`; `codex` now parses to
+      `None` and the cloud fails with a configuration error (ADR-0018).
+- [x] Deleted ADR-0001 / ADR-0005; rewrote ADR-0003 / ADR-0012 and every doc that
+      referenced the submodule.
+
+## Milestone 9 — plugin kernel & seams
+- [x] New `aria-agent-plugin`: `SeamKey`, `SeamRole`, `PluginManifest`,
+      `Registry::freeze` with duplicate/`core`-uniqueness/topo-sort/cycle checks and
+      `PluginError` (ADR-0014).
+- [x] `aria-agent-core` split into `agent_loop`, `prompt`, `token_meter`,
+      `seams/*` and `session/*`; seams are resolved once in `Agent::with_handlers`.
+
+## Milestone 10 — session event stream
+- [x] `SessionEvent` + `SessionRecorder` (batch flush, retry-on-failure) and
+      `SessionProjection::replay` (turns/items/title/todos/plan/usage/compactions).
+- [x] JSONL persistence, cursor query (`from_seq`), token meter, pressure
+      compaction, overflow compaction with a single retry, deterministic session
+      title plus an optional async provider, ordered system-prompt assembly
+      (ADR-0015).
+
+## Milestone 11 — tool pipeline & approvals
+- [x] `ToolExecutionPipeline`: resolve → preset → approval → dispatch →
+      post-process (truncate + spill); `AgentEvent::Approval` / `Usage`
+      (ADR-0016).
+- [x] `SandboxPolicy::workspace` single root; `read_only` / `workspace_write` /
+      `danger_full_access` presets; fail-closed tests for missing broker / web
+      provider / fs root.
+
+## Milestone 12 — built-in tool families
+- [x] `aria-agent-tools`: fs / shell / jobs / terminal (`pty`) / skills / web
+      (`web`) / ask_user / plan / todo / memo, each with normal + abnormal tests.
+- [x] `HttpWeb` provider (SSRF gate, redirect cap, body cap, content-type
+      whitelist); memo tools moved out of `aria-agent-core`.
+
+## Milestone 13 — orchestration
+- [x] `aria-agent-orchestrator`: in-process sub-agents (namespaced child session,
+      concurrency cap, cached `wait`), agent teams (validated DAG, gated claims),
+      scheduled jobs (single-flight ticker, advance-before-run) (ADR-0017).
+
+## Milestone 14 — cloud & SDK surface
+- [x] `migrations/0006..0008` (`scheduled_jobs`, `agent_teams`, `session_titles`),
+      Postgres `TeamStore` / `ScheduleSeam`, `/v1/agent-teams` and
+      `/v1/scheduled-jobs` routes, orchestrator tools wired per principal.
+- [x] Session titles: the cloud installs a `SessionPersistence` projection that
+      writes `SessionEvent::TitleSet` into `session_titles` (deterministic title
+      once, provider override may replace it) and exposes
+      `GET /v1/agents/sessions/{id}/title`.
+- [x] Cloud sub-agents: `InProcessSubagents` + `CloudSubagentsFactory` rebuild the
+      agent for each child with `allow_subagents = false` (depth one), so
+      `subagent_run` / `subagent_list` are real tools in the cloud.
+- [x] Loop parity for titles: `run` / `run_stream` now record `turn_started`,
+      `title_set` (flushed before the model call) and a terminal event, so a
+      delegated child (whose provider calls `run`) gets a `session_titles` row.
+      Child ids are parsed with `seams::child_session` / `parent_session`, and
+      `GET /v1/agents/sessions/{child}/title` is authorised through the parent.
+- [x] `SdkAgentConfig` gains `permission_preset` / `approval_mode`; bindings
+      regenerated via `just ffi`; JS/Python SDKs decode `agent.turn.approval.*`
+      and `agent.turn.usage` and expose `result.usage`.
+
+## Milestone 15 — docs & verification
+- [x] ADR-0014..0018, rewritten `docs/architecture.md`, `docs/coverage.md`,
+      README/README_cn, AGENTS.md rules 4/14/15.
+- [x] `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
+      `cargo test --workspace`, `just ffi`, `just sdk-js-test`, `just sdk-py-test`.
+
 ## Open follow-ups
-* Wire real codex `sandboxing` / `linux-sandbox` / `memories` crates as precise
-  path dependencies for deeper integration.
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.
 * Publish the six browser images and wire `runner.mjs` into the release pipeline
