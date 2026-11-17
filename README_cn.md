@@ -137,8 +137,8 @@ cargo run -p aria-agent-cloud
 # 交互式选择 Releases 源（默认 github，或 gitee）。
 # 选择会作为 `upgrade_url` 写入 ~/.ariacompute/agent-cli.yml。
 aria-agent setup
-#   1) github  -> https://github.com/ariacompute
-#   2) gitee   -> https://gitee.com/ariacompute
+# 1) github  -> https://github.com/ariacompute
+# 2) gitee   -> https://gitee.com/ariacompute
 
 # 查看当前 CLI 配置状态。
 aria-agent setup --status
@@ -148,14 +148,14 @@ aria-agent setup --clear
 
 # 从 Releases 自更新本程序与 libaria-agent_ffi。
 # 读取 agent-cli.yml 中的 `upgrade_url`；用 --url 可临时覆盖。
-aria-agent upgrade            # 最新稳定版
-aria-agent upgrade 0.7.2      # 指定版本
+aria-agent upgrade        # 最新稳定版
+aria-agent upgrade 0.7.2  # 指定版本
 aria-agent upgrade --url https://github.com/ariacompute
 
 # 启动云端 HTTP 服务（默认子命令）。读取 agent-cli.yml，并把
 # ARIA_AGENT_FFI_LIB 指向 ~/.ariacompute/lib。
 aria-agent serve
-#   --port <n>  监听端口（默认：CLOUD_PORT 环境变量或 3000）
+# --port <n>  监听端口（默认：CLOUD_PORT 环境变量或 3000）
 aria-agent serve --port 3000
 ```
 
@@ -230,7 +230,7 @@ docker compose up
 **方式 B — 一条命令由 compose 构建并运行：**
 
 ```bash
-export BUILD_PROXY=http://127.0.0.1:7897   # 可选；不设置则直连公网
+export BUILD_PROXY=http://127.0.0.1:7897  # 可选；不设置则直连公网
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 docker compose up --build
 ```
@@ -287,7 +287,7 @@ HNSW 余弦索引），按 `principal_id` 分片。compose 使用
 `CREATE EXTENSION IF NOT EXISTS vector` 并校验，缺少扩展时**直接启动失败**
 （不做关键词降级）。
 
-端侧 SDK 继续使用自己的嵌入式 sled 存储（`aria-agent-memo`），不受此约束。
+端侧 SDK 继续使用自己的 aria memo（SQLite）存储（`aria-agent-memo`），不受此约束。
 
 ### 5. 通过 Docker socket 的 sandbox
 
@@ -444,6 +444,9 @@ agent 不只是读/写 `aria-agent-memo` 存储——它会在**运行过程中�
 | `agent.turn.item.done` | 完成的 `item`；`function_call` 还附带执行结果 `result` |
 | `agent.turn.output_text.delta` | `item_id`、`delta` |
 | `agent.turn.output_text.done` | `item_id`、`text` |
+| `agent.turn.approval.requested` | `approval_id`、`tool`、`item_id` |
+| `agent.turn.approval.resolved` | `approval_id`、`tool`、`decision`（`allow` / `deny` / `unavailable`）、`reason` |
+| `agent.turn.usage` | `usage{input_tokens, output_tokens, total_tokens}`、`model` |
 | `agent.turn.completed` | 终止事件：`turn{status:"completed", output}` |
 | `agent.turn.failed` | 终止事件：`turn{status:"failed"}`、`error` |
 
@@ -465,6 +468,10 @@ streamed = await Runner.run_streamed(agent, "tell me a joke")
 async for event in streamed.events:
     if event["type"] == "agent.turn.output_text.delta":
         print(event["delta"], end="", flush=True)
+    elif event["type"] == "agent.turn.approval.resolved":
+        print(f"\n[tool {event['tool']}: {event['decision']}]")
+    elif event["type"] == "agent.turn.usage":
+        print(f"\n[tokens: {event['usage']['total_tokens']}]")
 ```
 
 ### 默认智能体
@@ -526,14 +533,14 @@ JS / Python SDK 是服务仍然暴露的 beta Agents REST API 的薄客户端 �
 
 ```python
 agent = Agent(name="History tutor", memory_backend="both", memo_db="~/.ariacompute/memo.db")
-session.memorize("user_name", "Ada")                    # -> 写入 both
-session.recall("user_name", backend="local")            # -> 只读 local 副本
+session.memorize("user_name", "Ada")          # -> 写入 both
+session.recall("user_name", backend="local")  # -> 只读 local 副本
 ```
 
 ```typescript
 const agent = new Agent({ name: "History tutor", memory: "both", memoDb: "~/.ariacompute/memo.db" });
-await session.memorize("user_name", "Ada");                       // -> 写入 both
-await session.recall("user_name", { backend: "local" });          // -> 只读 local 副本
+await session.memorize("user_name", "Ada");               // -> 写入 both
+await session.recall("user_name", { backend: "local" });  // -> 只读 local 副本
 ```
 
 `both` 不伪造数据：单端失败只记录告警并容忍，双端都失败才报错。
@@ -577,7 +584,7 @@ async def main() -> None:
     # 2) 复用同一会话继续对话 —— 回复可以同时引用前面的轮次与这条记忆
     second = await Runner.run(agent, "我叫什么名字？", session=session)
     print(second.final_output)
-    print(session.recall("user_name"))  # -> "Ada"
+    print(session.recall("user_name"))                   # -> "Ada"
     print(session.recall("user_name", backend="local"))  # 只读 local（aria memo）副本
 
     # 3) 流式运行
@@ -585,8 +592,14 @@ async def main() -> None:
     async for event in streamed.events:
         if event["type"] == "agent.turn.output_text.delta":
             print(event["delta"], end="")
+        elif event["type"] == "agent.turn.approval.resolved":
+            print(f"\n[tool {event['tool']}: {event['decision']} - {event.get('reason') or ''}]")
+        elif event["type"] == "agent.turn.usage":
+            print(f"\n[tokens: {event['usage']['total_tokens']}]")
     final = await streamed.completed
     print(final.final_output)
+    if final.usage:
+        print(f"tokens: {final.usage.total_tokens}")
 
 
 asyncio.run(main())
@@ -611,9 +624,12 @@ except AriaError as err:
         print("bad option:", err)
 ```
 
-只读的会话端点（不修改上下文）同样可用：`session.get_items()` 与
-`session.get_turns()`（GET `…/items`、`…/turns`）。JS SDK 镜像了上述全部能力
-（`AriaError`、`run`/`runStreamed` 的 `maxTurns`、`Session.getItems()`/`getTurns()`）。
+只读的会话端点（不修改上下文）同样可用：`session.get_items()`、
+`session.get_turns()` 与 `session.get_title()`（GET `…/items`、`…/turns`、
+`…/title`）。标题来自 `title_set` 事件的投影；被委派的子会话
+（`<parent>::sub::<id>`）可通过父会话归属读取，尚无标题的会话返回 404。
+JS SDK 镜像了上述全部能力（`AriaError`、`run`/`runStreamed` 的 `maxTurns`、
+`Session.getItems()`/`getTurns()`/`getTitle()`）。
 
 ### TypeScript
 
@@ -649,17 +665,23 @@ await session.memorize("user_name", "Ada");
 // 2) 复用同一会话继续对话 —— 回复可以同时引用前面的轮次与这条记忆
 const second = await run(agent, "我叫什么名字？", { session });
 console.log(second.finalOutput);
-console.log(await session.recall("user_name")); // -> "Ada"
-console.log(await session.recall("user_name", { backend: "local" })); // 只读 aria memo
+console.log(await session.recall("user_name"));                        // -> "Ada"
+console.log(await session.recall("user_name", { backend: "local" }));  // 只读 aria memo
 
 // 3) 流式运行
 const streamed = await runStreamed(agent, "讲一个冷知识", { session });
 for await (const event of streamed.events) {
   if (event.type === "agent.turn.output_text.delta") {
     process.stdout.write(event.delta);
+  } else if (event.type === "agent.turn.approval.resolved") {
+    console.log(`\n[tool ${event.tool}: ${event.decision}]`);
+  } else if (event.type === "agent.turn.usage") {
+    console.log(`\n[tokens: ${event.usage.total_tokens}]`);
   }
 }
-console.log((await streamed.completed).finalOutput);
+const result = await streamed.completed;
+console.log(result.finalOutput);
+if (result.usage) console.log(`tokens: ${result.usage.totalTokens}`);
 ```
 
 ### Rust（进程内）
@@ -671,8 +693,17 @@ struct Printer;
 
 impl SdkAgentListener for Printer {
     fn on_event(&self, event: SdkStreamEvent) {
-        if let SdkStreamEvent::Token { text } = event {
-            print!("{text}");
+        match event {
+            SdkStreamEvent::Token { text } => print!("{text}"),
+            SdkStreamEvent::Approval { tool, decision, reason, .. } => {
+                eprintln!("\n[tool {tool}: {decision} - {}]", reason.unwrap_or_default());
+            }
+            SdkStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                ..
+            } => eprintln!("\n[tokens: {}]", input_tokens + output_tokens),
+            _ => {}
         }
     }
 }
@@ -702,7 +733,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
     println!("{}", agent.run("我叫什么名字？".into())?);
-    println!("{:?}", session.recall("user_name".into(), None)?); // -> Some("Ada")
+    println!("{:?}", session.recall("user_name".into(), None)?);  // -> Some("Ada")
     // 单次覆盖：只读 aria memo 副本
     println!("{:?}", session.recall("user_name".into(), Some("local".into()))?);
 
@@ -749,7 +780,7 @@ do {
 
     // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
     print(try agent.run("我叫什么名字？"))
-    print(try session.recall(key: "user_name", backend: nil) ?? "")   // -> "Ada"
+    print(try session.recall(key: "user_name", backend: nil) ?? "")  // -> "Ada"
     // 单次覆盖：只读 aria memo 副本
     print(try session.recall(key: "user_name", backend: "local") ?? "")
 
@@ -800,7 +831,7 @@ fun main() {
 
     // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
     println(agent.run("我叫什么名字？"))
-    println(session.recall("user_name", null))   // -> "Ada"
+    println(session.recall("user_name", null))  // -> "Ada"
     // 单次覆盖：只读 aria memo 副本
     println(session.recall("user_name", "local"))
 
@@ -849,7 +880,7 @@ fun main() {
    随后安装 Gradle 8.9+——注意 apt 源中的版本是旧的 4.x，**无法使用**：
    ```bash
    # Ubuntu/Debian：snap 渠道提供较新的 8.x（如 8.14.4）
-   sudo snap install gradle            # 若受 confinement 限制可加 --classic
+   sudo snap install gradle  # 若受 confinement 限制可加 --classic
    # 备选 —— 官方压缩包（固定任意 8.9+ 版本）：
    #   curl -L https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
    #   unzip /tmp/gradle.zip -d /opt && export PATH="/opt/gradle-8.9/bin:$PATH"

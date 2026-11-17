@@ -139,8 +139,8 @@ with `ARIA_COMPUTE_HOME`).
 # Configure the Releases source interactively (github default, or gitee).
 # The choice is written to ~/.ariacompute/agent-cli.yml as `upgrade_url`.
 aria-agent setup
-#   1) github  -> https://github.com/ariacompute
-#   2) gitee   -> https://gitee.com/ariacompute
+# 1) github  -> https://github.com/ariacompute
+# 2) gitee   -> https://gitee.com/ariacompute
 
 # Inspect the current CLI config.
 aria-agent setup --status
@@ -150,14 +150,14 @@ aria-agent setup --clear
 
 # Self-update this binary + libaria-agent_ffi from Releases.
 # Reads `upgrade_url` from agent-cli.yml; pass --url to override.
-aria-agent upgrade            # latest stable
-aria-agent upgrade 0.7.2      # specific version
+aria-agent upgrade        # latest stable
+aria-agent upgrade 0.7.2  # specific version
 aria-agent upgrade --url https://github.com/ariacompute
 
 # Start the cloud HTTP server (default subcommand). Reads agent-cli.yml and
 # exports ARIA_AGENT_FFI_LIB to ~/.ariacompute/lib.
 aria-agent serve
-#   --port <n>  listen port (default: CLOUD_PORT env or 3000)
+# --port <n>  listen port (default: CLOUD_PORT env or 3000)
 aria-agent serve --port 3000
 ```
 
@@ -193,7 +193,7 @@ cp .env.example .env
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
-| `CLOUD_PORT` | `3000` | Host port published for **direct** access to the cloud service (the container always listens on 3000). |
+| `CLOUD_PORT` | `3000` | Host port published for **direct** access to the `cloud` service (the container always listens on 3000). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
 | `ARIA_DOCKER_SOCKET` | _(unset)_ | Explicit sandbox socket path; takes precedence over auto-discovery (e.g. `~/.docker/run/docker.sock` on macOS). |
 | `DOCKER_GID` | `998` | GID of the host `docker` group that owns `/var/run/docker.sock`. The runtime image recreates this group and adds the non-root `aria` user to it so the socket is reachable without `root`. |
@@ -234,7 +234,7 @@ docker compose up
 **Method B — one-shot compose build + run:**
 
 ```bash
-export BUILD_PROXY=http://127.0.0.1:7897   # optional; unset = direct internet
+export BUILD_PROXY=http://127.0.0.1:7897  # optional; unset = direct internet
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 docker compose up --build
 ```
@@ -291,7 +291,7 @@ init scripts are needed. The API is then reachable through **either** endpoint:
   adds `X-Forwarded-*` headers and streams SSE without buffering).
 
 `GET /healthz` is the liveness probe: it is served by the `cloud` service itself
-(unauthenticated, no API key needed) and nginx forwards `/healthz` upstream, so
+(unauthenticated, no API key needed) and `nginx` forwards `/healthz` upstream, so
 the answer reflects real backend health. The compose health check for `cloud`
 issues `curl -fsS http://localhost:3000/healthz`; `nginx` only starts once
 `cloud` reports healthy.
@@ -299,12 +299,12 @@ issues `curl -fsS http://localhost:3000/healthz`; `nginx` only starts once
 ### 4. Context storage (PostgreSQL + pgvector)
 
 Conversational / long-term context lives in Postgres (`context_fragments`,
-`vector(256)` with an HNSW cosine index), sharded per principal. The compose
+`vector(256)` with an HNSW cosine index), sharded per `principal_id`. The compose
 Postgres image is `pgvector/pgvector:pg16`; the service runs
 `CREATE EXTENSION IF NOT EXISTS vector` at boot and **refuses to start** if the
 extension is unavailable (no silent keyword-only fallback).
 
-The on-device SDK keeps its own embedded sled store
+The on-device SDK keeps its own aria memo (SQLite) store
 (`aria-agent-memo`) and is not affected by this requirement.
 
 ### 5. Sandbox via the Docker socket
@@ -477,6 +477,9 @@ monotonic `sequence_number`:
 | `agent.turn.item.done` | completed `item`; a `function_call` also carries the executed `result` |
 | `agent.turn.output_text.delta` | `item_id`, `delta` |
 | `agent.turn.output_text.done` | `item_id`, `text` |
+| `agent.turn.approval.requested` | `approval_id`, `tool`, `item_id` |
+| `agent.turn.approval.resolved` | `approval_id`, `tool`, `decision` (`allow` / `deny` / `unavailable`), `reason` |
+| `agent.turn.usage` | `usage{input_tokens, output_tokens, total_tokens}`, `model` |
 | `agent.turn.completed` | terminal: `turn{status:"completed", output}` |
 | `agent.turn.failed` | terminal: `turn{status:"failed"}`, `error` |
 
@@ -499,6 +502,10 @@ streamed = await Runner.run_streamed(agent, "tell me a joke")
 async for event in streamed.events:
     if event["type"] == "agent.turn.output_text.delta":
         print(event["delta"], end="", flush=True)
+    elif event["type"] == "agent.turn.approval.resolved":
+        print(f"\n[tool {event['tool']}: {event['decision']}]")
+    elif event["type"] == "agent.turn.usage":
+        print(f"\n[tokens: {event['usage']['total_tokens']}]")
 ```
 
 ### Default agent
@@ -565,14 +572,14 @@ Configure it on the agent / session constructor and override per call:
 
 ```python
 agent = Agent(name="History tutor", memory_backend="both", memo_db="~/.ariacompute/memo.db")
-session.memorize("user_name", "Ada")                    # -> both backends
-session.recall("user_name", backend="local")            # -> local copy only
+session.memorize("user_name", "Ada")          # -> both backends
+session.recall("user_name", backend="local")  # -> local copy only
 ```
 
 ```typescript
 const agent = new Agent({ name: "History tutor", memory: "both", memoDb: "~/.ariacompute/memo.db" });
-await session.memorize("user_name", "Ada");                       // -> both backends
-await session.recall("user_name", { backend: "local" });          // -> local copy only
+await session.memorize("user_name", "Ada");               // -> both backends
+await session.recall("user_name", { backend: "local" });  // -> local copy only
 ```
 
 `both` never fabricates data: a single failing side is logged and tolerated, and
@@ -618,7 +625,7 @@ async def main() -> None:
     #    draw on both the earlier turns and the remembered fact.
     second = await Runner.run(agent, "What is my name?", session=session)
     print(second.final_output)
-    print(session.recall("user_name"))  # -> "Ada"
+    print(session.recall("user_name"))                   # -> "Ada"
     print(session.recall("user_name", backend="local"))  # local (aria memo) copy only
 
     # 3) Streaming run.
@@ -626,8 +633,14 @@ async def main() -> None:
     async for event in streamed.events:
         if event["type"] == "agent.turn.output_text.delta":
             print(event["delta"], end="")
+        elif event["type"] == "agent.turn.approval.resolved":
+            print(f"\n[tool {event['tool']}: {event['decision']} - {event.get('reason') or ''}]")
+        elif event["type"] == "agent.turn.usage":
+            print(f"\n[tokens: {event['usage']['total_tokens']}]")
     final = await streamed.completed
     print(final.final_output)
+    if final.usage:
+        print(f"tokens: {final.usage.total_tokens}")
 
 
 asyncio.run(main())
@@ -653,9 +666,12 @@ except AriaError as err:
 ```
 
 Read-only session endpoints (no context mutation) are also available:
-`session.get_items()` and `session.get_turns()` (GET `…/items`, `…/turns`).
+`session.get_items()`, `session.get_turns()` and `session.get_title()` (GET
+`…/items`, `…/turns`, `…/title`). The title is the `title_set` projection; a
+delegated child session (`<parent>::sub::<id>`) is readable through its parent's
+ownership, while an untitled session returns 404.
 The JS SDK mirrors all of the above (`AriaError`, `run`/`runStreamed` `maxTurns`,
-`Session.getItems()`/`getTurns()`).
+`Session.getItems()`/`getTurns()`/`getTitle()`).
 
 ### TypeScript
 
@@ -692,17 +708,23 @@ await session.memorize("user_name", "Ada");
 //    on both the earlier turns and the remembered fact.
 const second = await run(agent, "What is my name?", { session });
 console.log(second.finalOutput);
-console.log(await session.recall("user_name")); // -> "Ada"
-console.log(await session.recall("user_name", { backend: "local" })); // aria memo only
+console.log(await session.recall("user_name"));                        // -> "Ada"
+console.log(await session.recall("user_name", { backend: "local" }));  // aria memo only
 
 // 3) Streaming run.
 const streamed = await runStreamed(agent, "Tell me something surprising", { session });
 for await (const event of streamed.events) {
   if (event.type === "agent.turn.output_text.delta") {
     process.stdout.write(event.delta);
+  } else if (event.type === "agent.turn.approval.resolved") {
+    console.log(`\n[tool ${event.tool}: ${event.decision}]`);
+  } else if (event.type === "agent.turn.usage") {
+    console.log(`\n[tokens: ${event.usage.total_tokens}]`);
   }
 }
-console.log((await streamed.completed).finalOutput);
+const result = await streamed.completed;
+console.log(result.finalOutput);
+if (result.usage) console.log(`tokens: ${result.usage.totalTokens}`);
 ```
 
 ### Rust (in-process)
@@ -714,8 +736,17 @@ struct Printer;
 
 impl SdkAgentListener for Printer {
     fn on_event(&self, event: SdkStreamEvent) {
-        if let SdkStreamEvent::Token { text } = event {
-            print!("{text}");
+        match event {
+            SdkStreamEvent::Token { text } => print!("{text}"),
+            SdkStreamEvent::Approval { tool, decision, reason, .. } => {
+                eprintln!("\n[tool {tool}: {decision} - {}]", reason.unwrap_or_default());
+            }
+            SdkStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                ..
+            } => eprintln!("\n[tokens: {}]", input_tokens + output_tokens),
+            _ => {}
         }
     }
 }
@@ -746,7 +777,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2) Continue the same conversation (same agent / session scope) — the reply
     //    can draw on the earlier turn and the remembered fact.
     println!("{}", agent.run("What is my name?".into())?);
-    println!("{:?}", session.recall("user_name".into(), None)?); // -> Some("Ada")
+    println!("{:?}", session.recall("user_name".into(), None)?);  // -> Some("Ada")
     // Per-call override: read the aria memo copy only.
     println!("{:?}", session.recall("user_name".into(), Some("local".into()))?);
 
@@ -795,7 +826,7 @@ do {
     // 2) Continue the same conversation (same agent / session scope) — the reply
     //    can draw on the earlier turn and the remembered fact.
     print(try agent.run("What is my name?"))
-    print(try session.recall(key: "user_name", backend: nil) ?? "")   // -> "Ada"
+    print(try session.recall(key: "user_name", backend: nil) ?? "")  // -> "Ada"
     // Per-call override: read the aria memo copy only.
     print(try session.recall(key: "user_name", backend: "local") ?? "")
 
@@ -847,7 +878,7 @@ fun main() {
     // 2) Continue the same conversation (same agent / session scope) — the reply
     //    can draw on the earlier turn and the remembered fact.
     println(agent.run("What is my name?"))
-    println(session.recall("user_name", null))   // -> "Ada"
+    println(session.recall("user_name", null))  // -> "Ada"
     // Per-call override: read the aria memo copy only.
     println(session.recall("user_name", "local"))
 
@@ -902,7 +933,7 @@ library AAR that bundles the native `libaria_agent_ffi.so` for `arm64-v8a` and
    work**:
    ```bash
    # Ubuntu/Debian: the snap channel ships a current 8.x (e.g. 8.14.4)
-   sudo snap install gradle            # add --classic if confinement blocks it
+   sudo snap install gradle  # add --classic if confinement blocks it
    # Alternative — official tarball (pin any 8.9+):
    #   curl -L https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
    #   unzip /tmp/gradle.zip -d /opt && export PATH="/opt/gradle-8.9/bin:$PATH"
