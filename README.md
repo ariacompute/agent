@@ -116,15 +116,29 @@ cargo clippy --workspace --all-targets -- -D warnings
 # = cargo run -p aria-agent-ffigen
 just ffi
 
-# 5. run the cloud API (loads gateway/model config from .env)
+# 5. run pgvector locally and start the cloud API (cargo run)
 [ -f .env ] || cp .env.example .env   # then set GATEWAY_API_KEY in .env
 set -a
 source ./.env
 set +a
-# .env uses the compose service host `postgres`; local cargo run needs localhost
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/agent
+
+# use a non-conflicting host port (55432); localhost:5432 may be a plain Postgres
+docker rm -f aria-agent-pgvector >/dev/null 2>&1 || true
+docker run -d --name aria-agent-pgvector \
+  -e POSTGRES_USER="${POSTGRES_USER:-postgres}" \
+  -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}" \
+  -e POSTGRES_DB="${POSTGRES_DB:-agent}" \
+  -p 55432:5432 \
+  pgvector/pgvector:pg16
+until docker exec aria-agent-pgvector pg_isready -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-agent}" >/dev/null 2>&1; do sleep 1; done
+
+# .env's DATABASE_URL uses the compose host `postgres`; point local cargo at pgvector
+export DATABASE_URL="postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@localhost:55432/${POSTGRES_DB:-agent}"
 cargo run -p aria-agent-cloud
 ```
+
+> The pgvector container is recreated on each run; `ensure_schema` creates the
+> tables on boot. If 55432 is taken, change both `-p` and `DATABASE_URL`.
 
 <div align="right">
 

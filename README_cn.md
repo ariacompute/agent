@@ -115,15 +115,29 @@ cargo clippy --workspace --all-targets -- -D warnings
 # = cargo run -p aria-agent-ffigen
 just ffi
 
-# 5. 运行云端服务（从 .env 加载网关/模型配置）
+# 5. 本地启动 pgvector，然后用 cargo run 运行云端 API
 [ -f .env ] || cp .env.example .env   # 先在 .env 中设置 GATEWAY_API_KEY
 set -a
 source ./.env
 set +a
-# .env 使用 compose 服务名 `postgres` 作为主机；本地 cargo run 需要改成 localhost
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/agent
+
+# 使用不冲突的宿主机端口 55432；localhost:5432 可能是普通 Postgres
+docker rm -f aria-agent-pgvector >/dev/null 2>&1 || true
+docker run -d --name aria-agent-pgvector \
+  -e POSTGRES_USER="${POSTGRES_USER:-postgres}" \
+  -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}" \
+  -e POSTGRES_DB="${POSTGRES_DB:-agent}" \
+  -p 55432:5432 \
+  pgvector/pgvector:pg16
+until docker exec aria-agent-pgvector pg_isready -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-agent}" >/dev/null 2>&1; do sleep 1; done
+
+# .env 中的 DATABASE_URL 使用 compose 主机名 `postgres`；本地 cargo 改连 pgvector
+export DATABASE_URL="postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@localhost:55432/${POSTGRES_DB:-agent}"
 cargo run -p aria-agent-cloud
 ```
+
+> 每次运行都会重建该临时 pgvector 容器；表结构由 `ensure_schema` 在启动时创建。
+> 若 55432 被占用，请同时修改 `-p` 与 `DATABASE_URL`。
 
 <div align="right">
 
