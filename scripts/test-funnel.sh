@@ -3,7 +3,7 @@
 # test-funnel.sh — smoke test for the aria-agent Cloud API THROUGH the public
 # Tailscale Funnel endpoint (https://ariacompute-funnel.saury-viper.ts.net).
 #
-# This is a thin wrapper around the same checks as scripts/run-api-tests.sh, but:
+# This is a thin wrapper around the same checks as scripts/test-api.sh, but:
 #   * defaults BASE_URL to the Funnel HTTPS endpoint (no port needed — Funnel
 #     serves on :443 with a valid *.ts.net certificate)
 #   * defaults EVENTS_TEST to 1 (a deployed/gateway-configured service supports

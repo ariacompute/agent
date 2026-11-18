@@ -285,11 +285,11 @@ start / no stop — it only probes the running instance). It loads the **same**
 command line or as environment variables:
 
 ```bash
-bash scripts/run-api-tests.sh --base-url http://localhost:3000
+bash scripts/test-api.sh --base-url http://localhost:3000
 # or:
-BASE_URL=http://localhost:3000 bash scripts/run-api-tests.sh
+BASE_URL=http://localhost:3000 bash scripts/test-api.sh
 # optional: also exercise the model-backed /events and /events/stream endpoints
-bash scripts/run-api-tests.sh -u http://localhost:3000 --events-test
+bash scripts/test-api.sh -u http://localhost:3000 --events-test
 ```
 
 The script asserts status codes + key JSON fields across every route (agents,
