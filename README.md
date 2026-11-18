@@ -116,9 +116,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 # = cargo run -p aria-agent-ffigen
 just ffi
 
-# 5. run the cloud API (needs Postgres + OpenAI key)
+# 5. run the cloud API (loads gateway/model config from .env)
+[ -f .env ] || cp .env.example .env   # then set GATEWAY_API_KEY in .env
+set -a
+source ./.env
+set +a
+# .env uses the compose service host `postgres`; local cargo run needs localhost
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/agent
-export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 

@@ -115,9 +115,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 # = cargo run -p aria-agent-ffigen
 just ffi
 
-# 5. 运行云端服务
+# 5. 运行云端服务（从 .env 加载网关/模型配置）
+[ -f .env ] || cp .env.example .env   # 先在 .env 中设置 GATEWAY_API_KEY
+set -a
+source ./.env
+set +a
+# .env 使用 compose 服务名 `postgres` 作为主机；本地 cargo run 需要改成 localhost
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/agent
-export OPENAI_API_KEY=sk-...
 cargo run -p aria-agent-cloud
 ```
 
