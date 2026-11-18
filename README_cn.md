@@ -273,17 +273,15 @@ docker compose up --build
 
 #### API 冒烟测试
 
-服务起来之后，可运行一次性 HTTP 冒烟测试（**不构建、不启动、不停止**，只探测已运行实例）。它加载与 `docker compose up` **同一份** `.env`（缺失时回退到 `.env.example`）以读取 `AGENT_CLOUD_API_KEY`，而 `BASE_URL` 与 `EVENTS_TEST` 通过命令行参数或环境变量传入：
+服务起来之后，可运行一次性 HTTP 冒烟测试（**不构建、不启动、不停止**，只探测已运行实例）。它加载与 `docker compose up` **同一份** `.env`（缺失时回退到 `.env.example`）以读取 `AGENT_CLOUD_API_KEY`，而 `BASE_URL` 通过命令行参数或环境变量传入：
 
 ```bash
 bash scripts/test-api.sh --base-url http://localhost:3000
 # 或：
 BASE_URL=http://localhost:3000 bash scripts/test-api.sh
-# 可选：同时跑模型驱动的 /events 与 /events/stream 端点
-bash scripts/test-api.sh -u http://localhost:3000 --events-test
 ```
 
-脚本会对每条路由（agents、sessions、memory、relations、subagents、api-keys，以及已识别但未实现的 501 stub）断言状态码与关键 JSON 字段，打印 `TOTAL / PASS / FAIL / SKIP`，并以失败数作为退出码。`/events` 与 `/events/stream` 默认 **跳过**（不计失败），仅在 `EVENTS_TEST=1`（或 `--events-test`）且已配置模型网关时才执行。
+脚本会对每条路由（agents、sessions、memory、relations、subagents、api-keys、模型驱动的 `/events` 与 `/events/stream`，以及已识别但未实现的 501 stub）断言状态码与关键 JSON 字段，打印 `TOTAL / PASS / FAIL / SKIP`，并以失败数作为退出码。单 agent 运行时的 subagent 子资源路由按 `404` 断言，不再跳过。`/events` 与 `/events/stream` 默认执行（需已配置模型网关）；`--events-test` / `EVENTS_TEST` 仅为兼容旧调用的空操作。
 
 云端服务会等待 Postgres 健康后再启动；表结构（`agents` / `runs`）在启动时由
 `ensure_schema` 自动创建，无需初始化脚本。API 可通过**任一**入口访问：

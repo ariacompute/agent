@@ -9,13 +9,14 @@
 # It loads the SAME env file `docker compose up` uses (for AGENT_CLOUD_API_KEY):
 #   * $SCRIPT_DIR/../.env            (preferred — the file compose actually reads)
 #   * $SCRIPT_DIR/../.env.example    (fallback — the canonical template)
-# BASE_URL and EVENTS_TEST are NOT read from that file — they come from the
-# command line or from environment variables.
+# BASE_URL is NOT read from that file — it comes from the command line or from
+# the environment. Events/stream and the subagent 404 case are checked by
+# default; --events-test is kept as a no-op alias for older invocations.
 #
 # Usage:
 #   bash scripts/test-api.sh --base-url http://localhost:3000
-#   BASE_URL=http://localhost:80 EVENTS_TEST=1 bash scripts/test-api.sh
-#   bash scripts/test-api.sh -u http://localhost:3000 --events-test
+#   BASE_URL=http://localhost:80 bash scripts/test-api.sh
+#   bash scripts/test-api.sh -u http://localhost:3000
 #   (also: -t/--ready-timeout SECONDS; -h/--help)
 #
 # Exit code = number of failed checks (0 == all passed).
@@ -24,13 +25,12 @@ set -uo pipefail
 
 # ----------------------------------------------------------------- args parse
 ARG_BASE_URL=""
-ARG_EVENTS_TEST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -u|--base-url)    ARG_BASE_URL="${2:-}"; shift 2;;
     --base-url=*)     ARG_BASE_URL="${1#*=}"; shift;;
-    -e|--events-test) ARG_EVENTS_TEST=1; shift;;
-    --events-test=*)  ARG_EVENTS_TEST="${1#*=}"; shift;;
+    -e|--events-test) shift;;
+    --events-test=*)  shift;;
     -t|--ready-timeout) READY_TIMEOUT="${2:-}"; shift 2;;
     --ready-timeout=*)  READY_TIMEOUT="${1#*=}"; shift;;
     -h|--help)        grep '^#' "$0" | grep -v '^#!' | sed 's/^# \{0,1\}//'; exit 0;;
@@ -44,14 +44,14 @@ ENV_FILE="$SCRIPT_DIR/../.env"
 [ -f "$ENV_FILE" ] || ENV_FILE="$SCRIPT_DIR/../.env.example"
 if [ -f "$ENV_FILE" ]; then
   # Load compose's env (for AGENT_CLOUD_API_KEY etc.) WITHOUT clobbering variables
-  # already exported in the shell, and WITHOUT importing BASE_URL / EVENTS_TEST
-  # (those are configured via the command line or environment, not this file).
+  # already exported in the shell, and WITHOUT importing BASE_URL (configured
+  # via the command line or environment, not this file).
   # Parse KEY=VALUE lines, skipping comments/blanks.
   while IFS='=' read -r k v; do
     k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
     [ -z "$k" ] && continue
     case "$k" in
-      \#*|BASE_URL|EVENTS_TEST) continue;;
+      \#*|BASE_URL) continue;;
     esac
     v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
     [ -z "${!k+x}" ] && export "$k=$v"
@@ -60,7 +60,6 @@ fi
 
 # Precedence: CLI arg > exported env var > default.
 BASE_URL="${ARG_BASE_URL:-${BASE_URL:-}}"
-EVENTS_TEST="${ARG_EVENTS_TEST:-${EVENTS_TEST:-0}}"
 ADMIN_KEY="${AGENT_CLOUD_API_KEY:-}"   # reused as the Admin Bearer
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
 
@@ -237,19 +236,17 @@ fi
 echo
 echo "== Subagents"
 if [ -n "$SESSION_ID" ]; then
-  # The single-agent runtime always returns an empty list; sub-resource GETs
-  # need a real subagent id which never exists here, so they are skipped.
+  # Single-agent runtime: the list is empty and any subagent id must 404.
   check GET "/v1/agents/sessions/$SESSION_ID/subagents" 200 '.data'
-  skip "/v1/agents/sessions/$SESSION_ID/subagents/:id" \
-       "single-agent runtime has no subagents (always 404)"
+  check GET "/v1/agents/sessions/$SESSION_ID/subagents/subagent_smoke" 404 '.error'
 else
   skip "subagents" "no session id captured"
 fi
 
-# ============================================================= EVENTS (gated)
+# ==================================================================== EVENTS
 echo
 echo "== Events / Stream"
-if [ "$EVENTS_TEST" = "1" ] && [ -n "$SESSION_ID" ]; then
+if [ -n "$SESSION_ID" ]; then
   check POST "/v1/agents/sessions/$SESSION_ID/events" 200 '.id' '{"input":"ping"}'
   TURN_ID="$(jqid '.id')"
   [ -n "$TURN_ID" ] && check GET "/v1/agents/sessions/$SESSION_ID/turns/$TURN_ID" 200 '.id'
@@ -273,8 +270,7 @@ if [ "$EVENTS_TEST" = "1" ] && [ -n "$SESSION_ID" ]; then
       "$SESSION_ID" "$SSE_CODE"
   fi
 else
-  skip "/v1/agents/sessions/:id/events" "EVENTS_TEST!=1 (set =1 with a gateway-configured service)"
-  skip "/v1/agents/sessions/:id/events/stream" "EVENTS_TEST!=1"
+  skip "events/stream" "no session id captured"
 fi
 
 # ============================================================ API KEYS (admin)
@@ -283,9 +279,10 @@ echo "== API keys (admin)"
 if [ -n "$ADMIN_KEY" ]; then
   check POST /v1/api-keys 200 '.id' '{"label":"smoke-key","scopes":["read","write"]}'
   KEY_ID="$(jqid '.id')"
-  check GET /v1/api-keys 200 '.data'
+  # GET returns a bare JSON array (no "data" wrapper); DELETE returns {"ok":true}.
+  check GET /v1/api-keys 200 '.[0].id'
   if [ -n "$KEY_ID" ]; then
-    check DELETE "/v1/api-keys/$KEY_ID" 200 '.id'
+    check DELETE "/v1/api-keys/$KEY_ID" 200 '.ok'
   else
     skip "/v1/api-keys/:id" "no key id captured"
   fi

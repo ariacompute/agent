@@ -281,22 +281,22 @@ docker compose up --build
 Once the service is up, run the one-shot HTTP smoke test (no build / no
 start / no stop — it only probes the running instance). It loads the **same**
 `.env` that `docker compose up` used (or `.env.example` as a fallback) for
-`AGENT_CLOUD_API_KEY`, but `BASE_URL` and `EVENTS_TEST` are supplied on the
-command line or as environment variables:
+`AGENT_CLOUD_API_KEY`, but `BASE_URL` is supplied on the command line or as an
+environment variable:
 
 ```bash
 bash scripts/test-api.sh --base-url http://localhost:3000
 # or:
 BASE_URL=http://localhost:3000 bash scripts/test-api.sh
-# optional: also exercise the model-backed /events and /events/stream endpoints
-bash scripts/test-api.sh -u http://localhost:3000 --events-test
 ```
 
 The script asserts status codes + key JSON fields across every route (agents,
-sessions, memory, relations, subagents, api-keys, and the recognised-but-501
-stubs), prints `TOTAL / PASS / FAIL / SKIP`, and exits with the failure count.
-`/events` and `/events/stream` are **skipped** (not failed) unless
-`EVENTS_TEST=1` (or `--events-test`) and a model gateway is configured.
+sessions, memory, relations, subagents, api-keys, the model-backed `/events`
+and `/events/stream` endpoints, and the recognised-but-501 stubs), prints
+`TOTAL / PASS / FAIL / SKIP`, and exits with the failure count. The single-agent
+subagent-id route is asserted as `404`, not skipped. Events need a configured
+model gateway; `--events-test` / `EVENTS_TEST` are accepted as no-op aliases
+for older invocations.
 
 The cloud service waits for a healthy Postgres before starting; the schema
 (`agents` / `runs`) is created automatically on boot (`ensure_schema`), so no
