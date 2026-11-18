@@ -31,8 +31,14 @@ needs a reason that does not depend on "it was hard":
 | `crates/aria-agent-cloud/src/store/pg.rs` | Postgres metadata backend: needs a live database. The `DATABASE_URL`-gated tests stay in place (`#[tokio::test]` + early `return` when unset) so a real deployment can still exercise them — they never fake a result |
 | `crates/aria-agent-cloud/src/context/pg.rs` | pgvector context backend, same reasoning as above |
 | `crates/aria-agent-cloud/src/store/pg_orchestration.rs` | Postgres teams/schedule/title backends; the same semantics are covered by the in-memory providers in `api_tests.rs` |
-| `crates/aria-agent-tools/src/terminal.rs` (`pty`) | real PTY sessions need a terminal device; the non-`pty` build (and its fail-closed path) is covered |
-| `crates/aria-agent-tools/src/web.rs` (`web`) | live HTTP; only the pure parts (SSRF gate, content-type whitelist, URL expansion, provider wiring) are covered |
+| `crates/aria-agent-tools/src/terminal.rs` (`pty`) | optional `pty` provider needs a real terminal device; `scripts/coverage.sh` excludes this file so enabling the feature cannot make the gate depend on a TTY. The default build keeps `pty` off. |
+| `crates/aria-agent-tools/src/web.rs` (`web`) | optional `web` provider needs live HTTP; excluded by `scripts/coverage.sh` for the same reason. The default build keeps `web` off. |
+
+`scripts/coverage.sh` exports an isolated `XDG_RUNTIME_DIR` and a placeholder
+`DOCKER_HOST` unix socket so sandbox socket probes and the Docker client
+constructor are covered without a real daemon or runner-specific environment.
+Chmod-based negative assertions are not used: IO error mapping is exercised with
+directory read/write failures that behave the same under root and non-root.
 
 The cloud's business logic is **not** excluded: `api/*`, `app.rs`, `auth.rs`,
 `store/memory.rs`, `store/mod.rs`, `upgrade.rs`, `cli_config.rs`,

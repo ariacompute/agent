@@ -69,6 +69,12 @@ fn list_err(e: std::io::Error) -> SeamError {
     SeamError::Io(format!("list directory: {e}"))
 }
 
+async fn write_file(path: &std::path::Path, contents: &str) -> SeamResult<()> {
+    tokio::fs::write(path, contents)
+        .await
+        .map_err(|e| io_err("write", path, e))
+}
+
 #[async_trait]
 impl FsSeam for LocalFs {
     async fn read(&self, path: &str) -> SeamResult<String> {
@@ -85,9 +91,7 @@ impl FsSeam for LocalFs {
                 .await
                 .map_err(|e| io_err("mkdir", parent, e))?;
         }
-        tokio::fs::write(&p, contents)
-            .await
-            .map_err(|e| io_err("write", &p, e))
+        write_file(&p, contents).await
     }
 
     async fn edit(&self, path: &str, old: &str, new: &str) -> SeamResult<usize> {
@@ -105,9 +109,7 @@ impl FsSeam for LocalFs {
             )));
         }
         let updated = body.replacen(old, new, 1);
-        tokio::fs::write(&p, updated)
-            .await
-            .map_err(|e| io_err("write", &p, e))?;
+        write_file(&p, &updated).await?;
         Ok(1)
     }
 
@@ -279,12 +281,6 @@ mod tests {
                 matches!(fs.stat("loop").await, Err(SeamError::Io(_))),
                 "a symlink loop is an IO error, not NotFound"
             );
-            use std::os::unix::fs::PermissionsExt;
-            let path = _dir.path().join("plain.txt");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-            let err = fs.edit("plain.txt", "body", "changed").await;
-            assert!(matches!(err, Err(SeamError::Io(_))), "{err:?}");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
     }
 

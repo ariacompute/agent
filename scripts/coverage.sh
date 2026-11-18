@@ -20,7 +20,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs'
+IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-tools/src/web\.rs'
+
+# Hermetic environment: the sandbox socket probes and the Docker client
+# constructor are environment-dependent. Give both a stable, local target so
+# the gate does not rely on the runner's XDG_RUNTIME_DIR or a real daemon.
+COV_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$COV_TMP_DIR"' EXIT
+export XDG_RUNTIME_DIR="$COV_TMP_DIR/xdg-runtime"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export DOCKER_HOST="unix://$COV_TMP_DIR/docker.sock"
+touch "$COV_TMP_DIR/docker.sock"
 
 echo "==> running the workspace under coverage"
 cargo llvm-cov --workspace --lcov --output-path lcov.info \

@@ -202,9 +202,10 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
 
 ### 验收
 
-- `just sdk-js-test`（51 用例）与 `just sdk-py-test`（28 用例）全绿：覆盖正常 +
-  异常（类型化错误 kind、未知 backend、`getItems`/`getTurns`、空/数组输入、
-  `maxTurns` 上限、单侧 backend 失败、解码回退）。
+- `just sdk-js-test` 与 `just sdk-py-test` 全绿（CI `sdk` job 同样执行
+  `bun test` 与 `python3 -m unittest discover -s tests`；用例数不在此硬编码）：
+  覆盖正常 + 异常（类型化错误 kind、未知 backend、`getItems`/`getTurns`、
+  空/数组输入、`maxTurns` 上限、单侧 backend 失败、解码回退）。
 - 冻结约束：不改 `event_envelope.rs`（SSE 契约），不改 `memory` 三层结构，不引入
   memo 记忆内部实现。
 - 日志沿用 `tracing`，不打印 OpenAI key / 原始用户输入 / 嵌入向量。
@@ -244,14 +245,15 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
 * `just migrate` — `sqlx database create` + `sqlx migrate run`
 * `just fmt` / `just lint` — formatting and clippy (`-D warnings` in CI)
 * Release & publish: `.github/workflows/release.yml` (binary + cdylib assets),
-  `publish-cargo.yml` (crates.io: sandbox → core → memo → ariacompute-agent),
-  `publish-maven.yml` (Maven Central), `publish-npm.yml`, `publish-pypi.yml`;
-  Swift via CocoaPods `bindings/swift/AriaComputeAgent.podspec`.
+  `publish-cargo.yml` (crates.io: sandbox → plugin → core → tools → memo →
+  browser → ariacompute-agent; orchestrator/cloud/ffigen are not published),
+  `publish-maven.yml` (Maven Central), `publish-npm.yml` (OIDC),
+  `publish-pypi.yml` (`PYPI_TOKEN`); Swift via CocoaPods
+  `bindings/swift/AriaComputeAgent.podspec`.
 
-Windows build (release matrix `windows-x86_64`): the optional `pty` feature of
-`aria-agent-tools` pulls `portable-pty`, whose conpty code mixes
-`winapi::ctypes::c_void` with `std::ffi::c_void`. Those are the same type **only**
-with winapi's `std` feature, so that crate declares a Windows-only
-`winapi = { features = ["std"] }` dependency — do not remove it, or the Windows
-build fails with three E0308s. The `pty` and `web` features are **off by default**
-so mobile builds do not compile them.
+Windows build (release matrix `windows-x86_64`, plus the CI `test` matrix): a
+previous release failure was caused by unused-variable warnings in
+`aria-agent-core`'s `#[cfg(unix)]` tests; those bindings are named `_dir` / `_fs`
+and must not be renamed back. The `pty` and `web` features are **off by default**
+so mobile builds do not compile them, and no crate declares a direct `winapi`
+dependency.

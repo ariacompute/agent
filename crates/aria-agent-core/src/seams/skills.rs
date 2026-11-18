@@ -113,6 +113,11 @@ fn read_description(path: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
+fn read_skill_body(path: &std::path::Path) -> SeamResult<String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| SeamError::Io(format!("read {}: {e}", path.display())))
+}
+
 #[async_trait]
 impl SkillsSeam for FilesystemSkills {
     async fn list(&self) -> SeamResult<Vec<SkillMeta>> {
@@ -125,8 +130,7 @@ impl SkillsSeam for FilesystemSkills {
             .into_iter()
             .find(|(m, _)| m.name == name)
             .ok_or_else(|| SeamError::NotFound(format!("skill `{name}`")))?;
-        let body = std::fs::read_to_string(&found.1)
-            .map_err(|e| SeamError::Io(format!("read {}: {e}", found.1.display())))?;
+        let body = read_skill_body(&found.1)?;
         Ok(Skill {
             meta: found.0,
             body,
@@ -193,17 +197,12 @@ mod tests {
         assert!(matches!(skills.list().await, Err(SeamError::Io(_))));
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unreadable_skill_body_is_an_io_error() {
-        use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn unreadable_skill_body_is_an_io_error() {
+        // Reading a directory is a real IO error on every platform and does
+        // not depend on chmod behaviour under root.
         let dir = tempfile::tempdir().unwrap();
-        write_skill(dir.path(), "secret", "body");
-        let path = dir.path().join("secret").join("SKILL.md");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let skills = FilesystemSkills::new([dir.path().to_path_buf()]);
-        assert!(matches!(skills.load("secret").await, Err(SeamError::Io(_))));
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(read_skill_body(dir.path()), Err(SeamError::Io(_))));
     }
 
     #[tokio::test]

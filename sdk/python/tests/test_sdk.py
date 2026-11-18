@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 import unittest
@@ -332,13 +333,35 @@ class TransportErrorTest(unittest.TestCase):
         base = ClientOptions(base_url="http://aria.test", api_key="k")
         for code, kind in ((401, AriaErrorKind.AUTH), (404, AriaErrorKind.API)):
             err = urllib.error.HTTPError(
-                url="http://aria.test/x", code=code, msg="", hdrs=None, fp=None
+                url="http://aria.test/x",
+                code=code,
+                msg="",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":"denied"}'),
             )
             with mock.patch.object(transport.urllib.request, "urlopen", side_effect=err):
                 with self.assertRaises(AriaError) as ctx:
                     transport.post_json(base, "/x", {"a": 1})
             self.assertEqual(ctx.exception.kind, kind)
             self.assertEqual(ctx.exception.status, code)
+            self.assertIn('{"error":"denied"}', str(ctx.exception))
+
+    def test_http_error_with_str_body_is_normalized(self):
+        # Debian's patched urllib can return str from HTTPError.read().
+        base = ClientOptions(base_url="http://aria.test")
+        err = urllib.error.HTTPError(
+            url="http://aria.test/x",
+            code=401,
+            msg="",
+            hdrs=None,
+            fp=io.StringIO("unauthorized"),
+        )
+        with mock.patch.object(transport.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(AriaError) as ctx:
+                transport.get_json(base, "/x")
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.AUTH)
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertIn("unauthorized", str(ctx.exception))
 
     def test_maps_url_error_to_network(self):
         base = ClientOptions(base_url="http://aria.test", api_key="k")

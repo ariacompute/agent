@@ -7,7 +7,7 @@ name: Publish PyPI (ariacompute-agent)
 # / Session) on top of the aria-agent-cloud beta Agents API.
 #
 # Secrets required:
-#   PYPI_API_TOKEN — PyPI API token scoped to the `ariacompute-agent` project.
+#   PYPI_TOKEN — PyPI API token scoped to the `ariacompute-agent` project.
 
 on:
   release:

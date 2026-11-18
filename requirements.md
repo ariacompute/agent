@@ -133,13 +133,17 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   linux-x86_64 / windows-x86_64 / linux-arm64 / macos and uploads them to the
   GitHub Release (`secrets.ARIACOMPUTE_TOKEN`).
 * `publish-cargo.yml` publishes to crates.io in topological order
-  `aria-agent-sandbox` → `aria-agent-core` → `aria-agent-memo` →
-  `ariacompute-agent` (`secrets.CARGO_REGISTRY_TOKEN`).
+  `aria-agent-sandbox` → `aria-agent-plugin` → `aria-agent-core` →
+  `aria-agent-tools` → `aria-agent-memo` → `aria-agent-browser` →
+  `ariacompute-agent` (`secrets.CARGO_REGISTRY_TOKEN`). The workspace-internal
+  `aria-agent-orchestrator`, `aria-agent-cloud` and `aria-agent-ffigen` crates
+  are not published.
 * `publish-maven.yml` publishes the Kotlin/Android binding to Maven Central
   (`com.ariacompute:agent`) via vanniktech (`secrets.SONATYPE_*`,
   `secrets.GPG_*`).
-* `publish-npm.yml` publishes `@ariacompute/agent` (`secrets.NPM_TOKEN`);
-  `publish-pypi.yml` publishes `ariacompute-agent` (`secrets.PYPI_API_TOKEN`).
+* `publish-npm.yml` publishes `@ariacompute/agent` via npm Trusted Publishing
+  (OIDC; no repository secret); `publish-pypi.yml` publishes `ariacompute-agent`
+  using `secrets.PYPI_TOKEN`.
 * Swift is published via CocoaPods from `bindings/swift/AriaComputeAgent.podspec`
   (`secrets.COCOAPODS_TRUNK_TOKEN`).
 

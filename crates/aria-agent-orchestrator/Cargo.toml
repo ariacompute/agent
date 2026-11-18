@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Sub-agents, agent teams (task DAG) and scheduled jobs on top of the capability seams."
+publish = false
 
 [dependencies]
 aria-agent-core.workspace = true

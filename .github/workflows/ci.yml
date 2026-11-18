@@ -1,10 +1,12 @@
 name: CI
 
-# Test + coverage gate for the agent workspace.
+# Test, SDK, FFI and coverage gates for the agent workspace.
 #
-# `test` runs the whole workspace suite. `coverage` re-runs it under
-# `cargo-llvm-cov` and fails unless every included source line is executed —
-# see `scripts/coverage.sh` and `docs/coverage.md` for the exclusion list.
+# `test` runs the whole workspace suite on Linux and Windows. `sdk` runs the
+# JS and Python SDK suites; `ffi-drift` regenerates the committed bindings.
+# `coverage` re-runs the suite under `cargo-llvm-cov` and fails unless every
+# included source line is executed — see `scripts/coverage.sh` and
+# `docs/coverage.md` for the exclusion list.
 
 on:
   push:
@@ -18,8 +20,12 @@ env:
 
 jobs:
   test:
-    name: cargo test
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,6 +45,49 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  sdk:
+    name: SDK tests (JS + Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: JS SDK tests
+        working-directory: sdk/js
+        run: |
+          bun install --frozen-lockfile
+          bun test
+
+      - name: Python SDK tests
+        working-directory: sdk/python
+        run: python3 -m unittest discover -s tests
+
+  ffi-drift:
+    name: FFI bindings drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate Swift/Kotlin bindings
+        run: cargo run -p aria-agent-ffigen
+
+      - name: Assert no binding drift
+        run: |
+          git diff --exit-code -- bindings/
+          test -z "$(git status --porcelain -- bindings/)"
 
   coverage:
     name: coverage gate (100% lines)

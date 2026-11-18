@@ -39,8 +39,11 @@ dialect and a translation layer forever.
    `x-reef-agent-record-id` (see ADR-0006 → feature removed). Downstream
    consumers must migrate; the migration points are recorded in
    `docs/followups/`.
-5. **Subagents are always empty.** The runtime executes a single agent loop, so
-   `…/subagents*` returns empty lists / 404 rather than fabricating data.
+5. **REST subagent listings are always empty.** The session turn driver is a
+   single agent loop, so `GET …/subagents` returns an empty list / 404 rather
+   than fabricating data. This is distinct from the orchestration tool family
+   (`subagent_run` / `subagent_list`) provided by `aria-agent-orchestrator` and
+   registered by the cloud runtime, which does delegate real child turns.
 
 ## Consequences
 

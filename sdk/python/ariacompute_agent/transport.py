@@ -54,7 +54,10 @@ def _request(
     try:
         return urllib.request.urlopen(req)  # noqa: S310 - see above
     except urllib.error.HTTPError as e:  # pragma: no cover - exercised via tests
-        detail = e.read().decode("utf-8", "replace")[:400]
+        raw = e.read()
+        detail = (
+            raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        )[:400]
         kind = AriaErrorKind.AUTH if e.code in (401, 403) else AriaErrorKind.API
         raise AriaError(
             f"aria agent request failed ({e.code}): {detail}", kind, e.code
