@@ -82,7 +82,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Regenerate Swift/Kotlin bindings
-        run: cargo run -p aria-agent-ffigen
+        run: |
+          cargo build -p ariacompute-agent
+          cargo run -p aria-agent-ffigen
 
       - name: Assert no binding drift
         run: |
