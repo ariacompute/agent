@@ -1,6 +1,5 @@
 /**
- * `Agent` — mirrors `new Agent({ name, instructions, model, tools, handoffs })`
- * from the OpenAI Agents SDK.
+ * `Agent` — the SDK's agent definition: name, instructions, model and tools.
  */
 
 import type { AgentConfig, ClientOptions, MemoryConfig, ToolSpec } from "./types.js";

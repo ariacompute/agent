@@ -1,7 +1,7 @@
 """``ariacompute-agent`` — the Aria agent SDK.
 
-The API mirrors the OpenAI Agents SDK (``openai-agents``) so the official
-quickstart transfers unchanged:
+The SDK exposes an Agent-based API and talks to an ``aria-agent-cloud``
+deployment through its beta Agents REST API:
 
 ```python
 import asyncio

@@ -1,4 +1,4 @@
-"""``function_tool`` — mirrors ``@function_tool`` from the OpenAI Agents SDK.
+"""``function_tool`` — declares a tool from a Python callable.
 
 The cloud executes tools inside its own sandbox, so only the schema
 (``name`` / ``description`` / ``parameters``) is forwarded to the server. The

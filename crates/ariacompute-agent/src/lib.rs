@@ -33,8 +33,7 @@ fn rt() -> &'static Runtime {
 
 /// Process-unique, monotonically increasing session scope. The session is the
 /// memo scoping key; it is auto-assigned per agent instance so callers never
-/// have to pass one (mirrors the OpenAI Agents SDK quickstart, where
-/// `Agent(name, model)` needs no session/thread).
+/// have to pass one (`Agent(name, model)` needs no session/thread).
 static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
 fn next_session() -> String {
     format!(
@@ -75,7 +74,7 @@ impl Default for SdkMemoryConfig {
 /// SDK-side agent configuration (advanced path). `session` is intentionally
 /// absent: the runtime assigns one isolated context scope per agent instance.
 ///
-/// Mirrors the OpenAI Agents SDK agent definition: name + instructions + model.
+/// Agent definition: name + instructions + model.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SdkAgentConfig {
     pub agent_name: String,

@@ -1,4 +1,4 @@
-"""``Agent`` — mirrors ``Agent(...)`` from the OpenAI Agents SDK."""
+"""``Agent`` — the SDK's agent definition (name, instructions, model, tools)."""
 
 from __future__ import annotations
 

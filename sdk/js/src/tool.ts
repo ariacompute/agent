@@ -1,6 +1,6 @@
 /**
- * `tool()` — mirrors `tool({ name, description, parameters, execute })` from the
- * OpenAI Agents SDK.
+ * `tool()` — declares a tool by its `name`, `description`, `parameters` and
+ * `execute` handler.
  *
  * The cloud executes tools inside its own sandbox, so only the schema
  * (`name` / `description` / `parameters`) is forwarded to the server. `execute`

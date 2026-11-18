@@ -1,9 +1,8 @@
 /**
  * Shared types for `@ariacompute/agent`.
  *
- * The names intentionally mirror the OpenAI Agents SDK (`@openai/agents`) so a
- * quickstart written against it transfers unchanged: `Agent`, `run`,
- * `runStreamed`, `tool`, `Session`, `result.finalOutput`, `result.history`.
+ * The public names are `Agent`, `run`, `runStreamed`, `tool`, `Session`,
+ * `result.finalOutput`, `result.history`.
  */
 
 // Type-only: `agent.ts` imports these types, so a value import would cycle.

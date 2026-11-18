@@ -1,9 +1,7 @@
 """Shared types for :mod:`ariacompute_agent`.
 
-Names mirror the OpenAI Agents SDK (``openai-agents``) so the official
-quickstart transfers unchanged: ``Agent``, ``Runner.run``,
-``Runner.run_streamed``, ``function_tool``, ``result.final_output``,
-``result.to_input_list()``.
+The public names are ``Agent``, ``Runner.run``, ``Runner.run_streamed``,
+``function_tool``, ``result.final_output``, ``result.to_input_list()``.
 """
 
 from __future__ import annotations

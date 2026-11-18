@@ -1,7 +1,6 @@
 # `ariacompute-agent`
 
-The Aria agent SDK for Python. The API mirrors the
-[OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/quickstart)
+The Aria agent SDK for Python. It exposes an `Agent`-based API
 (`Agent`, `Runner.run`, `Runner.run_streamed`, `function_tool`, `Session`) and
 talks to an `aria-agent-cloud` deployment through its **beta Agents** REST API.
 

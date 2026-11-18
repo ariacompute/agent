@@ -1,7 +1,7 @@
 {
   "name": "@ariacompute/agent",
   "version": "0.1.0",
-  "description": "Aria agent SDK — mirrors the OpenAI Agents SDK shape (Agent / run / runStreamed / tool / Session) on top of the aria-agent-cloud beta Agents API.",
+  "description": "Aria agent SDK — Agent / run / runStreamed / tool / Session client on top of the aria-agent-cloud beta Agents API.",
   "license": "MIT",
   "repository": {
     "type": "git",

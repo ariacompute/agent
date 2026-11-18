@@ -7,7 +7,7 @@
 
 以能力接缝（capability seams）组合的 agent 运行时，向上提供 (a)<br/>
 **Rust + 云端 API**（对应 **OpenAI beta Agents** 资源面）、(b) **JS / Python<br/>
-SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** —— 它们共享<br/>
+SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** —— 它们共享<br/>
 同一套 `recall → model → memorize` 运行时与可插拔 sandbox。
 
 [English](./README.md) · **简体中文** · [文档](./docs/architecture.md)
@@ -62,7 +62,7 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 - 🛠️ **统一工具管线** —— 解析 → 权限预设 → 审批 → 分发 → 结果后处理（截断 + 外置），无审批方时拒绝并回灌原因而不是放行（`aria-agent-tools`，ADR-0016）。
 - ☁️ **云端 API** —— `aria-agent-cloud` 是一个 axum 服务，讲 OpenAI **beta Agents** 资源面，Postgres + pgvector 同时保存元数据与上下文，并支持 SSE 流式。
 - 📱 **端侧存储** —— `aria-agent-memo`（aria memo / SQLite）保存 local-first 的上下文副本，与云端后端通过同一个 `ContextStore` trait 互换。
-- 🌐 **五语言 SDK** —— JS / Python 镜像 OpenAI Agents SDK；Rust / Swift / Kotlin 把运行时嵌入进程内，无需服务端、无需网络。
+- 🌐 **五语言 SDK** —— JS / Python 是云端 API 的薄客户端；Rust / Swift / Kotlin 把运行时嵌入进程内，无需服务端、无需网络。
 - 🧭 **可插拔 sandbox** —— 每个工具容器都受 `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` 限制，并经由 `DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 访问守护进程。
 
 <div align="right">
@@ -85,8 +85,8 @@ SDK**（镜像 OpenAI Agents SDK），以及 (c) **Swift / Kotlin 原生 SDK** �
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
 | **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
 | **bindings** | `bindings/swift`（SwiftPM）与 `bindings/kotlin`（Android）。 |
-| **sdk/js** | npm `@ariacompute/agent` —— 镜像 `@openai/agents`（`Agent`、`run`、`runStreamed`、`tool`、`Session`）。 |
-| **sdk/python** | pip `ariacompute-agent` —— 镜像 `openai-agents`（`Agent`、`Runner`、`function_tool`、`Session`）。 |
+| **sdk/js** | npm `@ariacompute/agent` —— beta Agents API 的 TypeScript/JavaScript 客户端（`Agent`、`run`、`runStreamed`、`tool`、`Session`）。 |
+| **sdk/python** | pip `ariacompute-agent` —— beta Agents API 的 Python 客户端（`Agent`、`Runner`、`function_tool`、`Session`）。 |
 
 > **存储边界：** **云端**把对话 / 长期上下文保存在 Postgres + pgvector
 >（`context_fragments`，按 principal 分片）—— pgvector 为必需，缺少则启动失败。
@@ -490,13 +490,13 @@ async for event in streamed.events:
 
 ## 📦 SDK 示例
 
-以下示例**全部使用官方 SDK**，不再手写 HTTP。所有 SDK 都镜像 OpenAI Agents SDK
-的用法：定义 `Agent`，然后运行。
+以下示例**全部使用官方 SDK**，不再手写 HTTP。所有 SDK 都遵循同样的用法：
+定义 `Agent`，然后运行。
 
 | 语言 | 安装 | 包 / 模块 |
 |---|---|---|
-| Python | `pip install ariacompute-agent` | `ariacompute_agent`（镜像 `openai-agents`） |
-| TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent`（镜像 `@openai/agents`） |
+| Python | `pip install ariacompute-agent` | `ariacompute_agent`（云端 API 客户端） |
+| TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent`（云端 API 客户端） |
 | Rust | `cargo add ariacompute-agent` | `aria_agent_ffi`（进程内 / 原生） |
 | Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift`（进程内 / 原生） |
 | Kotlin | `com.ariacompute:agent` | `bindings/kotlin`（进程内 / 原生） |

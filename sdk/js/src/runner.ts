@@ -1,5 +1,5 @@
 /**
- * `run` / `runStreamed` — mirrors the OpenAI Agents SDK runner entry points.
+ * `run` / `runStreamed` — the SDK's runner entry points.
  *
  * Both drive one turn of the agent against the cloud's beta Agents API:
  * `POST /v1/agents/sessions/{id}/events` (blocking) or

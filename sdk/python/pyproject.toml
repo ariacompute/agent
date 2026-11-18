@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ariacompute-agent"
 version = "0.1.0"
-description = "Aria agent SDK - mirrors the OpenAI Agents SDK (Agent / Runner.run / Runner.run_streamed / function_tool / Session) on top of the aria-agent-cloud beta Agents API."
+description = "Aria agent SDK - Agent / Runner.run / Runner.run_streamed / function_tool / Session client on top of the aria-agent-cloud beta Agents API."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

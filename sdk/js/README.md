@@ -1,7 +1,6 @@
 # `@ariacompute/agent`
 
-The Aria agent SDK for TypeScript/JavaScript. The API mirrors the
-[OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/quickstart)
+The Aria agent SDK for TypeScript/JavaScript. It exposes an `Agent`-based API
 (`Agent`, `run`, `runStreamed`, `tool`, `Session`) and talks to an
 `aria-agent-cloud` deployment through its **beta Agents** REST API.
 

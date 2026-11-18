@@ -1845,7 +1845,7 @@ public object FfiConverterTypeSdkSession: FfiConverter<SdkSession, Pointer> {
  * SDK-side agent configuration (advanced path). `session` is intentionally
  * absent: the runtime assigns one isolated context scope per agent instance.
  *
- * Mirrors the OpenAI Agents SDK agent definition: name + instructions + model.
+ * Agent definition: name + instructions + model.
  */
 data class SdkAgentConfig (
     var `agentName`: kotlin.String, 

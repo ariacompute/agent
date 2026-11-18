@@ -7,7 +7,7 @@
 
 It is a capability-seam agent runtime that exposes agents as<br/>
 (a) a **Rust + Cloud API** speaking the **OpenAI beta Agents** resource surface, (b) **JS / Python<br/>
-SDKs** mirroring the OpenAI Agents SDK, and (c) **native SDKs for Swift / Kotlin** — all sharing<br/>
+SDKs** for that HTTP API, and (c) **native SDKs for Swift / Kotlin** — all sharing<br/>
 one `recall → model → memorize` runtime with pluggable sandboxes.
 
 [English](./README.md) · **简体中文** · [Docs](./docs/architecture.md)
@@ -63,7 +63,7 @@ where tools execute:
 - 🛠️ **One tool pipeline** — resolve → permission preset → approval → dispatch → post-process (truncate + spill), so a call without an approval provider is refused with a reason instead of running (`aria-agent-tools`, ADR-0016).
 - ☁️ **Cloud API** — `aria-agent-cloud` is an axum service speaking the OpenAI **beta Agents** surface, with Postgres + pgvector holding both metadata *and* context, and SSE streaming.
 - 📱 **On-device store** — `aria-agent-memo` (aria memo / SQLite) keeps a local-first context copy that is interchangeable with the cloud backend behind one `ContextStore` trait.
-- 🌐 **Five-language SDKs** — JS / Python mirror the OpenAI Agents SDK; Rust / Swift / Kotlin embed the runtime in-process with no server or network.
+- 🌐 **Five-language SDKs** — JS / Python are thin clients over the cloud API; Rust / Swift / Kotlin embed the runtime in-process with no server or network.
 - 🧭 **Pluggable sandbox** — every tool container is capped by `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` and reaches the daemon through `DOCKER_HOST` / `ARIA_DOCKER_SOCKET`.
 
 <div align="right">
@@ -86,8 +86,8 @@ where tools execute:
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent` / `SdkSession` / `create_agent`. |
 | **aria-agent-cloud** | axum service: Postgres + pgvector (metadata **and** context), OpenAI beta Agents API. `/v1/agents`, `/v1/agents/sessions`, SSE `/v1/agents/sessions/{id}/events/stream`. |
 | **bindings** | `bindings/swift` (SwiftPM) and `bindings/kotlin` (Android). |
-| **sdk/js** | npm `@ariacompute/agent` — mirrors `@openai/agents` (`Agent`, `run`, `runStreamed`, `tool`, `Session`). |
-| **sdk/python** | pip `ariacompute-agent` — mirrors `openai-agents` (`Agent`, `Runner`, `function_tool`, `Session`). |
+| **sdk/js** | npm `@ariacompute/agent` — TypeScript/JavaScript client for the beta Agents API (`Agent`, `run`, `runStreamed`, `tool`, `Session`). |
+| **sdk/python** | pip `ariacompute-agent` — Python client for the beta Agents API (`Agent`, `Runner`, `function_tool`, `Session`). |
 
 > **Storage boundary:** the **cloud** stores conversational / long-term context in
 > Postgres + pgvector (`context_fragments`, per-principal) — pgvector is required
@@ -526,12 +526,12 @@ only their own).
 ## 📦 SDK examples
 
 Every example below uses an **official SDK** — none of them hand-roll HTTP. All
-SDKs mirror the OpenAI Agents SDK shape: define an `Agent`, then run it.
+SDKs expose the same shape: define an `Agent`, then run it.
 
 | Language | Install | Package / module |
 |---|---|---|
-| Python | `pip install ariacompute-agent` | `ariacompute_agent` (mirrors `openai-agents`) |
-| TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent` (mirrors `@openai/agents`) |
+| Python | `pip install ariacompute-agent` | `ariacompute_agent` (cloud API client) |
+| TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent` (cloud API client) |
 | Rust | `cargo add ariacompute-agent` | `aria_agent_ffi` (in-process, native) |
 | Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift` (in-process, native) |
 | Kotlin | `com.ariacompute:agent` | `bindings/kotlin` (in-process, native) |

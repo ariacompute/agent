@@ -842,7 +842,7 @@ public func FfiConverterTypeSdkSession_lower(_ value: SdkSession) -> UnsafeMutab
  * SDK-side agent configuration (advanced path). `session` is intentionally
  * absent: the runtime assigns one isolated context scope per agent instance.
  *
- * Mirrors the OpenAI Agents SDK agent definition: name + instructions + model.
+ * Agent definition: name + instructions + model.
  */
 public struct SdkAgentConfig {
     public var agentName: String
