@@ -239,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn io_failures_are_surfaced() {
-        let (dir, fs) = fixture();
+        let (_dir, fs) = fixture();
         fs.write("a", "i am a file").await.unwrap();
         assert!(
             matches!(fs.write("a/child.txt", "x").await, Err(SeamError::Io(_))),
@@ -273,14 +273,14 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let loop_path = dir.path().join("loop");
+            let loop_path = _dir.path().join("loop");
             std::os::unix::fs::symlink("loop", &loop_path).unwrap();
             assert!(
                 matches!(fs.stat("loop").await, Err(SeamError::Io(_))),
                 "a symlink loop is an IO error, not NotFound"
             );
             use std::os::unix::fs::PermissionsExt;
-            let path = dir.path().join("plain.txt");
+            let path = _dir.path().join("plain.txt");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
             let err = fs.edit("plain.txt", "body", "changed").await;
             assert!(matches!(err, Err(SeamError::Io(_))), "{err:?}");
@@ -290,14 +290,14 @@ mod tests {
 
     #[tokio::test]
     async fn symlink_escape_is_denied() {
-        let (dir, fs) = fixture();
+        let (_dir, _fs) = fixture();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "s").unwrap();
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), _dir.path().join("link")).unwrap();
             assert!(matches!(
-                fs.read("link/secret.txt").await,
+                _fs.read("link/secret.txt").await,
                 Err(SeamError::Denied(_))
             ));
         }
