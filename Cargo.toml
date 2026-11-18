@@ -30,11 +30,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cross-cutting crates (path deps within this workspace)
-aria-agent-plugin = { path = "crates/aria-agent-plugin" }
+aria-agent-plugin = { path = "crates/aria-agent-plugin", version = "0.1.0" }
 aria-agent-memo = { path = "crates/aria-agent-memo" }
 aria-agent-sandbox = { path = "crates/aria-agent-sandbox" }
 aria-agent-core = { path = "crates/aria-agent-core" }
-aria-agent-tools = { path = "crates/aria-agent-tools" }
+aria-agent-tools = { path = "crates/aria-agent-tools", version = "0.1.0" }
 aria-agent-orchestrator = { path = "crates/aria-agent-orchestrator" }
 aria-agent-browser = { path = "crates/aria-agent-browser", version = "0.1.0" }
 

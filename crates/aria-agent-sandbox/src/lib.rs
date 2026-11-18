@@ -797,6 +797,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn candidate_sockets_include_desktop_and_colima() {
+        let _lock = SOCKET_ENV_LOCK.lock().unwrap();
         let cands = candidate_sockets();
         assert!(cands.contains(&"/var/run/docker.sock".to_string()));
         // Docker Desktop (macOS) and Colima keep the daemon under `$HOME`.

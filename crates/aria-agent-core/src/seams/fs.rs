@@ -217,8 +217,8 @@ mod tests {
 
     #[test]
     fn policy_and_error_helpers_are_exposed() {
-        let (_dir, fs) = fixture();
-        assert_eq!(fs.policy().root(), _dir.path());
+        let (dir, fs) = fixture();
+        assert_eq!(fs.policy().root(), dir.path().canonicalize().unwrap());
         assert!(matches!(
             map_policy(PolicyError::NoRoot),
             SeamError::Unavailable(_)
