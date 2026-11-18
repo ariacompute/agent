@@ -14,6 +14,12 @@ check: build
 test:
     cargo test --workspace
 
+# Real-socket E2E suite. DB/Docker scenarios skip when their dependency is
+# absent; set DATABASE_URL for the Postgres case and ARIA_E2E_DOCKER=1 for the
+# Docker case (requires a cached alpine:latest image).
+e2e:
+    cargo test -p agent-tests --test e2e_http
+
 # Coverage report (writes lcov.info; no gate).
 cov:
     cargo llvm-cov --workspace --lcov --output-path lcov.info

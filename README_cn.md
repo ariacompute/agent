@@ -952,12 +952,19 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 |---|---|
 | `cargo build --workspace` | 构建全部 crate |
 | `cargo test --workspace` | 运行 workspace 测试套件 |
+| `just e2e` | 运行真实 socket 的 HTTP E2E 套件（可选 DB/Docker 场景缺依赖时跳过） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 以警告即错误方式 lint |
 | `just ffi` | 重新生成 Swift / Kotlin 绑定（需先构建 cdylib） |
 | `cargo run -p aria-agent-cloud` | 运行云端 API（需 Postgres + OpenAI 密钥） |
 | `aria-agent serve` | 启动云端 HTTP 服务（默认子命令） |
 | `aria-agent setup` / `upgrade` | 配置 Releases 源 / 自更新二进制与 cdylib |
 
+### E2E 测试
+
+`just e2e`（即 `cargo test -p agent-tests --test e2e_http`）将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
+
+- `DATABASE_URL` —— 通过两个独立构建的 router 验证 Postgres + pgvector 存储；未设置或不可达时跳过。
+- `ARIA_E2E_DOCKER=1` —— 经流式路由在真实容器中执行 `shell` 工具；需 Docker 守护进程可达且本地已有 `alpine:latest` 镜像，否则跳过。
 
 <div align="right">
 
@@ -1002,9 +1009,9 @@ MIT，详见 [LICENSE](./LICENSE)。
 
 本仓库遵循 Harness Engineering：仓库本身即 Agent 的上下文，治理它的文档与代码一同版本化。
 
-- [`AGENTS.md`](AGENTS.md)：Agent 工程上下文入口与目录索引
-- [`requirements.md`](requirements.md)：需求规格（功能边界 / 异常 / 验收，人审后编码）
-- [`task.md`](task.md)：实施清单
+- [`AGENTS.md`](./AGENTS.md)：Agent 工程上下文入口与目录索引
+- [`requirements.md`](./requirements.md)：需求规格（功能边界 / 异常 / 验收，人审后编码）
+- [`task.md`](./task.md)：实施清单
 
 <div align="right">
 

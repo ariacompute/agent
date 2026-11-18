@@ -13,9 +13,20 @@ path = "src/lib.rs"
 name = "integration"
 path = "integration.rs"
 
+[[test]]
+name = "e2e_http"
+path = "e2e_http.rs"
+
 [dev-dependencies]
 aria-agent-memo.workspace = true
 aria-agent-sandbox.workspace = true
 aria-agent-core.workspace = true
+aria-agent-orchestrator.workspace = true
+aria-agent-cloud = { path = "../crates/aria-agent-cloud" }
 uuid.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }

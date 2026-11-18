@@ -37,6 +37,11 @@ SDKs remain the only public exits.
   namespaced child sessions, a concurrency cap and cached `wait`; agent teams
   as validated task DAGs with dependency-gated claims; scheduled jobs that
   advance `next_run_ms` before running under a single-flight ticker (ADR-0017).
+- **Real-socket E2E suite**: the production axum router is bound to an ephemeral
+  loopback port and driven by a real HTTP client, covering the beta Agents
+  lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths.
+  Postgres/pgvector and Docker scenarios skip with a reason when their
+  dependency is absent.
 
 ### New crates
 
@@ -79,5 +84,6 @@ and `session/*`; it still does not depend on any store implementation.
 ### Validation
 
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace` (563 passed), `just ffi`, `just sdk-js-test` (53 passed)
-and `just sdk-py-test` (30 passed) all succeed.
+`cargo test --workspace` (641 passed), `just e2e` (5 passed; DB/Docker cases skip
+without their dependencies), `just ffi`, `just sdk-js-test` (53 passed) and
+`just sdk-py-test` (30 passed) all succeed.

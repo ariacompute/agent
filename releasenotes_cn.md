@@ -29,6 +29,9 @@
 - **多智能体与调度**（`aria-agent-orchestrator`）：进程内子智能体（独立命名空间、
   并发上限、可缓存的 `wait`）；经校验的任务 DAG 团队（依赖门控认领）；定时任务
   先推进 `next_run_ms` 再执行，并通过单飞 ticker 防重复（ADR-0017）。
+- **真实 socket 的 E2E 套件**：生产 axum router 绑定到临时回环端口，由真实 HTTP
+  客户端驱动，覆盖 beta Agents 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常
+  路径。Postgres/pgvector 与 Docker 场景在缺少依赖时打印跳过原因。
 
 ### 新增 crate
 
@@ -68,5 +71,5 @@
 ### 验证
 
 `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
-`cargo test --workspace`（563 通过）、`just ffi`、`just sdk-js-test`（53 通过）与
-`just sdk-py-test`（30 通过）均通过。
+`cargo test --workspace`（641 通过）、`just e2e`（5 通过；DB/Docker 场景缺依赖时跳过）、
+`just ffi`、`just sdk-js-test`（53 通过）与 `just sdk-py-test`（30 通过）均通过。

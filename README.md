@@ -294,9 +294,10 @@ The script asserts status codes + key JSON fields across every route (agents,
 sessions, memory, relations, subagents, api-keys, the model-backed `/events`
 and `/events/stream` endpoints, and the recognised-but-501 stubs), prints
 `TOTAL / PASS / FAIL / SKIP`, and exits with the failure count. The single-agent
-subagent-id route is asserted as `404`, not skipped. Events need a configured
-model gateway; `--events-test` / `EVENTS_TEST` are accepted as no-op aliases
-for older invocations.
+subagent-id route is asserted as `404`, not skipped. `/events` and
+`/events/stream` run by default (a configured model gateway is required);
+`--events-test` / `EVENTS_TEST` are accepted as no-op aliases for older
+invocations.
 
 The cloud service waits for a healthy Postgres before starting; the schema
 (`agents` / `runs`) is created automatically on boot (`ensure_schema`), so no
@@ -1012,13 +1013,19 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 |---|---|
 | `cargo build --workspace` | build all crates |
 | `cargo test --workspace` | run the workspace test suite |
+| `just e2e` | run the real-socket HTTP E2E suite (optional DB/Docker cases skip when unavailable) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | lint with warnings as errors |
 | `just ffi` | regenerate the Swift / Kotlin bindings (needs the cdylib built) |
 | `cargo run -p aria-agent-cloud` | run the cloud API (needs Postgres + OpenAI key) |
 | `aria-agent serve` | start the cloud HTTP server (default subcommand) |
 | `aria-agent setup` / `upgrade` | configure Releases source / self-update the binary + cdylib |
 
-without it.
+### E2E tests
+
+`just e2e` (`cargo test -p agent-tests --test e2e_http`) binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
+
+- `DATABASE_URL` — exercises the Postgres + pgvector stores through two independently built routers; skipped when unset or unreachable.
+- `ARIA_E2E_DOCKER=1` — executes a `shell` tool in a real container via the streaming route; requires a reachable daemon and a locally cached `alpine:latest` image, otherwise skipped.
 
 <div align="right">
 

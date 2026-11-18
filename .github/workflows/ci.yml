@@ -2,11 +2,13 @@ name: CI
 
 # Test, SDK, FFI and coverage gates for the agent workspace.
 #
-# `test` runs the whole workspace suite on Linux and Windows. `sdk` runs the
-# JS and Python SDK suites; `ffi-drift` regenerates the committed bindings.
-# `coverage` re-runs the suite under `cargo-llvm-cov` and fails unless every
-# included source line is executed — see `scripts/coverage.sh` and
-# `docs/coverage.md` for the exclusion list.
+# `test` runs the whole workspace suite on Linux and Windows. `e2e` drives the
+# real-socket HTTP suite; its Postgres/Docker scenarios skip with a reason when
+# their dependencies are absent. `sdk` runs the JS and Python SDK suites;
+# `ffi-drift` regenerates the committed bindings. `coverage` re-runs the suite
+# under `cargo-llvm-cov` and fails unless every included source line is
+# executed — see `scripts/coverage.sh` and `docs/coverage.md` for the exclusion
+# list.
 
 on:
   push:
@@ -45,6 +47,23 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  e2e:
+    name: HTTP E2E (real socket)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Real-socket HTTP E2E
+        # Same command as `just e2e`. DATABASE_URL / ARIA_E2E_DOCKER are not
+        # configured here, so those optional scenarios skip with a reason.
+        run: cargo test -p agent-tests --test e2e_http -- --nocapture
 
   sdk:
     name: SDK tests (JS + Python)

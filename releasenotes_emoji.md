@@ -1,58 +1,44 @@
-# Release Notes ✨
+# 发布说明 ✨
 
-## 🧩 Capability seams in, vendored harness out 🚀
+## 🧩 能力接缝上位，内置 harness 退场 🚀
 
-A short, scannable version of the release notes.
+发布说明的精简速览版。
 
-### 🧩 New kernel
+### 🧩 新内核
 
-- 🔌 Every capability (model, sandbox, storage, sessions, tools, approvals,
-  sub-agents, scheduling) is now a seam with a replaceable provider.
-- 🧱 `aria-agent-plugin` validates the plugin graph at boot: no duplicate ids,
-  no conflicting `core` providers, no cycles, no missing dependencies, then
-  freezes it — `Agent` resolves every seam once, no lookups on the hot path.
-- 🛠️ One tool pipeline: resolve → preset → approval → dispatch → truncate/spill.
-  🚫 No approval provider means refused, never silently allowed.
+- 🔌 每项能力（模型、sandbox、存储、会话、工具、审批、子智能体、调度）现在都是可替换提供方的能力接缝。
+- 🧱 `aria-agent-plugin` 在启动时校验插件图：无重复 id、无冲突 `core` 提供方、无环、无缺失依赖，随后冻结 —— `Agent` 一次性解析全部接缝，热路径不再查表。
+- 🛠️ 统一工具管线：解析 → 预设 → 审批 → 分发 → 截断/外置。🚫 没有审批提供方时直接拒绝，绝不静默放行。
 
-### 💬 Sessions & titles
+### 💬 会话与标题
 
-- 📜 `SessionEvent` is the single source of truth; batch-flushed JSONL locally,
-  a projection in Postgres. 📊 Provider token usage wins, local estimates only
-  fill the gap; overflow compacts once and retries once.
-- 🏷️ Deterministic first-prompt title + optional async provider override. All
-  three loops (`run`, `run_stream`, `run_event_stream`) record and flush it
-  before the model call.
-- 👶 Child sessions (`<parent>::sub::<id>`) are titled and addressable through
-  `GET /v1/agents/sessions/{id}/title`, authorised via their parent tenant.
+- 📜 `SessionEvent` 是唯一事实来源；本地以 JSONL 批量 flush，云端为投影表。📊 优先采用模型上报的 token 用量，本地估算仅作兜底；上下文超限压缩一次并重试一次。
+- 🏷️ 确定性的首条输入标题 + 可选异步提供方覆盖。三个循环（`run`、`run_stream`、`run_event_stream`）均在调用模型前记录并 flush 标题。
+- 👶 子会话（`<parent>::sub::<id>`）同样带有标题，并可通过 `GET /v1/agents/sessions/{id}/title` 寻址，按父会话租户鉴权。
 
-### 🤖 Orchestration
+### 🤖 编排
 
-- 🧒 In-process sub-agents with namespaced sessions, a concurrency cap and
-  cached `wait` (delegation depth is one in the cloud).
-- 🗂️ Agent teams are validated task DAGs: cycles, duplicate and dangling ids
-  are refused; claims are dependency-gated.
-- ⏰ Scheduled jobs advance `next_run_ms` before running, so a restart or a
-  second replica cannot fire the same instant twice.
+- 🧒 进程内子智能体：独立命名空间会话、并发上限与可缓存 `wait`（云端委派深度为 1）。
+- 🗂️ 智能体团队是经校验的任务 DAG：环、重复 id 与悬空 id 均被拒绝；认领受依赖关系门控。
+- ⏰ 定时任务先推进 `next_run_ms` 再执行，因此重启或第二个副本都不会在同一时刻重复触发。
 
-### ☁️ Platform & SDK
+### ☁️ 平台与 SDK
 
-- 🗄️ New idempotent, `principal_id`-scoped tables: `scheduled_jobs`,
-  `agent_teams`, `session_titles`; new `/v1/agent-teams`, `/v1/scheduled-jobs`
-  and `GET …/title` routes.
-- 📡 New SSE frames: `agent.turn.approval.*` and `agent.turn.usage` — existing
-  frames and terminal semantics unchanged.
-- 📱 `SdkAgentConfig` gains `permission_preset` / `approval_mode`; Swift/Kotlin
-  bindings regenerated, JS/Python expose `result.usage`.
+- 🗄️ 新增幂等且按 `principal_id` 隔离的表：`scheduled_jobs`、`agent_teams`、`session_titles`；新增 `/v1/agent-teams`、`/v1/scheduled-jobs` 与 `GET …/title` 路由。
+- 📡 新增 SSE 帧：`agent.turn.approval.*` 与 `agent.turn.usage` —— 原有帧与终态语义不变。
+- 📱 `SdkAgentConfig` 新增 `permission_preset` / `approval_mode`；Swift/Kotlin 绑定已重生成，JS/Python 暴露 `result.usage`。
 
-### ⚠️ Breaking
+### ⚠️ 破坏性变更
 
-- 🗑️ The `codex` submodule, its git deps, exact `rama-*` pins, the patch section,
-  `CodexSandbox` and `SandboxProvider::Codex` are gone.
-- 🛑 `sandbox_provider = "codex"` now fails at startup; docker is the default.
-- 🔒 Deployments without an approval broker refuse mutations instead of
-  implicitly allowing them.
+- 🗑️ 删除 `codex` 子模块、其 git 依赖、`rama-*` 精确版本钉、patch 段、`CodexSandbox` 与 `SandboxProvider::Codex`。
+- 🛑 `sandbox_provider = "codex"` 现在启动即失败；默认沙箱为 docker。
+- 🔒 没有审批代理的部署将拒绝写操作，而非隐式放行。
 
-### ✅ Validation
+### 🧪 E2E
 
-`cargo test --workspace` (563 ✅), JS SDK (53 ✅), Python SDK (30 ✅), plus
-`fmt`, `clippy -D warnings` and `just ffi` all green.
+- 🌐 真实回环 socket 驱动 beta Agents API：生命周期、SSE、工具、租户、记忆与异常路径。
+- 🗄️ Postgres（`DATABASE_URL`）与 🐳 Docker（`ARIA_E2E_DOCKER=1`）场景在缺少依赖时打印原因并跳过。
+
+### ✅ 验证
+
+`cargo test --workspace`（641 ✅，含 5 个 E2E）、JS SDK（53 ✅）、Python SDK（30 ✅），以及 `fmt`、`clippy -D warnings` 与 `just ffi` 全部通过。
