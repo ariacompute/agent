@@ -155,9 +155,29 @@ impl GatewayFactory for SingleGateway {
     }
 }
 
+/// The socket operations the proxy needs. A seam so a listener whose fd is
+/// torn down (or whose address disappears) can be exercised in tests without a
+/// real daemon; production always uses the `TcpListener` implementation.
+#[async_trait::async_trait]
+pub(crate) trait ProxyListener: Send + Sync {
+    async fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)>;
+    fn local_addr(&self) -> std::io::Result<SocketAddr>;
+}
+
+#[async_trait::async_trait]
+impl ProxyListener for TcpListener {
+    async fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)> {
+        tokio::net::TcpListener::accept(self).await
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        tokio::net::TcpListener::local_addr(self)
+    }
+}
+
 /// A local HTTP forward proxy bound to a loopback port.
 pub struct LocalForwardProxy {
-    listener: TcpListener,
+    listener: Box<dyn ProxyListener>,
     addr: SocketAddr,
     factory: Arc<dyn GatewayFactory>,
 }
@@ -176,9 +196,16 @@ impl LocalForwardProxy {
         let listener = TcpListener::bind(bind)
             .await
             .map_err(|e| SeamError::Io(format!("bind proxy {bind}: {e}")))?;
+        Self::from_listener(Box::new(listener), factory)
+    }
+
+    fn from_listener(
+        listener: Box<dyn ProxyListener>,
+        factory: Arc<dyn GatewayFactory>,
+    ) -> SeamResult<Self> {
         let addr = listener
             .local_addr()
-            .map_err(|e| SeamError::Io(format!("proxy local_addr: {e}")))?; // LCOV_EXCL_LINE
+            .map_err(|e| SeamError::Io(format!("proxy local_addr: {e}")))?;
         Ok(Self {
             listener,
             addr,
@@ -208,8 +235,8 @@ impl LocalForwardProxy {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "proxy accept failed"); // LCOV_EXCL_LINE
-                    tokio::time::sleep(Duration::from_millis(50)).await; // LCOV_EXCL_LINE
+                    tracing::warn!(error = %e, "proxy accept failed");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
         }
@@ -221,7 +248,7 @@ impl LocalForwardProxy {
             .listener
             .accept()
             .await
-            .map_err(|e| SeamError::Io(format!("proxy accept: {e}")))?; // LCOV_EXCL_LINE
+            .map_err(|e| SeamError::Io(format!("proxy accept: {e}")))?;
         serve_peer(stream, peer, self.factory.clone()).await
     }
 }
@@ -270,7 +297,7 @@ async fn send_bytes(stream: &mut TcpStream, bytes: &[u8], context: &str) -> Seam
     stream
         .write_all(bytes)
         .await
-        .map_err(|e| SeamError::Io(format!("{context}: {e}")))?; // LCOV_EXCL_LINE
+        .map_err(|e| SeamError::Io(format!("{context}: {e}")))?;
     Ok(())
 }
 
@@ -278,7 +305,7 @@ async fn send_bytes(stream: &mut TcpStream, bytes: &[u8], context: &str) -> Seam
 async fn relay(client: &mut TcpStream, upstream: &mut TcpStream, context: &str) -> SeamResult<()> {
     tokio::io::copy_bidirectional(client, upstream)
         .await
-        .map_err(|e| SeamError::Io(format!("{context}: {e}")))?; // LCOV_EXCL_LINE
+        .map_err(|e| SeamError::Io(format!("{context}: {e}")))?;
     Ok(())
 }
 
@@ -299,7 +326,7 @@ async fn read_head(stream: &mut TcpStream) -> SeamResult<(String, Vec<u8>)> {
         let read = stream
             .read(&mut chunk)
             .await
-            .map_err(|e| SeamError::Io(format!("read request head: {e}")))?; // LCOV_EXCL_LINE
+            .map_err(|e| SeamError::Io(format!("read request head: {e}")))?;
         if read == 0 {
             return Err(SeamError::Invalid("connection closed mid-head".into()));
         }
@@ -439,10 +466,17 @@ async fn forward_http(
 }
 
 async fn connect(host: &str, port: u16) -> SeamResult<TcpStream> {
-    match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
+    connect_with_timeout(host, port, CONNECT_TIMEOUT).await
+}
+
+/// One dial with an explicit deadline. Keeping the timeout at a single call
+/// site makes the timeout branch testable with a short deadline against a
+/// saturated loopback backlog instead of waiting for the production 10s.
+async fn connect_with_timeout(host: &str, port: u16, timeout: Duration) -> SeamResult<TcpStream> {
+    match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
         Ok(Ok(stream)) => Ok(stream),
         Ok(Err(e)) => Err(SeamError::Io(format!("connect {host}:{port}: {e}"))),
-        Err(_) => Err(SeamError::Io(timeout_message(host, port))), // LCOV_EXCL_LINE
+        Err(_) => Err(SeamError::Io(timeout_message(host, port))),
     }
 }
 
@@ -970,5 +1004,177 @@ mod tests {
             "no header for a failed dial: {response}"
         );
         assert!(server.await.unwrap().is_err());
+    }
+
+    /// A peer that closes with RST instead of FIN: `SO_LINGER = 0` makes the
+    /// kernel reject the connection, so the other side sees a real `io::Error`
+    /// rather than a clean EOF. Loopback only, no external dependency. The
+    /// coverage gate runs on Linux, where the RST timing is deterministic.
+    #[cfg(unix)]
+    fn rst_peer(addr: SocketAddr) -> std::net::TcpStream {
+        let peer = std::net::TcpStream::connect(addr).unwrap();
+        socket2::SockRef::from(&peer)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        peer
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reset_peer_is_reported_while_reading_the_request_head() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            read_head(&mut stream).await
+        });
+        let peer = rst_peer(addr);
+        accepted_rx.await.unwrap();
+        drop(peer);
+        let err = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("read request head"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reset_peer_is_reported_while_writing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            send_bytes(&mut stream, b"HTTP/1.1 403 Forbidden\r\n\r\n", "write 403").await
+        });
+        let peer = rst_peer(addr);
+        accepted_rx.await.unwrap();
+        drop(peer);
+        let err = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("write 403"), "{err}");
+    }
+
+    /// A listener whose fd has been torn down: both address lookup and accept
+    /// fail, which is what a proxy sees when its socket is closed underneath it.
+    struct FailingListener;
+
+    #[async_trait::async_trait]
+    impl ProxyListener for FailingListener {
+        async fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)> {
+            Err(std::io::Error::other("listener torn down"))
+        }
+
+        fn local_addr(&self) -> std::io::Result<SocketAddr> {
+            Err(std::io::Error::other("no local address"))
+        }
+    }
+
+    #[cfg(test)]
+    fn proxy_with_listener(listener: Box<dyn ProxyListener>) -> LocalForwardProxy {
+        LocalForwardProxy {
+            listener,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            factory: Arc::new(SingleGateway(gateway(allow_localhost()))),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listener_without_an_address_is_refused() {
+        let err = LocalForwardProxy::from_listener(
+            Box::new(FailingListener),
+            Arc::new(SingleGateway(gateway(allow_localhost()))),
+        )
+        .err()
+        .expect("a listener without an address must be refused");
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("proxy local_addr"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_accept_is_reported_by_serve_one() {
+        let proxy = proxy_with_listener(Box::new(FailingListener));
+        let err = proxy.serve_one().await.unwrap_err();
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("proxy accept"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn serve_survives_repeated_accept_failures() {
+        let proxy = proxy_with_listener(Box::new(FailingListener));
+        let server = tokio::spawn(proxy.serve());
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            !server.is_finished(),
+            "accept errors must not stop the listener"
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dial_that_outlives_the_deadline_is_reported() {
+        // A loopback listener with a zero backlog: its accept queue holds one
+        // completed connection, and the next SYN is dropped instead of refused.
+        // That makes the dial wait for the deadline without a firewall or a
+        // remote blackhole.
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .unwrap();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        socket.bind(&bind.into()).unwrap();
+        socket.listen(0).unwrap();
+        let listener = std::net::TcpListener::from(socket);
+        let port = listener.local_addr().unwrap().port();
+        let _filling = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let err = connect_with_timeout("127.0.0.1", port, Duration::from_millis(80))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reset_peer_is_reported_during_relay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut client, _) = listener.accept().await.unwrap();
+            let _upstream_peer = TcpStream::connect(upstream_addr).await.unwrap();
+            let (mut upstream, _) = upstream_listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            relay(&mut client, &mut upstream, "tunnel 127.0.0.1:1").await
+        });
+        let peer = rst_peer(addr);
+        accepted_rx.await.unwrap();
+        drop(peer);
+        let err = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("tunnel 127.0.0.1:1"), "{err}");
     }
 }

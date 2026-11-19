@@ -159,7 +159,7 @@ impl FileCredentialStore {
         std::fs::write(&tmp, body)
             .map_err(|e| SeamError::Io(format!("write {}: {e}", tmp.display())))?;
         std::fs::rename(&tmp, &path)
-            .map_err(|e| SeamError::Io(format!("replace {}: {e}", path.display())))?; // LCOV_EXCL_LINE
+            .map_err(|e| SeamError::Io(format!("replace {}: {e}", path.display())))?;
         Ok(())
     }
 
@@ -601,6 +601,20 @@ mod tests {
             store.rotate("k", SecretValue::new("v")).await,
             Err(SeamError::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_atomic_replace_is_reported() {
+        let _guard = env_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), 0);
+        // The temp file can still be written, but renaming it over a directory
+        // fails on every platform. This is the only way `persist` can fail
+        // after the write succeeded, so the error must name the target path.
+        std::fs::create_dir(store.path()).unwrap();
+        let err = store.rotate("k", SecretValue::new("v")).await.unwrap_err();
+        assert!(matches!(err, SeamError::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("replace"), "{err}");
     }
 
     #[tokio::test]

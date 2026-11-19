@@ -80,16 +80,26 @@ A single statement may opt out of the gate with a trailing marker and a short
 reason in the surrounding comment:
 
 ```rust
-std::fs::rename(&tmp, &path)
-    .map_err(|e| SeamError::Io(format!("replace {}: {e}", path.display())))?; // LCOV_EXCL_LINE
+some_call().map_err(|e| report(e))?; // LCOV_EXCL_LINE
 ```
 
 The gate counts these separately (`excluded by LCOV_EXCL_LINE`) and prints the
-number. Use it only for a branch that must stay in the code but cannot be
-produced hermetically — the OS refusing an operation we have to report (a socket
-write to a peer that vanished, a dial that times out, an atomic rename that
-fails after the write succeeded). Anything that could be tested belongs in a
-test, and `scripts/coverage.sh` still fails on the line next to the marker.
+number, and `scripts/coverage.sh` still fails on the line next to the marker.
+There are currently **no** per-line opt-outs: every error branch in the gate is
+covered by a test. The patterns that made earlier opt-outs look unavoidable are
+all reproducible hermetically:
+
+* socket `EIO` — `SO_LINGER = 0` on a loopback peer delivers RST, so the proxy's
+  read, write and relay failures are exercised;
+* dial timeout — a zero-backlog loopback listener with a saturated accept queue
+  drops the next SYN, so `connect_with_timeout` reaches its deadline in ~80ms;
+* listener failure — the internal `ProxyListener` seam supplies a listener
+  whose `local_addr` and `accept` fail;
+* atomic replace — pointing the store file at a directory makes the rename fail
+  after the temp write succeeds.
+
+Use a marker only for a branch that must stay in the code but genuinely cannot
+be produced hermetically. Anything that could be tested belongs in a test.
 
 ## Closing-delimiter artifacts
 
