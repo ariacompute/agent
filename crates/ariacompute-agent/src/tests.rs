@@ -80,6 +80,11 @@ impl Stub {
             while !stop_clone.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Windows sockets inherit the listener's nonblocking mode on
+                        // accept. Reads would then fail with `WouldBlock` before the
+                        // request arrived, so the stub would reply without consuming
+                        // it and reqwest would report a spurious network error.
+                        stream.set_nonblocking(false).expect("blocking stream");
                         stream
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .expect("timeout");
