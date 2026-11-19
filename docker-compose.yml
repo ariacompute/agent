@@ -88,6 +88,17 @@ services:
       # socket (DooD). Override with a remote daemon if preferred. Honored by
       # the bollard-based Docker sandbox.
       DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
+      # Turn runtime (ADR-0019): `dsh` is the image default; set `native` to use
+      # the in-process Rust loop instead.
+      AGENT_HARNESS: ${AGENT_HARNESS:-dsh}
+      DSH_BIN: ${DSH_BIN:-/opt/dsh/bin/dsh}
+      DSH_HOME_ROOT: ${DSH_HOME_ROOT:-/app/.aria/dsh}
+      DSH_POOL_MAX: ${DSH_POOL_MAX:-8}
+      DSH_IDLE_TTL_SEC: ${DSH_IDLE_TTL_SEC:-900}
+      # OpenAI-compatible provider route for the harness (e.g. Alibaba Model
+      # Studio). `OPENAI_API_KEY`/`OPENAI_BASE_URL` are used by the native loop.
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     # Host Docker socket so the Docker sandbox can run tool containers. Safe only
     # when you trust the composed service. To disable sandboxing, comment this
     # line out (and the `DOCKER_GID` build arg is then unused).

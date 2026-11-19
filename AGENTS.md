@@ -2,14 +2,18 @@
 
 This repo is a Rust workspace: a capability-seam agent runtime (`aria-agent-protocol`
 seams + plugin registry) that ships a cloud API (OpenAI **beta Agents** compatible),
-native (Swift/Kotlin) and language (JS/Python) SDKs. There is **no vendored harness**:
-every capability is a seam with a default provider, and boot fails closed when the
-wiring is inconsistent.
+native (Swift/Kotlin) and language (JS/Python) SDKs. Every capability is a seam with
+a default provider, and boot fails closed when the wiring is inconsistent. The
+default **turn runtime** is the external **DeepSeek Harness** (`dsh`, driven as a
+child process over JSON-RPC — no vendored TypeScript); the in-process Rust loop is
+kept as an explicit `native` fallback (ADR-0019).
 
 ## Workspace layout
 
 * `crates/aria-agent-core` (loop, seams, session event stream, prompt assembly,
-  token meter), `aria-agent-plugin` (manifest + registry + freeze),
+  token meter), `aria-agent-dsh` (the `agent_loop` seam's dsh backend: JSON-RPC
+  stdio transport, per-session runtime pool, approval bridge, event mapping),
+  `aria-agent-plugin` (manifest + registry + freeze),
   `aria-agent-tools` (fs/shell/jobs/terminal/skills/web/ask/plan/todo/memo families),
   `aria-agent-orchestrator` (sub-agents, teams, scheduled jobs), `aria-agent-sandbox`,
   `aria-agent-memo` (aria memo), `ariacompute-agent`, `aria-agent-cloud`,
@@ -61,12 +65,15 @@ wiring is inconsistent.
 4. **Capability seams + plugin registry.** Every capability is a seam
    (`llm`, `sandbox`, `fs`, `shell`, `jobs`, `storage`, `sessionPersistence`,
    `sessionQuery`, `approvals`, `skills`, `web`, `userQuestions`, `subagents`,
-   `schedule`). Providers register in `aria-agent-plugin`; assembly topo-sorts
-   `requires`, rejects duplicates/cycles and enforces one provider per `core` key at
-   boot. Resolve seams **once** in `Agent::with_handlers` — never per tool call.
+   `schedule`, `agent_loop`). Roles follow dsh's four kinds (`core` / `seam` /
+   `bundle` / `service`); keys accept dsh's spellings as aliases, resolution order
+   is registration order (precedence), and `service` keys reject providers.
+   Providers register in `aria-agent-plugin`; assembly topo-sorts `requires`,
+   rejects duplicates/cycles and enforces one provider per `core` key at boot.
+   Resolve seams **once** in `Agent::with_components` — never per tool call.
    Tools run through `ToolExecutionPipeline`: resolve → permission preset →
    approval → dispatch → post-process; **no approval provider means denied**, and
-   the reason is fed back to the model. See ADR-0014/ADR-0016.
+   the reason is fed back to the model. See ADR-0014/ADR-0016/ADR-0019.
 5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key, raw user content,
    or embedding vectors.
 6. **Tests.** `cargo test --workspace` must pass; JS SDK via `just sdk-js-test`
@@ -159,6 +166,22 @@ wiring is inconsistent.
      `next_run_ms` **before** running. `agent_teams`, `scheduled_jobs` and
      `session_titles` all carry `principal_id` and every query filters on it. See
      ADR-0017.
+
+    16. **DeepSeek Harness (dsh) is the default turn runtime.** `AgentConfig::harness`
+     selects the `agent_loop` seam: `native` (library default) or `dsh` (cloud default,
+     injected via `Agent::with_components` with `aria-agent-dsh`'s `DshAgentLoop`).
+     Unknown values, and a `dsh` config without an injected loop, are hard errors —
+     never a silent fallback. dsh is an **external child process**
+     (`dsh --profile sdk`, newline-delimited JSON-RPC over stdio), not a vendored
+     TypeScript harness and not a third-party gateway plugin. Under `harness=dsh`,
+     **dsh executes tools in its own sandbox**: aria's `Sandbox`,
+     `ToolExecutionPipeline` and registered handlers do not run for that session;
+     aria still owns recall, memory writes, session events/titles, approval and
+     question bridging, and the frozen wire envelope. Approvals and questions use
+     the installed seams and fail closed. Each session gets its own `DSH_HOME` and
+     workspace (`DshConfig::for_session`), the child environment is an allow-list,
+     and `~/.dsh` is never discovered. On a dsh upgrade only
+     `aria-agent-dsh/src/event_map.rs` should need changes. See ADR-0019.
 
 ## SDK（js / python）
 

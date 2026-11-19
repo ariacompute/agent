@@ -1,5 +1,12 @@
 # 发布说明 ✨
 
+## 🐋 默认运行时切换为 DeepSeek Harness
+
+- 🧵 `agent_loop` 成为真正的接缝（`AgentLoop` + `LoopContext`），原循环原样保留为 `NativeLoop`，`AGENT_HARNESS=native` 可显式回退。
+- 🔌 新增 `aria-agent-dsh`：stdio JSON-RPC 传输、按会话复用的运行时池、审批/提问桥接、唯一的通知→事件映射模块。
+- 🛡️ 每个会话独占 `DSH_HOME` 与工作目录，子进程环境为白名单；无审批方即拒绝。
+- 🧪 `just dsh-smoke`（假运行时，离线）与 `just dsh-e2e`（真实一轮，缺依赖时明确跳过）。
+
 ## 🧩 能力接缝上位，内置 harness 退场 🚀
 
 发布说明的精简速览版。

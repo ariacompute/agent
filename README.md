@@ -8,7 +8,8 @@
 It is a capability-seam agent runtime that exposes agents as<br/>
 (a) a **Rust + Cloud API** speaking the **OpenAI beta Agents** resource surface, (b) **JS / Python<br/>
 SDKs** for that HTTP API, and (c) **native SDKs for Swift / Kotlin** — all sharing<br/>
-one `recall → model → memorize` runtime with pluggable sandboxes.
+one `recall → runtime → memorize` shell, whose turns run on **DeepSeek Harness**<br/>
+by default, with pluggable sandboxes.
 
 [English](./README.md) · **简体中文** · [Docs](./docs/architecture.md)
 
@@ -59,9 +60,10 @@ one `recall → model → memorize` runtime with pluggable sandboxes.
 continue the conversation and stream — while the runtime decides where memory lives and
 where tools execute:
 
-- 🧩 **Layered agent runtime** — `aria-agent-core` runs `recall → model → memorize`; tools execute inside a pluggable `Sandbox` (Docker / Kata / Cube / Browser).
-- 🔌 **Capability seams** — model, sandbox, storage, sessions, tools, approvals, sub-agents and scheduling are replaceable seams assembled by a plugin registry that fails closed at boot (`aria-agent-plugin`, ADR-0014).
-- 🛠️ **One tool pipeline** — resolve → permission preset → approval → dispatch → post-process (truncate + spill), so a call without an approval provider is refused with a reason instead of running (`aria-agent-tools`, ADR-0016).
+- 🐋 **DeepSeek Harness by default** — a turn runs on the external [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh --profile sdk`, newline-delimited JSON-RPC over stdio), so turn/step orchestration, model calls and tool execution are dsh's; the in-process Rust loop stays as an explicit `native` fallback (`aria-agent-dsh`).
+- 🧩 **Agent shell** — `aria-agent-core` keeps `recall → memorize`, prompt assembly, the tool pipeline, session events and the frozen streaming envelope, independent of which runtime drove the turn.
+- 🔌 **Capability seams** — model, sandbox, storage, sessions, tools, approvals, sub-agents and scheduling are replaceable seams assembled by a plugin registry that fails closed at boot (`aria-agent-plugin`).
+- 🛠️ **One tool pipeline** — resolve → permission preset → approval → dispatch → post-process (truncate + spill), so a call without an approval provider is refused with a reason instead of running (`aria-agent-tools`).
 - ☁️ **Cloud API** — `aria-agent-cloud` is an axum service speaking the OpenAI **beta Agents** surface, with Postgres + pgvector holding both metadata *and* context, and SSE streaming.
 - 📱 **On-device store** — `aria-agent-memo` (aria memo / SQLite) keeps a local-first context copy that is interchangeable with the cloud backend behind one `ContextStore` trait.
 - 🌐 **Five-language SDKs** — JS / Python are thin clients over the cloud API; Rust / Swift / Kotlin embed the runtime in-process with no server or network.
@@ -75,9 +77,26 @@ where tools execute:
 
 ## 🏗️ Architecture
 
-A capability-seam agent runtime: `aria-agent-core` owns the loop while every
+A capability-seam agent runtime: `aria-agent-core` owns the agent shell while every
 capability is a replaceable provider, with cloud and native front-ends sharing the
-same `recall → model → memorize` runtime.
+same `recall → runtime → memorize` flow.
+
+### Turn runtime
+
+The turn loop is the `agent_loop` seam. Its default provider is **DeepSeek
+Harness**: one `dsh` child process per session, spoken to over JSON-RPC, with its
+own `DSH_HOME` and workspace, an allow-list environment, and a pooled runtime that
+reaps when idle. dsh executes the model call *and* its own tools, so under
+`harness = "dsh"` the aria sandbox/tool pipeline is idle; aria still owns recall,
+memory writes, session events/titles, approval + question bridging and the wire
+envelope. `AGENT_HARNESS=native` selects the built-in Rust loop instead;
+an unknown value — or `dsh` without an installed runtime — is a hard error, never
+a silent fallback.
+
+```bash
+just dsh-smoke  # scripted fake runtime: handshake + turn framing, offline
+just dsh-e2e    # one real turn (ARIA_DSH_E2E=1 + DSH_BIN + provider key)
+```
 
 ### Tech stack
 
@@ -104,7 +123,8 @@ of truth for both persistence and SSE streaming.
 | **aria-agent-memo** | On-device / embedded **context store** (aria memo / SQLite, the same `memories` schema as the `aria-memo` CLI) implementing `aria-agent-core::context`. |
 | **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube / Browser. |
 | **aria-agent-browser** | Browser sandbox: six-image `BrowserCatalog` + `BrowserSandbox` (reuses Docker/Kata) + browser tool family. |
-| **aria-agent-core** | Unified agent runtime: `recall → model → memorize`, seams, session event stream, tool pipeline. |
+| **aria-agent-core** | Agent shell: `recall → runtime → memorize`, seams (`agent_loop` included), session event stream, tool pipeline, prompt assembly. |
+| **aria-agent-dsh** | The `agent_loop` seam's DeepSeek Harness provider: stdio JSON-RPC transport, per-session runtime pool, approval/question bridge, notification → `AgentEvent` mapping. |
 | **aria-agent-plugin** | Plugin registry: manifests, seam keys/roles, dependency topo-sort, cycle + core-uniqueness checks, frozen snapshot. |
 | **aria-agent-tools** | Built-in tool families: fs, shell, jobs, terminal (`pty`), skills, web (`web`), ask_user, plan, todo, memo. |
 | **aria-agent-orchestrator** | Sub-agents (in-process fork), agent teams (task DAG), scheduled jobs (single-flight ticker). |
@@ -232,7 +252,13 @@ cp .env.example .env
 |----------|---------|-------------|
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres (**pgvector**) credentials + database: metadata *and* context memory. |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | Connection string. The host `postgres` is the compose service name. |
-| `OPENAI_API_KEY` | _(empty)_ | OpenAI key for model calls. Leave empty only for stub/offline runs. |
+| `AGENT_HARNESS` | `dsh` | Turn runtime: `dsh` (DeepSeek Harness) or `native` (built-in Rust loop). An unknown value fails at boot. |
+| `DSH_BIN` | `dsh` on `PATH` | Harness executable (the image installs `/opt/dsh/bin/dsh`). Missing binary = actionable error, never a downgrade. |
+| `DSH_HOME_ROOT` | `.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories. |
+| `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
+| `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | _(unset)_ | OpenAI-compatible provider route handed to the harness (e.g. Alibaba Model Studio). Forwarded explicitly; the child environment is an allow-list. |
+| `OPENAI_API_KEY` | _(empty)_ | OpenAI key for model calls. Used by the `native` runtime; leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
@@ -542,7 +568,7 @@ monotonic `sequence_number`:
 | Event | Payload |
 |---|---|
 | `agent.turn.created` | `turn{id,status,session_id,agent_id}` |
-| `agent.turn.in_progress` | phase boundary; extra `phase` (`recall` / `model` / `tool_exec` / `loop_guard`) + `label` |
+| `agent.turn.in_progress` | phase boundary; extra `phase` (`recall` / `harness` / `step` / `model` / `tool_exec` / `loop_guard`) + `label` |
 | `agent.turn.item.added` | `item` — `message` (assistant, `role`) or `function_call` (`name`, `arguments`) |
 | `agent.turn.item.done` | completed `item`; a `function_call` also carries the executed `result` |
 | `agent.turn.output_text.delta` | `item_id`, `delta` |
@@ -798,6 +824,11 @@ if (result.usage) console.log(`tokens: ${result.usage.totalTokens}`);
 ```
 
 ### Rust (in-process)
+
+> **Runtime choice.** In-process SDKs default to the `native` loop (a mobile host
+> ships no `dsh` binary); set `ARIA_AGENT_HARNESS=dsh` to run their turns on
+> DeepSeek Harness as well. Selecting `dsh` without an available runtime is an
+> actionable error, never a downgrade.
 
 ```rust
 use aria_agent_ffi::{create_agent, SdkAgentListener, SdkStreamEvent};

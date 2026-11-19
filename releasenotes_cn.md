@@ -1,6 +1,39 @@
 # 发布说明
 
-## 能力接缝内核，移除内置 harness
+## 默认运行时切换为 DeepSeek Harness
+
+每一轮对话现在默认由 **DeepSeek Harness（dsh）** 执行：dsh 以外部子进程
+（`--profile sdk`）形式启动，通过 stdio 上的逐行 JSON-RPC 通信。turn 循环、模型
+调用与工具执行归 dsh；本仓库继续负责 Cloud API、记忆、多租户与冻结的流式信封。
+
+### 主要变更
+
+- **`agent_loop` 成为真正的接缝**：`AgentLoop` + `LoopContext`；原循环原样搬进
+  `NativeLoop`，可用 `AGENT_HARNESS=native` 显式回退（ADR-0019）。
+- **新增 `aria-agent-dsh`**：stdio 传输（8 MiB 帧上限、stderr 排空）、带超时且
+  失败即拒绝的 JSON-RPC 客户端、按会话复用的运行时池（握手一次、空闲回收、容量
+  上限），以及唯一的纯函数映射模块（dsh 通知 → `AgentEvent` / `SessionEvent`）。
+- **审批与提问桥接**到已安装的接缝：缺少提供方即拒绝并回传原因，绝不默认放行。
+  每个会话独占 `DSH_HOME` 与工作目录；子进程环境为白名单。
+- **接缝契约对齐 dsh**：四类角色（`core`/`seam`/`bundle`/`service`），dsh 拼写作为
+  别名接受（`approval`、`terminals`、`spillStore` 等），注册顺序即优先级，
+  `dispose` 逆装配顺序释放；`service` 键拒绝注册 provider。
+- **新增任务**：`just dsh-smoke`（假运行时，离线）与 `just dsh-e2e`（真实一轮；
+  缺少 `ARIA_DSH_E2E=1`、`dsh` 或凭据时明确跳过）。
+
+### 配置
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `AGENT_HARNESS` | `dsh`（云二进制） | `dsh` 或 `native` |
+| `DSH_BIN` | `PATH` 上的 `dsh` | 运行时可执行文件 |
+| `DSH_HOME_ROOT` | `.aria/dsh` | 每租户/每会话的 home 根目录 |
+| `DSH_POOL_MAX` | `8` | 每租户活跃运行时上限 |
+| `DSH_IDLE_TTL_SEC` | `900` | 空闲回收窗口 |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | — | OpenAI 兼容端点 |
+| `ARIA_AGENT_HARNESS` | `native` | 原生 SDK 显式启用 |
+
+## 早期：能力接缝内核，移除内置 harness
 
 本次发布用可组合的 agent 内核取代原先基于 codex 的单循环 harness。每一项能力
 都是一个带有默认提供方的能力接缝；Cloud API（OpenAI beta Agents 兼容）、UniFFI

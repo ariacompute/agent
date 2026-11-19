@@ -34,6 +34,8 @@ pub enum PluginError {
     },
     #[error("no provider registered for seam `{seam}`")]
     NoProvider { seam: &'static str },
+    #[error("seam `{seam}` is a service, not a swappable provider slot")]
+    ServiceIsNotAProvider { seam: &'static str },
     #[error("seam `{seam}` has no default provider")]
     MissingDefault { seam: &'static str },
     #[error("seam `{seam}` provider `{name}` has the wrong capability type")]

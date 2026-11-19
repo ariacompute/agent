@@ -87,6 +87,9 @@ impl Registry {
         name: &'static str,
         value: Arc<T>,
     ) -> PluginResult<()> {
+        if seam.is_service() {
+            return Err(PluginError::ServiceIsNotAProvider { seam: seam.0 });
+        }
         if self
             .entries
             .iter()
@@ -260,8 +263,29 @@ impl FrozenRegistry {
             .collect()
     }
 
+    /// Providers of `seam` in **assembly order**, which is the precedence chain
+    /// dsh calls "registration order is priority": the first entry is the
+    /// default, later entries are fallbacks a consumer may try in order.
+    pub fn precedence(&self, seam: SeamKey) -> Vec<&'static str> {
+        self.provider_names(seam)
+    }
+
     pub fn default_name(&self, seam: SeamKey) -> Option<&'static str> {
         self.defaults.get(seam.0).copied()
+    }
+
+    /// Release every provider in reverse assembly order, so a dependent plugin
+    /// drops before the seams it consumed (the reverse of [`Self::seams`]'s
+    /// topological install order).
+    pub fn dispose(mut self) -> usize {
+        let count = self.entries.len();
+        // Dropping one entry at a time *is* the release order; logging here would
+        // allocate lazily but ordering must not depend on a subscriber.
+        while let Some(entry) = self.entries.pop() {
+            drop(entry);
+        }
+        self.defaults.clear();
+        count
     }
 
     /// Every registered seam (sorted), for startup logging / diagnostics.
@@ -375,7 +399,7 @@ fn validate_graph(manifests: &[PluginManifest]) -> PluginResult<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{SeamRole, FS, LLM, SANDBOX_POLICY, STORAGE, WEB};
+    use crate::manifest::{SeamRole, FS, LLM, OTEL, SANDBOX_POLICY, STORAGE, WEB};
 
     trait Other: Send + Sync {}
 
@@ -687,5 +711,73 @@ mod tests {
             reg.freeze(&[]),
             Err(PluginError::MissingDefault { .. })
         ));
+    }
+
+    /// Provider that records its drop order, so `dispose` can be asserted.
+    struct Probe {
+        id: &'static str,
+        log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.log.lock().unwrap().push(self.id);
+        }
+    }
+
+    impl Dummy for Probe {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+    }
+
+    #[test]
+    fn service_seams_reject_provider_registration() {
+        let mut reg = Registry::new();
+        let err = reg
+            .provide::<dyn Dummy>(OTEL, "otel", Arc::new(DummyImpl("otel")))
+            .unwrap_err();
+        assert_eq!(err, PluginError::ServiceIsNotAProvider { seam: "otel" });
+        assert!(!reg.has(OTEL));
+    }
+
+    #[test]
+    fn precedence_is_registration_order() {
+        let mut reg = Registry::new();
+        reg.provide::<dyn Dummy>(WEB, "primary", Arc::new(DummyImpl("p")))
+            .unwrap();
+        reg.provide::<dyn Dummy>(WEB, "fallback", Arc::new(DummyImpl("f")))
+            .unwrap();
+        let frozen = reg.freeze(&[]).unwrap();
+        assert_eq!(frozen.precedence(WEB), vec!["primary", "fallback"]);
+        assert_eq!(frozen.default_name(WEB), Some("primary"));
+    }
+
+    #[test]
+    fn dispose_releases_providers_in_reverse_assembly_order() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        reg.provide::<dyn Dummy>(
+            LLM,
+            "first",
+            Arc::new(Probe {
+                id: "first",
+                log: log.clone(),
+            }),
+        )
+        .unwrap();
+        reg.provide::<dyn Dummy>(
+            FS,
+            "second",
+            Arc::new(Probe {
+                id: "second",
+                log: log.clone(),
+            }),
+        )
+        .unwrap();
+        let frozen = reg.freeze(&[]).unwrap();
+        assert_eq!(frozen.resolve::<dyn Dummy>(FS).unwrap().id(), "second");
+        assert_eq!(frozen.dispose(), 2);
+        assert_eq!(*log.lock().unwrap(), vec!["second", "first"]);
     }
 }

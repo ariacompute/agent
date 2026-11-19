@@ -908,6 +908,14 @@ pub struct AgentConfig {
     pub agent_name: String,
     pub sandbox_provider: String,
     pub model: String,
+    /// Turn runtime: `native` (in-process Rust loop) or `dsh` (an external
+    /// DeepSeek Harness driven over JSON-RPC stdio).
+    ///
+    /// The library default is `native` so unit tests stay hermetic; deployments
+    /// (cloud, native SDK) default to `dsh` (ADR-0019). Any other value is a hard
+    /// configuration error — never a silent fallback.
+    #[serde(default = "default_harness")]
+    pub harness: String,
     /// Extra instructions appended to the static system prompt.
     #[serde(default)]
     pub instructions: String,
@@ -951,6 +959,10 @@ fn default_approval_mode() -> String {
     "deny".to_string()
 }
 
+fn default_harness() -> String {
+    "native".to_string()
+}
+
 fn default_context_limit() -> u64 {
     token_meter::DEFAULT_CONTEXT_LIMIT
 }
@@ -970,6 +982,7 @@ impl Default for AgentConfig {
             // tests inject a local `Sandbox` via `with_sandbox`.
             sandbox_provider: "docker".to_string(),
             model: "gpt-4o-mini".to_string(),
+            harness: default_harness(),
             memory_graph: false,
             memory_compact_threshold: 0,
             permission_preset: default_preset(),
@@ -1030,6 +1043,30 @@ pub fn default_model(config: &AgentConfig) -> Box<dyn ModelClient> {
     }
 }
 
+/// Resolve the turn runtime named by [`AgentConfig::harness`].
+///
+/// * `native` (and the empty string, for configs written before this field
+///   existed) → the in-process [`agent_loop::NativeLoop`].
+/// * `dsh` → an actionable error: the harness lives in `aria-agent-dsh` and is
+///   injected with [`Agent::with_components`]. Failing here (instead of falling
+///   back to `native`) is deliberate — a deployment that asked for DeepSeek
+///   Harness must never silently run the Rust loop.
+/// * anything else → configuration error listing the valid values.
+pub fn default_agent_loop(config: &AgentConfig) -> Result<Arc<dyn seams::AgentLoop>, CoreError> {
+    match config.harness.trim() {
+        "" | "native" => Ok(Arc::new(agent_loop::NativeLoop)),
+        "dsh" => Err(CoreError::Config(
+            "harness `dsh` needs the external DeepSeek Harness backend: build \
+             `aria_agent_dsh::DshAgentLoop` and pass it to `Agent::with_components`, \
+             or set the harness to `native`"
+                .to_string(),
+        )),
+        other => Err(CoreError::Config(format!(
+            "unknown harness: {other} (expected native|dsh)"
+        ))),
+    }
+}
+
 /// The unified agent. Holds the model client, context store and sandbox, plus the
 /// assembled views derived from [`AgentConfig`]: the system prompt, the tool
 /// execution pipeline (preset + approvals + post-exec) and the session log.
@@ -1039,6 +1076,8 @@ pub fn default_model(config: &AgentConfig) -> Box<dyn ModelClient> {
 pub struct Agent {
     config: AgentConfig,
     model: Arc<dyn ModelClient>,
+    /// The turn runtime contract, resolved once at assembly (ADR-0019).
+    agent_loop: Arc<dyn seams::AgentLoop>,
     context: Arc<dyn ContextStore>,
     sandbox: Arc<dyn Sandbox>,
     handlers: Vec<Arc<dyn ToolHandler>>,
@@ -1070,12 +1109,33 @@ impl Agent {
     /// Build with an explicit sandbox backend **and** a set of pluggable tool
     /// handlers (e.g. the browser tool family). Handlers are consulted before the
     /// default shell sandbox execution during the agentic loop.
+    ///
+    /// The turn runtime comes from [`default_agent_loop`]: `native` builds the
+    /// in-process loop, `dsh` fails closed here because the external harness must
+    /// be injected through [`Agent::with_components`].
     pub fn with_handlers(
         config: AgentConfig,
         model: Box<dyn ModelClient>,
         context: Arc<dyn ContextStore>,
         sandbox: Arc<dyn Sandbox>,
         handlers: Vec<Arc<dyn ToolHandler>>,
+    ) -> Result<Self, CoreError> {
+        let agent_loop = default_agent_loop(&config)?;
+        Self::with_components(config, model, context, sandbox, handlers, agent_loop)
+    }
+
+    /// Build with an explicit turn runtime ([`seams::AgentLoop`]).
+    ///
+    /// This is the injection point for an external harness: `aria-agent-dsh`
+    /// constructs the loop and hands it over here, mirroring how a sandbox
+    /// backend is injected through [`Agent::with_sandbox`].
+    pub fn with_components(
+        config: AgentConfig,
+        model: Box<dyn ModelClient>,
+        context: Arc<dyn ContextStore>,
+        sandbox: Arc<dyn Sandbox>,
+        handlers: Vec<Arc<dyn ToolHandler>>,
+        agent_loop: Arc<dyn seams::AgentLoop>,
     ) -> Result<Self, CoreError> {
         // `build_policy` returns `Some` on every successful path; the `Option`
         // is kept for callers that probe without committing to an agent.
@@ -1113,10 +1173,19 @@ impl Agent {
             session_log,
             config,
             model: Arc::from(model),
+            agent_loop,
             context,
             sandbox,
             handlers,
         })
+    }
+
+    /// Replace the turn runtime after construction (tests, or a deployment that
+    /// resolved the harness lazily). Seams are still resolved once — this is the
+    /// only post-construction seam swap and it must happen before the first turn.
+    pub fn with_agent_loop(mut self, agent_loop: Arc<dyn seams::AgentLoop>) -> Self {
+        self.agent_loop = agent_loop;
+        self
     }
 
     /// Build with an explicit model client (e.g. [`StubModel`] or [`OpenAiModel`]);
@@ -1250,7 +1319,7 @@ pub fn default_sandbox_box() -> Box<dyn Sandbox> {
 /// Persist a temporal edge between two fragments when the memory graph is on.
 /// Any error (missing endpoint, unsupported backend) is silently ignored so it
 /// never breaks the agentic turn.
-async fn graph_relate_store(
+pub async fn graph_relate_store(
     context: &Arc<dyn ContextStore>,
     session: &str,
     from_id: &str,
@@ -1270,7 +1339,7 @@ async fn graph_relate_store(
 }
 
 /// Compact a session once its fragment count exceeds `threshold` (0 = disabled).
-async fn maybe_compact_store(context: &Arc<dyn ContextStore>, session: &str, threshold: usize) {
+pub async fn maybe_compact_store(context: &Arc<dyn ContextStore>, session: &str, threshold: usize) {
     if threshold == 0 {
         return;
     }

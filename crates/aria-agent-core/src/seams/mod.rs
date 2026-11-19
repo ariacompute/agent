@@ -8,6 +8,7 @@
 //! `aria-agent-core` keeps depending on traits only — never on `aria-agent-memo`,
 //! `aria-agent-tools` or a concrete sandbox.
 
+pub mod agent_loop;
 pub mod approvals;
 pub mod fs;
 pub mod jobs;
@@ -25,6 +26,7 @@ pub mod web;
 
 use thiserror::Error;
 
+pub use agent_loop::{AgentLoop, LoopContext};
 pub use approvals::{ApprovalBroker, ApprovalDecision, ApprovalRequest, AutoAllow, DenyAll};
 pub use fs::{FileStat, FsSeam, LocalFs};
 pub use jobs::{JobId, JobRecord, JobState, JobsSeam, LocalJobs};

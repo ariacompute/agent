@@ -53,6 +53,13 @@ aria-agent-cloud (axum, Postgres + pgvector)  ──►  ariacompute-agent (UniF
 
 ## Run loop
 
+The turn is driven by the `agent_loop` seam (`AgentLoop` + `LoopContext`). Two
+providers exist: `NativeLoop` (in-process Rust) and `DshAgentLoop` (external
+DeepSeek Harness). `AgentConfig::harness` selects one; seams are resolved once at
+assembly. The steps below are the **native** loop; under `harness = "dsh"` dsh owns
+steps 2–4 and aria maps its notifications back into the same events and session
+records (ADR-0019).
+
 1. `SessionEvent::TurnStarted`; recall fragments (optional graph `expand`).
 2. Assemble the system prompt (`base identity → instructions → skills → plan →
    workdir → permissions`, stable order).
@@ -65,6 +72,17 @@ aria-agent-cloud (axum, Postgres + pgvector)  ──►  ariacompute-agent (UniF
 5. Every event goes to the SSE envelope *and* to `sessionPersistence` (JSONL
    locally; in the cloud a title projection into `session_titles`, read back via
    `GET /v1/agents/sessions/{id}/title`).
+
+### Harness boundary
+
+`harness = "dsh"` starts `dsh --profile sdk` per session (its own `DSH_HOME` and
+workspace under the deployment root) and speaks newline-delimited JSON-RPC over
+stdio. dsh executes the model call **and** its own tools in its own sandbox, so
+aria's `Sandbox` / `ToolExecutionPipeline` / registered handlers are idle for that
+session. aria keeps: recall injection, memory writes, graph relations,
+compaction, session events and titles, approval/question bridging, and the frozen
+wire envelope. `just dsh-smoke` covers the protocol offline; `just dsh-e2e` runs
+one real turn when `ARIA_DSH_E2E=1` and a provider key are present.
 
 ## Tool pipeline & approvals
 

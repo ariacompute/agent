@@ -33,6 +33,8 @@ needs a reason that does not depend on "it was hard":
 | `crates/aria-agent-cloud/src/store/pg_orchestration.rs` | Postgres teams/schedule/title backends; the same semantics are covered by the in-memory providers in `api_tests.rs` |
 | `crates/aria-agent-tools/src/terminal.rs` (`pty`) | optional `pty` provider needs a real terminal device; `scripts/coverage.sh` excludes this file so enabling the feature cannot make the gate depend on a TTY. The default build keeps `pty` off. |
 | `crates/aria-agent-tools/src/web.rs` (`web`) | optional `web` provider needs live HTTP; excluded by `scripts/coverage.sh` for the same reason. The default build keeps `web` off. |
+| `crates/aria-agent-dsh/src/transport.rs` | child-process plumbing: piped stdio "unavailable" is unreachable with `Stdio::piped`, and write/flush/read `EIO` plus `start_kill`/`try_wait` failures cannot be produced hermetically. Exercised end-to-end by `just dsh-smoke` (scripted child) and `just dsh-e2e` (real dsh). |
+| `crates/aria-agent-dsh/src/rpc.rs` | JSON-RPC demultiplexer: a few arms are only reachable on a torn-down channel at the same instant a call resolves (`oneshot` closed) or inside test-only transports; the request/response, timeout, server-request, notification and dead-pipe paths are unit-tested. `just dsh-smoke` exercises the same code against a real child. The event mapping, pool and loop stay in the gate. |
 
 `scripts/coverage.sh` exports an isolated `XDG_RUNTIME_DIR` and a placeholder
 `DOCKER_HOST` unix socket so sandbox socket probes and the Docker client

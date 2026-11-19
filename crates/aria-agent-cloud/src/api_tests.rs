@@ -154,6 +154,7 @@ pub fn harness_with(
         make_model,
         make_sandbox,
         make_context,
+        harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -204,6 +205,7 @@ pub fn harness_with_schedule(schedule: Arc<dyn agent_core::seams::ScheduleSeam>)
         make_model: Arc::new(|| Box::new(StubModel::new("agent"))),
         make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
         make_context,
+        harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -237,6 +239,7 @@ pub fn harness_with_context(fail_recall: bool, fail_relations: bool) -> Harness 
         make_model,
         make_sandbox,
         make_context,
+        harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -1956,6 +1959,7 @@ pub fn harness_with_context_failing_all() -> Harness {
         make_model,
         make_sandbox,
         make_context,
+        harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -2032,6 +2036,7 @@ mod faulty {
             make_model,
             make_sandbox,
             make_context,
+            harness: None,
         };
         Harness {
             app: build_router(state.clone()),
@@ -2134,6 +2139,7 @@ pub fn harness_with_session_failure(fail: &'static [&'static str]) -> Harness {
         make_model: Arc::new(|| Box::new(StubModel::new("agent"))),
         make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
         make_context,
+        harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -2977,4 +2983,64 @@ async fn child_session_visibility_follows_the_parent_tenant() {
         crate::api::sessions::ensure_session_visible(&broken.state, &owner, "sess-a").await,
         Err(crate::AppError::Core(_))
     ));
+}
+
+/// A harness that answers every turn with a fixed text.
+struct EchoHarness;
+
+#[async_trait]
+impl agent_core::seams::AgentLoop for EchoHarness {
+    async fn run(
+        &self,
+        _ctx: agent_core::seams::LoopContext,
+        _input: &str,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<agent_core::AgentEvent, agent_core::CoreError>>,
+        agent_core::CoreError,
+    > {
+        let stream = async_stream::stream! {
+            yield Ok(agent_core::AgentEvent::Done { text: "dsh".into() });
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+#[tokio::test]
+async fn a_deployment_can_inject_the_dsh_harness() {
+    let base = harness();
+    let state = AppState {
+        harness: Some(Arc::new(
+            |_p: &Principal, _cfg: &agent_core::AgentConfig| {
+                Arc::new(EchoHarness) as Arc<dyn agent_core::seams::AgentLoop>
+            },
+        )),
+        ..base.state.clone()
+    };
+    let principal = Principal {
+        id: "tenant-dsh".into(),
+        kind: PrincipalKind::User,
+        scopes: ApiKeyScopes::read_write(),
+    };
+    let mut cfg = crate::app::agent_config("agent", "", "session-dsh");
+    cfg.harness = "dsh".into();
+    let agent = crate::app::build_agent_inner(&state, cfg, &principal, false)
+        .await
+        .expect("injected harness builds");
+    assert_eq!(agent.run("hi").await.expect("turn"), "dsh");
+
+    // Without a factory the same config fails closed instead of falling back.
+    let mut native_state = state.clone();
+    native_state.harness = None;
+    let mut cfg = crate::app::agent_config("agent", "", "session-dsh");
+    cfg.harness = "dsh".into();
+    assert!(
+        crate::app::build_agent_inner(&native_state, cfg, &principal, false)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn the_deployment_harness_defaults_to_native_in_tests() {
+    assert_eq!(crate::app::harness_from_env(), "native");
 }

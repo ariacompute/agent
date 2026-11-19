@@ -147,6 +147,7 @@ version = "0.1.0"
 dependencies = [
  "aria-agent-browser",
  "aria-agent-core",
+ "aria-agent-dsh",
  "aria-agent-orchestrator",
  "aria-agent-plugin",
  "aria-agent-sandbox",
@@ -195,6 +196,24 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "aria-agent-dsh"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-sandbox",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -283,6 +302,7 @@ version = "0.1.0"
 dependencies = [
  "aria-agent-browser",
  "aria-agent-core",
+ "aria-agent-dsh",
  "aria-agent-memo",
  "aria-agent-sandbox",
  "aria-agent-tools",

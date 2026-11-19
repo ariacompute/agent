@@ -194,3 +194,29 @@ Tracked in `docs/followups/`:
 * `serve-copy-migration.md` — marketing copy / endpoint examples / SEO build.
 * `cockpit-client-migration.md` — `CloudClient.kt` endpoint + frame parsing,
   native memo signature re-verification.
+## 10. Turn runtime (DeepSeek Harness)
+* The turn loop is the `agent_loop` seam: `AgentLoop::run` streams `AgentEvent`s and
+  `run_once` folds them; `LoopContext` is a resolved-once snapshot of every
+  dependency a turn may touch.
+* `AgentConfig::harness` selects `native` or `dsh`. The library default is
+  `native`; the cloud binary defaults to `dsh`; an unknown value, or `dsh` without
+  an injected loop, is a hard error (never a silent fallback).
+* `harness = "dsh"` runs `dsh --profile sdk` as a child process and speaks
+  newline-delimited JSON-RPC on stdio (no third-party gateway plugin). Frames are
+  capped, stderr is drained, requests time out, and a runtime that dies fails the
+  turn instead of yielding an empty answer.
+* Under `dsh`, tools execute in dsh's sandbox: the aria `Sandbox`,
+  `ToolExecutionPipeline` and registered handlers do not run for that session.
+  aria still owns recall, memory writes, compaction, session events/titles,
+  approval/question bridging and the frozen wire envelope.
+* Approvals and user questions are answered from the installed seams and fail
+  closed when absent.
+* Each session gets its own `DSH_HOME` and workspace; the child environment is an
+  allow-list; `~/.dsh` is never discovered. Runtimes are pooled per session with a
+  hard capacity and an idle TTL.
+* Seam contract matches dsh: roles `core`/`seam`/`bundle`/`service`, dsh spellings
+  accepted as aliases, registration order = precedence, `dispose` releases in
+  reverse assembly order, `service` keys reject providers.
+* Verification: offline fake-transport/scripted-runtime tests, a scripted real
+  child process (`just dsh-smoke`), and one env-gated live turn (`just dsh-e2e`)
+  that skips loudly instead of fabricating a result.

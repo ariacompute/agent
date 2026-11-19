@@ -16,9 +16,10 @@ use agent_browser::{BrowserCatalog, BrowserSandbox, BrowserToolHandler};
 use agent_core::context::{
     CompositeContextStore, ContextFragment, ContextStore, FragmentKind, MemoryBackend,
 };
-use agent_core::{Agent, AgentConfig, AgentEvent, Tool, ToolHandler};
+use agent_core::{Agent, AgentConfig, AgentEvent, ModelClient, Tool, ToolHandler};
 use agent_memo::MemoContextStore;
 use agent_sandbox::DockerSandbox;
+use aria_agent_dsh::{DshAgentLoop, DshConfig, DshPool, SeamApprovalBridge};
 use aria_agent_tools::{memo_tools, MemoToolHandler};
 use futures::StreamExt;
 use std::path::Path;
@@ -348,8 +349,12 @@ fn make_agent(
         // On-device SDK: the user runs the agent locally, so mutating tools are
         // approved by the trusted-local preset instead of an interactive broker
         // (which a headless FFI caller cannot provide). ADR-0016.
-        approval_mode,
-        permission_preset,
+        approval_mode: approval_mode.clone(),
+        permission_preset: permission_preset.clone(),
+        // Embedded default: the in-process loop. A host that ships the dsh
+        // runtime sets `ARIA_AGENT_HARNESS=dsh`; an unavailable runtime is then a
+        // hard error, never a silent downgrade (ADR-0019).
+        harness: sdk_harness(),
         ..AgentConfig::default()
     };
 
@@ -370,7 +375,7 @@ fn make_agent(
     }
     let sandbox: Arc<dyn agent_sandbox::Sandbox> = Arc::new(DockerSandbox::new());
     let model = agent_core::default_model(&cfg);
-    let inner = Agent::with_handlers(cfg, model, context.clone(), sandbox, handlers)?;
+    let inner = build_agent(cfg, model, context.clone(), sandbox, handlers)?;
     let inner: Arc<Agent> = Arc::new(inner);
 
     Ok(Arc::new(SdkAgent {
@@ -380,6 +385,91 @@ fn make_agent(
         cloud,
         backend,
     }))
+}
+
+/// Build the agent with the turn runtime named by `cfg.harness`.
+///
+/// `dsh` constructs the pool but does **not** spawn the runtime (that happens on
+/// the first turn), so selecting it never blocks construction.
+fn build_agent(
+    cfg: AgentConfig,
+    model: Box<dyn ModelClient>,
+    context: Arc<dyn agent_core::context::ContextStore>,
+    sandbox: Arc<dyn agent_sandbox::Sandbox>,
+    handlers: Vec<Arc<dyn ToolHandler>>,
+) -> Result<Agent, SdkError> {
+    match cfg.harness.trim() {
+        "" | "native" => Ok(Agent::with_handlers(
+            cfg, model, context, sandbox, handlers,
+        )?),
+        "dsh" => {
+            let harness = dsh_harness(&cfg);
+            Ok(Agent::with_components(
+                cfg, model, context, sandbox, handlers, harness,
+            )?)
+        }
+        other => Err(SdkError::Core(format!(
+            "unknown harness: {other} (expected native|dsh)"
+        ))),
+    }
+}
+
+/// Build the DeepSeek Harness loop for the embedded SDK.
+fn dsh_harness(cfg: &AgentConfig) -> Arc<DshAgentLoop> {
+    let preset = agent_core::seams::PermissionPreset::parse(&cfg.permission_preset)
+        .unwrap_or(agent_core::seams::PermissionPreset::WorkspaceWrite);
+    let approvals: Arc<dyn agent_core::seams::ApprovalBroker> = if cfg.approval_mode == "auto" {
+        Arc::new(agent_core::seams::AutoAllow)
+    } else {
+        Arc::new(agent_core::seams::DenyAll)
+    };
+    let bridge = Arc::new(SeamApprovalBridge::new(
+        approvals,
+        Arc::new(agent_core::seams::NoQuestions),
+        "",
+        preset,
+    ));
+    let root = std::env::var("ARIA_AGENT_DSH_ROOT").unwrap_or_else(|_| ".aria/dsh".into());
+    let mut dsh = DshConfig::for_session(std::path::Path::new(&root), &cfg.session, &cfg.model)
+        .with_permission_mode(dsh_permission_mode(preset));
+    // Explicit allow-list: only the provider route crosses the process boundary,
+    // never the whole environment.
+    if let Ok(base) = std::env::var("DEEPSEEK_BASE_URL") {
+        dsh = dsh.with_env("DEEPSEEK_BASE_URL", base);
+    }
+    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+        dsh = dsh.with_env("DEEPSEEK_API_KEY", key);
+    }
+    let pool = Arc::new(DshPool::new(
+        dsh,
+        4,
+        std::time::Duration::from_secs(900),
+        bridge,
+    ));
+    Arc::new(DshAgentLoop::new(pool))
+}
+
+/// Turn runtime for the embedded SDK (`ARIA_AGENT_HARNESS`, default `native`).
+fn sdk_harness() -> String {
+    sdk_harness_from(std::env::var("ARIA_AGENT_HARNESS").ok())
+}
+
+/// Pure half of [`sdk_harness`] (a blank value means "unset").
+fn sdk_harness_from(value: Option<String>) -> String {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "native".to_string())
+}
+
+/// Map the shared permission preset onto dsh's `sdk` profile presets.
+fn dsh_permission_mode(preset: agent_core::seams::PermissionPreset) -> &'static str {
+    use agent_core::seams::PermissionPreset;
+    match preset {
+        PermissionPreset::ReadOnly => "read-only",
+        PermissionPreset::WorkspaceWrite => "workspace-write",
+        PermissionPreset::FullAccess => "danger-full-access",
+    }
 }
 
 /// Minimal quickstart entry — `Agent(name, model)`, no session required.
@@ -1424,5 +1514,86 @@ mod memo_integration_tests {
             .filter(|f| f.key.as_deref() == Some("__compact__memo-compact"))
             .count();
         assert_eq!(notes, 1, "compaction note must be idempotent (got {notes})");
+    }
+
+    #[test]
+    fn harness_selection_defaults_to_native_and_trims() {
+        use crate::sdk_harness_from;
+        assert_eq!(sdk_harness_from(None), "native");
+        assert_eq!(sdk_harness_from(Some(String::new())), "native");
+        assert_eq!(sdk_harness_from(Some("   ".into())), "native");
+        assert_eq!(sdk_harness_from(Some(" dsh ".into())), "dsh");
+        assert_eq!(sdk_harness_from(Some("native".into())), "native");
+    }
+
+    #[test]
+    fn permission_presets_map_onto_dsh_modes() {
+        use crate::dsh_permission_mode;
+        use agent_core::seams::PermissionPreset;
+        assert_eq!(dsh_permission_mode(PermissionPreset::ReadOnly), "read-only");
+        assert_eq!(
+            dsh_permission_mode(PermissionPreset::WorkspaceWrite),
+            "workspace-write"
+        );
+        assert_eq!(
+            dsh_permission_mode(PermissionPreset::FullAccess),
+            "danger-full-access"
+        );
+    }
+
+    fn try_build(harness: &str, approval_mode: &str) -> Result<crate::Agent, crate::SdkError> {
+        use crate::{build_agent, AgentConfig, DockerSandbox};
+        let cfg = AgentConfig {
+            harness: harness.into(),
+            approval_mode: approval_mode.into(),
+            ..AgentConfig::default()
+        };
+        let model = agent_core::default_model(&cfg);
+        build_agent(
+            cfg,
+            model,
+            agent_core::in_memory_context(),
+            Arc::new(DockerSandbox::new()),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn build_agent_selects_native_dsh_and_rejects_unknown_harnesses() {
+        assert!(try_build("native", "deny").is_ok());
+        assert!(try_build("", "auto").is_ok());
+        // Selecting dsh constructs the pool lazily; nothing is spawned yet.
+        assert!(try_build("dsh", "auto").is_ok());
+        assert!(try_build("dsh", "deny").is_ok());
+        let err = try_build("codex", "deny").err().expect("unknown harness");
+        assert!(err.to_string().contains("unknown harness"), "{err}");
+    }
+
+    /// Serialises the one test that mutates provider env (no other test reads it).
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_dsh_child_env_forwards_the_provider_route_explicitly() {
+        use crate::{build_agent, AgentConfig, DockerSandbox};
+        let _guard = ENV_GUARD.lock().expect("env guard");
+        std::env::set_var("DEEPSEEK_BASE_URL", "https://example.invalid/v1");
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
+        std::env::set_var("ARIA_AGENT_DSH_ROOT", "/tmp/aria-sdk-dsh");
+        let cfg = AgentConfig {
+            harness: "dsh".into(),
+            ..AgentConfig::default()
+        };
+        // Building twice exercises both the env-set and the derived-root paths.
+        assert!(build_agent(
+            cfg,
+            agent_core::default_model(&AgentConfig::default()),
+            agent_core::in_memory_context(),
+            Arc::new(DockerSandbox::new()),
+            Vec::new(),
+        )
+        .is_ok());
+        std::env::remove_var("DEEPSEEK_BASE_URL");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        std::env::remove_var("ARIA_AGENT_DSH_ROOT");
     }
 }

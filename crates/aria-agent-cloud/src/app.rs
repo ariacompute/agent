@@ -45,6 +45,13 @@ pub type MakeModel = Arc<dyn Fn() -> Box<dyn ModelClient> + Send + Sync>;
 pub type MakeSandbox = Arc<dyn Fn() -> Arc<dyn Sandbox> + Send + Sync>;
 /// Context-store factory: one tenant-scoped store per principal.
 pub type MakeContext = Arc<dyn Fn(&Principal) -> Arc<dyn ContextStore> + Send + Sync>;
+/// Turn-runtime factory: one `AgentLoop` per (principal, config).
+///
+/// Installed by the deployment so a `harness = "dsh"` run gets the external
+/// DeepSeek Harness loop; `None` means only the native loop is available and a
+/// `dsh` run fails closed with an actionable error (ADR-0019).
+pub type MakeHarness =
+    Arc<dyn Fn(&Principal, &AgentConfig) -> Arc<dyn agent_core::seams::AgentLoop> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -62,6 +69,8 @@ pub struct AppState {
     pub make_model: MakeModel,
     pub make_sandbox: MakeSandbox,
     pub make_context: MakeContext,
+    /// External harness factory (`None` in tests / native-only deployments).
+    pub harness: Option<MakeHarness>,
 }
 
 impl AppState {
@@ -213,7 +222,20 @@ pub(crate) async fn build_agent_inner(
     handlers.extend(orchestrator.handlers());
     tools.extend(orchestrator.tools());
 
-    Agent::with_handlers(cfg, (state.make_model)(), context, sandbox, handlers)
+    // Turn runtime: an external harness when the config asks for one and the
+    // deployment installed a factory; otherwise the native loop. A `dsh` config
+    // without a factory is a hard error from `with_handlers` (ADR-0019).
+    let harness_loop = match (&state.harness, cfg.harness.trim()) {
+        (Some(make), "dsh") => Some(make(principal, &cfg)),
+        _ => None,
+    };
+    let built = match harness_loop {
+        Some(loop_) => {
+            Agent::with_components(cfg, (state.make_model)(), context, sandbox, handlers, loop_)
+        }
+        None => Agent::with_handlers(cfg, (state.make_model)(), context, sandbox, handlers),
+    };
+    built
         // Session titles are projected into `session_titles` instead of a local
         // JSONL artifact: the cloud keeps its audit trail in Postgres.
         .map(|agent| {
@@ -323,11 +345,29 @@ pub fn build_sse_stream(frames: impl futures::Stream<Item = Value> + Send + 'sta
     Sse::new(Box::pin(sse)).into_response()
 }
 
+/// Deployment turn runtime (`AGENT_HARNESS`: `dsh` or `native`).
+///
+/// The library default stays `native` so unit tests and local embeds are
+/// hermetic; the cloud binary sets `AGENT_HARNESS=dsh` at boot unless the
+/// operator chose a runtime (ADR-0019).
+pub fn harness_from_env() -> String {
+    harness_from_value(std::env::var("AGENT_HARNESS").ok())
+}
+
+/// Pure half of [`harness_from_env`] (a blank value means "unset").
+fn harness_from_value(value: Option<String>) -> String {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "native".to_string())
+}
+
 pub fn agent_config(name: &str, instructions: &str, session: &str) -> AgentConfig {
     AgentConfig {
         session: session.to_string(),
         agent_name: name.to_string(),
         instructions: instructions.to_string(),
+        harness: harness_from_env(),
         // Docker is the default sandbox backend (ADR-0003); kata/cube/browser
         // remain selectable per run.
         sandbox_provider: "docker".into(),
@@ -637,5 +677,18 @@ mod tests {
         assert!(matches!(err, SessionError::Io(_)), "{err:?}");
         let err = projection(false, false).read("s", 0).await.unwrap_err();
         assert!(matches!(err, SessionError::Io(_)), "{err:?}");
+    }
+}
+
+#[cfg(test)]
+mod harness_tests {
+    use super::harness_from_value;
+
+    #[test]
+    fn blank_values_mean_unset() {
+        assert_eq!(harness_from_value(None), "native");
+        assert_eq!(harness_from_value(Some("   ".into())), "native");
+        assert_eq!(harness_from_value(Some(" dsh ".into())), "dsh");
+        assert_eq!(harness_from_value(Some("native".into())), "native");
     }
 }

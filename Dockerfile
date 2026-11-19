@@ -144,7 +144,21 @@ RUN apt-get update \
         ca-certificates \
         curl \
         libssl3 \
+        python3 \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# DeepSeek Harness — the default turn runtime (ADR-0019). `dsh` itself is a
+# native binary shipped inside `deepseek-harness-runtime-bin`, which
+# `deepseek-harness-sdk` pulls in; Python is only used to install it (no Node.js
+# runtime is required). Pin with `--build-arg DSH_SDK=deepseek-harness-sdk==X.Y`.
+ARG DSH_SDK=deepseek-harness-sdk
+RUN python3 -m venv /opt/dsh \
+    && /opt/dsh/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/dsh/bin/pip install --no-cache-dir "${DSH_SDK}"
+ENV DSH_BIN=/opt/dsh/bin/dsh \
+    # Per-tenant/per-session homes live under this writable root.
+    DSH_HOME_ROOT=/app/.aria/dsh
 
 # Run as a non-root user, but let it talk to the mounted Docker socket by joining
 # a group whose GID matches the host docker group.
@@ -154,6 +168,9 @@ RUN groupadd -g ${DOCKER_GID} docker \
 WORKDIR /app
 
 COPY --from=builder /usr/local/bin/aria-agent /usr/local/bin/aria-agent
+
+# The harness writes one home per session; the non-root user must own it.
+RUN mkdir -p /app/.aria/dsh && chown -R aria:aria /app/.aria
 
 # Context memory is Postgres-backed (`context_fragments`, pgvector) — no local
 # volume is mounted any more.

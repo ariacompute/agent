@@ -1,0 +1,25 @@
+[package]
+name = "aria-agent-dsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek Harness (dsh) turn runtime: newline-delimited JSON-RPC over stdio behind the agent_loop seam."
+
+[lib]
+name = "aria_agent_dsh"
+
+[dependencies]
+aria-agent-core = { path = "../aria-agent-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+futures = "0.3"
+async-stream = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+aria-agent-sandbox = { path = "../aria-agent-sandbox" }

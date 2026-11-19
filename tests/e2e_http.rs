@@ -210,6 +210,7 @@ async fn memory_harness(model: MakeModel, sandbox: MakeSandbox) -> MemoryHarness
         make_model: model,
         make_sandbox: sandbox,
         make_context,
+        harness: None,
     };
     let (api, server) = serve(build_router(state)).await;
     MemoryHarness {
@@ -693,6 +694,7 @@ async fn postgres_backed_routes_persist_across_servers() {
             make_model: stub_model(),
             make_sandbox: stub_sandbox(),
             make_context,
+            harness: None,
         }
     };
 

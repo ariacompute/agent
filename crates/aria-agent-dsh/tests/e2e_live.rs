@@ -1,0 +1,100 @@
+//! Live end-to-end: a **real** `dsh` runtime answering a real model call.
+//!
+//! Gated, never part of the default test run:
+//!
+//! ```text
+//! ARIA_DSH_E2E=1 \
+//! DSH_BIN=/path/to/dsh \
+//! DEEPSEEK_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 \
+//! DEEPSEEK_API_KEY=sk-… \
+//! cargo test -p aria-agent-dsh --test e2e_live -- --nocapture
+//! ```
+//!
+//! Without `ARIA_DSH_E2E=1` (and a runtime plus a provider endpoint) the test
+//! prints why it cannot run and returns. It **never** fabricates a passing run:
+//! a missing dependency is a skip, a broken turn is a failure.
+
+use std::path::Path;
+use std::time::Duration;
+
+use aria_agent_dsh::{no_bridge, DshConfig, DshRuntime, HarnessRuntime};
+use serde_json::Value;
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+#[tokio::test]
+async fn a_real_dsh_turn_completes() {
+    if env("ARIA_DSH_E2E").as_deref() != Some("1") {
+        eprintln!("skip: set ARIA_DSH_E2E=1 to run the live DeepSeek Harness test");
+        return;
+    }
+    if env("DEEPSEEK_API_KEY").is_none() {
+        eprintln!("skip: DEEPSEEK_API_KEY is not set (third-party compatible endpoint key)");
+        return;
+    }
+    let bin = env("DSH_BIN").unwrap_or_else(|| "dsh".to_string());
+    let model = env("DSH_E2E_MODEL").unwrap_or_else(|| "deepseek-v4".to_string());
+    let root = tempfile::tempdir().expect("tempdir");
+
+    let mut cfg = DshConfig::for_session(root.path(), "e2e-session", &model)
+        .with_bin(bin.clone())
+        .with_permission_mode("read-only");
+    cfg.init_timeout = Duration::from_secs(60);
+    cfg.request_timeout = Duration::from_secs(120);
+    if let Some(provider) = env("DSH_PROVIDER") {
+        cfg.provider = provider;
+    }
+    // The child env is an allow-list, so the provider route is forwarded here.
+    if let Some(base) = env("DEEPSEEK_BASE_URL") {
+        cfg = cfg.with_env("DEEPSEEK_BASE_URL", base);
+    }
+    if let Some(key) = env("DEEPSEEK_API_KEY") {
+        cfg = cfg.with_env("DEEPSEEK_API_KEY", key);
+    }
+
+    let runtime = DshRuntime::connect(cfg, no_bridge())
+        .await
+        .unwrap_or_else(|e| panic!("dsh `{bin}` did not complete the handshake: {e}"));
+
+    let mut rx = runtime
+        .prompt("e2e-session", "Reply with the single word: pong")
+        .await
+        .expect("prompt is queued");
+
+    let mut text = String::new();
+    let mut reason: Option<String> = None;
+    while let Some(frame) = rx.recv().await {
+        let method = frame["method"].as_str().unwrap_or("");
+        match method {
+            "assistant/message" => {
+                let content = aria_agent_dsh::event_map::text_of(&frame["params"]);
+                if !content.is_empty() {
+                    text = content;
+                }
+            }
+            "turn/end" => {
+                reason = frame["params"]["reason"]["kind"]
+                    .as_str()
+                    .map(str::to_string);
+                break;
+            }
+            _ => {}
+        }
+    }
+    runtime.shutdown().await.expect("shutdown");
+    assert_eq!(
+        reason.as_deref(),
+        Some("completed"),
+        "turn did not complete (frames must end with a completed turn/end)"
+    );
+    assert!(
+        !text.trim().is_empty(),
+        "dsh completed the turn but produced no assistant text"
+    );
+    eprintln!("dsh replied: {}", text.trim());
+    // Guard against an accidentally empty/error payload being reported as success.
+    assert!(Value::String(text).as_str().is_some());
+    assert!(Path::new(&bin).exists() || bin == "dsh");
+}

@@ -1,6 +1,45 @@
 # Release notes
 
-## Capability-seam runtime, no vendored harness
+## DeepSeek Harness as the default turn runtime
+
+Turns are now executed by **DeepSeek Harness (dsh)** by default: `dsh` runs as an
+external child process (`--profile sdk`) over newline-delimited JSON-RPC on
+stdio, so the turn loop, model call and tool execution are dsh's, while this
+workspace keeps the Cloud API, memory, tenancy and the frozen streaming envelope.
+
+### Highlights
+
+- **`agent_loop` is a real seam**: `AgentLoop` + `LoopContext`; the previous loop
+  moved verbatim into `NativeLoop` and stays available as
+  `AGENT_HARNESS=native` (ADR-0019).
+- **`aria-agent-dsh`**: stdio transport with an 8 MiB frame cap and drained
+  stderr, JSON-RPC client with timeouts and fail-closed server requests, per
+  session runtime pool (handshake once, idle TTL, hard capacity), and one pure
+  mapping module from dsh notifications to `AgentEvent` / `SessionEvent`.
+- **Approvals and questions are bridged** to the installed seams; a missing
+  provider denies with the reason instead of allowing. Each session gets its own
+  `DSH_HOME` and workspace; the child environment is an allow-list.
+- **Seam contract aligned with dsh**: four roles (`core`/`seam`/`bundle`/
+  `service`), dsh spellings accepted as aliases (`approval`, `terminals`,
+  `spillStore`, …), registration order = precedence, and `dispose` releases
+  providers in reverse assembly order. `service` keys reject providers.
+- **New tasks**: `just dsh-smoke` (scripted fake runtime, offline) and
+  `just dsh-e2e` (one live turn; skips loudly without `ARIA_DSH_E2E=1`, `dsh` and
+  a provider key).
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AGENT_HARNESS` | `dsh` (cloud binary) | `dsh` or `native` |
+| `DSH_BIN` | `dsh` on `PATH` | runtime executable |
+| `DSH_HOME_ROOT` | `.aria/dsh` | per-tenant/per-session home root |
+| `DSH_POOL_MAX` | `8` | live runtimes per tenant |
+| `DSH_IDLE_TTL_SEC` | `900` | idle reap window |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | — | OpenAI-compatible provider |
+| `ARIA_AGENT_HARNESS` | `native` | native SDK opt-in to `dsh` |
+
+## Earlier: capability-seam runtime, no vendored harness
 
 This release replaces the codex-derived single-loop harness with a composable
 agent kernel. Every capability is a named seam with a default provider; the

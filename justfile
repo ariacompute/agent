@@ -20,6 +20,17 @@ test:
 e2e:
     cargo test -p agent-tests --test e2e_http
 
+# DeepSeek Harness: spawn a scripted fake `dsh` and verify the JSON-RPC
+# handshake + turn framing (offline, no credentials).
+dsh-smoke:
+    cargo test -p aria-agent-dsh --test stdio -- --nocapture
+
+# DeepSeek Harness live turn. Requires ARIA_DSH_E2E=1, a real `dsh` binary
+# (DSH_BIN) and a provider endpoint + key (DEEPSEEK_BASE_URL/DEEPSEEK_API_KEY,
+# e.g. Alibaba Model Studio's OpenAI-compatible route). Skips loudly when unset.
+dsh-e2e:
+    ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture
+
 # Coverage report (writes lcov.info; no gate).
 cov:
     cargo llvm-cov --workspace --lcov --output-path lcov.info

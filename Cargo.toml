@@ -5,6 +5,7 @@ members = [
     "crates/aria-agent-memo",
     "crates/aria-agent-sandbox",
     "crates/aria-agent-core",
+    "crates/aria-agent-dsh",
     "crates/aria-agent-tools",
     "crates/aria-agent-orchestrator",
     "crates/aria-agent-browser",

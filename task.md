@@ -378,6 +378,24 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
 - [x] `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
       `cargo test --workspace`, `just ffi`, `just sdk-js-test`, `just sdk-py-test`.
 
+## Milestone 16 — DeepSeek Harness runtime (ADR-0019)
+- [x] `agent_loop` seam: `LoopContext` + `AgentLoop` (`run` / `run_once`); old loop
+      moved to `NativeLoop` with identical events/session writes.
+- [x] `AgentConfig::harness` (`native` | `dsh`), `default_agent_loop` and
+      `Agent::with_components`; unknown values and an uninjected `dsh` fail closed.
+- [x] `aria-agent-dsh`: stdio JSON-RPC transport (frame cap, stderr drain, kill),
+      client (timeouts, pending table, server requests), per-session pool
+      (capacity + idle reap), approval/question bridge, event mapping.
+- [x] Cloud wiring: `AGENT_HARNESS` (default `dsh`), `DSH_BIN`,
+      `DSH_HOME_ROOT`, `DSH_POOL_MAX`, `DSH_IDLE_TTL_SEC`; one pool per principal.
+- [x] Native SDK: `ARIA_AGENT_HARNESS` opt-in (embedded default stays `native`).
+- [x] Seam contract alignment: `service` role, dsh aliases, precedence order,
+      `dispose`.
+- [x] Tests: fake transport / scripted runtime / real scripted child process;
+      `just dsh-smoke`; env-gated live turn `just dsh-e2e`.
+- [x] Docs: ADR-0019, AGENTS.md rule 16, architecture "Harness boundary",
+      requirements §10, release notes.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

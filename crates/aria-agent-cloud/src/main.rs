@@ -6,10 +6,13 @@
 //! point (`main` / `run` / `cmd_*`) and signal/stdio interaction, neither of
 //! which can be exercised in-process.
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_core::seams::{ApprovalBroker, AutoAllow, DenyAll, NoQuestions, PermissionPreset};
 use agent_core::{ModelClient, OpenAiModel};
 use agent_sandbox::Sandbox;
 use aria_agent_cloud::app::{AppState, DEFAULT_MODEL};
@@ -17,6 +20,7 @@ use aria_agent_cloud::cli_config;
 use aria_agent_cloud::context::PgContextStore;
 use aria_agent_cloud::store::{ensure_schema, PgStore};
 use aria_agent_cloud::{build_router, upgrade, KeyCache};
+use aria_agent_dsh::{DshAgentLoop, DshConfig, DshPool, SeamApprovalBridge};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 
@@ -188,6 +192,23 @@ fn resolve_port(explicit: Option<u16>) -> u16 {
         .unwrap_or(3000)
 }
 
+/// Parse an unsigned environment value, falling back to `default`.
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Map the shared permission preset onto dsh's `sdk` profile presets.
+fn dsh_permission_mode(preset: PermissionPreset) -> &'static str {
+    match preset {
+        PermissionPreset::ReadOnly => "read-only",
+        PermissionPreset::WorkspaceWrite => "workspace-write",
+        PermissionPreset::FullAccess => "danger-full-access",
+    }
+}
+
 async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -240,6 +261,62 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             as Arc<dyn agent_core::context::ContextStore>
     });
 
+    // --- Turn runtime: DeepSeek Harness by default (ADR-0019) ---
+    // The operator may pin `AGENT_HARNESS=native`; anything else is validated by
+    // `default_agent_loop` at construction time (never a silent fallback).
+    if std::env::var("AGENT_HARNESS").is_err() {
+        std::env::set_var("AGENT_HARNESS", "dsh");
+    }
+    let harness_name = aria_agent_cloud::app::harness_from_env();
+    let make_harness: Option<aria_agent_cloud::app::MakeHarness> = if harness_name == "native" {
+        None
+    } else {
+        let dsh_root = std::env::var("DSH_HOME_ROOT").unwrap_or_else(|_| ".aria/dsh".into());
+        let pool_max = env_u64("DSH_POOL_MAX", 8) as usize;
+        let idle = Duration::from_secs(env_u64("DSH_IDLE_TTL_SEC", 900));
+        let bin = std::env::var("DSH_BIN").ok();
+        // One pool per tenant: session homes never cross tenants (AGENTS rule 7).
+        let pools: Arc<std::sync::Mutex<HashMap<String, Arc<DshPool>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        Some(Arc::new(move |principal, cfg| {
+            let tenant = principal.id.clone();
+            let mut registry = pools.lock().expect("dsh pool registry poisoned");
+            let pool = registry.entry(tenant.clone()).or_insert_with(|| {
+                let preset = PermissionPreset::parse(&cfg.permission_preset)
+                    .unwrap_or(PermissionPreset::WorkspaceWrite);
+                let approvals: Arc<dyn ApprovalBroker> = match cfg.approval_mode.as_str() {
+                    "auto" => Arc::new(AutoAllow),
+                    _ => Arc::new(DenyAll),
+                };
+                let bridge = Arc::new(SeamApprovalBridge::new(
+                    approvals,
+                    Arc::new(NoQuestions),
+                    cfg.session.clone(),
+                    preset,
+                ));
+                let mut dsh = DshConfig::for_session(
+                    &PathBuf::from(&dsh_root).join(&tenant),
+                    &cfg.session,
+                    &cfg.model,
+                )
+                .with_permission_mode(dsh_permission_mode(preset));
+                if let Some(bin) = &bin {
+                    dsh = dsh.with_bin(bin.clone());
+                }
+                // The child env is an allow-list: forward the provider route
+                // explicitly instead of inheriting the process environment.
+                if let Ok(base) = std::env::var("DEEPSEEK_BASE_URL") {
+                    dsh = dsh.with_env("DEEPSEEK_BASE_URL", base);
+                }
+                if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+                    dsh = dsh.with_env("DEEPSEEK_API_KEY", key);
+                }
+                Arc::new(DshPool::new(dsh, pool_max, idle, bridge))
+            });
+            Arc::new(DshAgentLoop::new(pool.clone()))
+        }))
+    };
+
     // One Postgres store implements the metadata, team and schedule seams; each
     // table is `principal_id`-scoped, so no extra wiring is needed here.
     let pg = Arc::new(PgStore::new(pool));
@@ -257,6 +334,7 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         make_model,
         make_sandbox,
         make_context,
+        harness: make_harness,
     };
 
     let app = build_router(state);

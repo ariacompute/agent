@@ -10,7 +10,7 @@
 use crate::context::{
     ContextFragment, ContextStore, FragmentKind, GraphRetrieveQuery, RecallQuery, RelationKind,
 };
-use crate::seams::{Authz, ToolExecutionPipeline};
+use crate::seams::{Authz, LoopContext, ToolExecutionPipeline};
 use crate::session::{
     CompactDecision, CompactReason, CompactionPolicy, SessionEvent, SessionPersistence,
     SessionRecorder, SessionTitleProvider,
@@ -21,6 +21,7 @@ use crate::{
     CoreError, ModelRequest, Tool, ToolCall, ToolHandler, ToolResult,
 };
 use agent_sandbox::Sandbox;
+use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::json;
 use std::sync::Arc;
@@ -44,7 +45,7 @@ fn render_fragments(fragments: &[ContextFragment]) -> String {
 /// and [`Agent::run_stream`]. That is how a delegated child, whose provider calls
 /// `run`, ends up with a `title_set` record and therefore a row in
 /// `session_titles` (ADR-0015, ADR-0017).
-async fn record_turn_open(
+pub async fn record_turn_open(
     recorder: &mut SessionRecorder,
     title_pending: &std::sync::atomic::AtomicBool,
     title_provider: &Arc<dyn SessionTitleProvider>,
@@ -75,7 +76,7 @@ async fn record_turn_open(
 
 /// Close a failed turn on a shared recorder (used by the streaming paths, whose
 /// recorder is behind an async mutex because the stream outlives the call).
-async fn fail_turn(
+pub async fn fail_turn(
     recorder: &Arc<tokio::sync::Mutex<SessionRecorder>>,
     turn_id: &str,
     error: &CoreError,
@@ -88,16 +89,71 @@ async fn fail_turn(
     let _ = guard.flush().await;
 }
 
+/// A recorder bound to `session` and the configured persistence backend.
+///
+/// Public because every [`AgentLoop`](crate::seams::AgentLoop) implementation
+/// must mirror the same session-event vocabulary, not just the native one.
+pub fn recorder_for(session: &str, log: Option<&Arc<dyn SessionPersistence>>) -> SessionRecorder {
+    match log {
+        Some(log) => SessionRecorder::with_persistence(session.to_string(), log.clone()),
+        None => SessionRecorder::new(session.to_string()),
+    }
+}
+
+/// Recall + graph expansion, rendered as prompt context.
+async fn recall_ctx(
+    context: &Arc<dyn ContextStore>,
+    config: &AgentConfig,
+    input: &str,
+) -> Result<String, CoreError> {
+    let session = config.session.as_str();
+    let mut fragments = context.recall(&RecallQuery::new(session, input)).await?;
+    let extra = graph_expand_ctx(
+        context,
+        config,
+        fragments.iter().map(|f| f.id.clone()).collect(),
+        8,
+    )
+    .await;
+    for f in extra {
+        if !fragments.iter().any(|x| x.id == f.id) {
+            fragments.push(f);
+        }
+    }
+    Ok(render_fragments(&fragments))
+}
+
+/// Supplement vector recall with bounded graph expansion from `seeds`.
+async fn graph_expand_ctx(
+    context: &Arc<dyn ContextStore>,
+    config: &AgentConfig,
+    seeds: Vec<String>,
+    top_k: usize,
+) -> Vec<ContextFragment> {
+    if !config.memory_graph || seeds.is_empty() {
+        return Vec::new();
+    }
+    match context
+        .expand(&GraphRetrieveQuery {
+            session: config.session.clone(),
+            seeds,
+            views: Vec::new(),
+            budget: 32,
+            max_hops: 2,
+            top_k,
+        })
+        .await
+    {
+        Ok(res) => res.items.into_iter().map(|s| s.fragment).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 impl Agent {
     /// The effective configuration.
     /// A recorder bound to this agent's session and persistence backend.
     fn recorder(&self) -> SessionRecorder {
-        match &self.session_log {
-            Some(log) => {
-                SessionRecorder::with_persistence(self.config.session.clone(), log.clone())
-            }
-            None => SessionRecorder::new(self.config.session.clone()),
-        }
+        recorder_for(&self.config.session, self.session_log.as_ref())
     }
 
     pub fn config(&self) -> &AgentConfig {
@@ -143,118 +199,21 @@ impl Agent {
         self.session_log.clone()
     }
 
-    /// Supplement vector recall with bounded graph expansion from `seeds`.
-    async fn graph_expand(&self, seeds: Vec<String>, top_k: usize) -> Vec<ContextFragment> {
-        if !self.config.memory_graph || seeds.is_empty() {
-            return Vec::new();
-        }
-        match self
-            .context
-            .expand(&GraphRetrieveQuery {
-                session: self.config.session.clone(),
-                seeds,
-                views: Vec::new(),
-                budget: 32,
-                max_hops: 2,
-                top_k,
-            })
-            .await
-        {
-            Ok(res) => res.items.into_iter().map(|s| s.fragment).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
     /// Recall + graph expansion, rendered as prompt context.
     async fn recall_context(&self, input: &str) -> Result<String, CoreError> {
-        let session = &self.config.session;
-        let mut fragments = self
-            .context
-            .recall(&RecallQuery::new(session, input))
-            .await?;
-        let extra = self
-            .graph_expand(fragments.iter().map(|f| f.id.clone()).collect(), 8)
-            .await;
-        for f in extra {
-            if !fragments.iter().any(|x| x.id == f.id) {
-                fragments.push(f);
-            }
-        }
-        Ok(render_fragments(&fragments))
+        recall_ctx(&self.context, &self.config, input).await
     }
 
-    /// Run one turn. Injects recalled context, calls the model, persists both turns.
+    /// Run one turn through the installed [`AgentLoop`](crate::seams::AgentLoop).
     ///
-    /// The turn is recorded exactly like the streaming loop: `turn_started`, the
-    /// title (flushed immediately, so a slow or failing model cannot lose it) and
-    /// a terminal `turn_completed` / `turn_failed`.
+    /// The native loop keeps the historical shape: inject recalled context, make
+    /// a single model call (no tools), persist both messages and close the turn.
+    /// An external harness folds its own event stream instead, so the same call
+    /// works whichever runtime is wired (ADR-0019).
     pub async fn run(&self, input: &str) -> Result<String, CoreError> {
-        let session = self.config.session.clone();
-        let mut recorder = self.recorder();
-        let turn_id = uuid::Uuid::new_v4().to_string();
-        record_turn_open(
-            &mut recorder,
-            &self.title_pending,
-            &self.title_provider,
-            &session,
-            &turn_id,
-            input,
-        )
-        .await;
-        // Flush before calling the model: a title must survive a provider that
-        // hangs or fails.
-        let _ = recorder.flush().await;
-
-        let context = self.recall_context(input).await?;
-
-        let user = ContextFragment::new(&session, FragmentKind::Message, input);
-        let user_id = user.id.clone();
-        self.context.memorize(user).await?;
-
-        let req = ModelRequest {
-            system: self.system_text(),
-            context,
-            input: input.to_string(),
-        };
-        let resp = match self.model.complete(&req).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                recorder.push(SessionEvent::TurnFailed {
-                    turn_id,
-                    message: e.to_string(),
-                });
-                let _ = recorder.flush().await;
-                return Err(e);
-            }
-        };
-
-        let asst = ContextFragment::new(&session, FragmentKind::Message, resp.text.clone());
-        let asst_id = asst.id.clone();
-        self.context.memorize(asst).await?;
-        graph_relate_store(
-            &self.context,
-            &session,
-            &user_id,
-            &asst_id,
-            RelationKind::Temporal,
-        )
-        .await;
-        maybe_compact_store(
-            &self.context,
-            &session,
-            self.config.memory_compact_threshold,
-        )
-        .await;
-
-        recorder.push(SessionEvent::TextDone {
-            text: resp.text.clone(),
-        });
-        recorder.push(SessionEvent::TurnCompleted {
-            turn_id,
-            output: resp.text.clone(),
-        });
-        let _ = recorder.flush().await;
-        Ok(resp.text)
+        self.agent_loop
+            .run_once(self.loop_context(Vec::new()), input)
+            .await
     }
 
     /// Run a shell command inside the sandbox and remember the result.
@@ -428,314 +387,18 @@ impl Agent {
 
     /// Run an agentic turn as an event stream.
     ///
-    /// The returned stream is `'static` and owns every dependency, so the
-    /// [`Agent`] may be dropped while it is still consumed. Events are mirrored
-    /// into the session recorder and flushed when the turn ends.
+    /// Delegates to the [`AgentLoop`](crate::seams::AgentLoop) resolved once at
+    /// assembly: the native Rust loop, or an external harness such as DeepSeek
+    /// Harness (ADR-0019). The returned stream is `'static` and owns every
+    /// dependency, so the [`Agent`] may be dropped while it is still consumed.
     pub async fn run_event_stream(
         &self,
         input: &str,
         tools: &[Tool],
     ) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
-        let memo = self.context.clone();
-        let model = self.model.clone();
-        let sandbox = self.sandbox.clone();
-        let pipeline = self.pipeline.clone();
-        let system = self.system_text();
-        let session = self.config.session.clone();
-        let model_name = self.config.model.clone();
-        let tools: Vec<Tool> = tools.to_vec();
-        let input_owned = input.to_string();
-        let graph_enabled = self.config.memory_graph;
-        let threshold = self.config.memory_compact_threshold;
-        let context_limit = self.config.context_limit;
-        let title_pending = self.title_pending.clone();
-        let title_provider = self.title_provider.clone();
-        let mut recorder = self.recorder();
-
-        // 1) recall context from memo (+ optional graph expansion).
-        let mut initial_context = self.recall_context(&input_owned).await?;
-        // 2) persist the user turn.
-        let user = ContextFragment::new(&session, FragmentKind::Message, input_owned.clone());
-        let user_id = user.id.clone();
-        memo.memorize(user).await?;
-
-        let wrapped = async_stream::stream! {
-            let mut meter = TokenMeter::new(context_limit, crate::token_meter::DEFAULT_PRESSURE_RATIO);
-            let turn_id = uuid::Uuid::new_v4().to_string();
-            // Deterministic first-prompt title plus an optional provider
-            // override (ADR-0015); shared with `run` / `run_stream` so a session
-            // is titled no matter which loop drives it.
-            record_turn_open(
-                &mut recorder,
-                &title_pending,
-                &title_provider,
-                &session,
-                &turn_id,
-                &input_owned,
-            )
-            .await;
-            yield Ok(AgentEvent::Step { phase: "recall".into(), label: None });
-            recorder.push(SessionEvent::Step { phase: "recall".into(), label: None });
-
-            let mut tool_log = String::new();
-            let mut step = 0usize;
-            let mut overflow_retried = false;
-
-            loop {
-                step += 1;
-                if step > Agent::MAX_AGENTIC_STEPS {
-                    let label = "max agentic steps exceeded".to_string();
-                    yield Ok(AgentEvent::Step {
-                        phase: "loop_guard".into(),
-                        label: Some(label.clone()),
-                    });
-                    recorder.push(SessionEvent::Step {
-                        phase: "loop_guard".into(),
-                        label: Some(label),
-                    });
-                    recorder.push(SessionEvent::TurnCompleted {
-                        turn_id: turn_id.clone(),
-                        output: String::new(),
-                    });
-                    let _ = recorder.flush().await;
-                    yield Ok(AgentEvent::Done { text: String::new() });
-                    break;
-                }
-
-                // Context pressure: compact before asking the model again.
-                if meter.under_pressure() {
-                    yield Ok(AgentEvent::Step { phase: "compact".into(), label: None });
-                    if let Ok(frag) = memo.compact(&session).await {
-                        meter.reset();
-                        recorder.push(SessionEvent::Compacted {
-                            fragment_id: frag.id.clone(),
-                            removed: 0,
-                            reason: "context pressure".into(),
-                        });
-                        yield Ok(AgentEvent::Step {
-                            phase: "compact_done".into(),
-                            label: None,
-                        });
-                    }
-                }
-
-                yield Ok(AgentEvent::Step { phase: "model".into(), label: None });
-                recorder.push(SessionEvent::Step { phase: "model".into(), label: None });
-                let context = if tool_log.is_empty() {
-                    initial_context.clone()
-                } else {
-                    format!("{}\n{}", initial_context, tool_log)
-                };
-                let req = ModelRequest {
-                    system: system.clone(),
-                    context,
-                    input: input_owned.clone(),
-                };
-                let turn = match model.complete_with_tools(&req, &tools).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let message = e.to_string();
-                        // Provider reported a context overflow: compact once and
-                        // retry with the shrunken context (ADR-0015). A second
-                        // overflow is terminal so the loop cannot spin.
-                        let recover = !overflow_retried
-                            && matches!(
-                                CompactionPolicy::default().after_error(Some(&message)),
-                                CompactDecision::Compact(CompactReason::ContextOverflow)
-                            );
-                        if !recover {
-                            recorder.push(SessionEvent::TurnFailed {
-                                turn_id: turn_id.clone(),
-                                message: message.clone(),
-                            });
-                            let _ = recorder.flush().await;
-                            yield Err(CoreError::Model(message));
-                            return;
-                        }
-                        overflow_retried = true;
-                        yield Ok(AgentEvent::Step {
-                            phase: "compact".into(),
-                            label: Some(CompactReason::ContextOverflow.as_str().into()),
-                        });
-                        match memo.compact(&session).await {
-                            Ok(frag) => {
-                                meter.reset();
-                                recorder.push(SessionEvent::Compacted {
-                                    fragment_id: frag.id.clone(),
-                                    removed: 0,
-                                    reason: CompactReason::ContextOverflow.as_str().into(),
-                                });
-                                // Re-recall so the retry genuinely carries less
-                                // context than the rejected request.
-                                initial_context = match memo
-                                    .recall(&RecallQuery::new(&session, &input_owned))
-                                    .await
-                                {
-                                    Ok(frags) => render_fragments(&frags),
-                                    Err(_) => String::new(),
-                                };
-                            }
-                            Err(err) => {
-                                let reason = format!("{message}; compaction failed: {err}");
-                                recorder.push(SessionEvent::TurnFailed {
-                                    turn_id: turn_id.clone(),
-                                    message: reason.clone(),
-                                });
-                                let _ = recorder.flush().await;
-                                yield Err(CoreError::Model(reason));
-                                return;
-                            }
-                        }
-                        yield Ok(AgentEvent::Step {
-                            phase: "compact_done".into(),
-                            label: None,
-                        });
-                        continue;
-                    }
-                };
-
-                // Provider-reported usage wins; the local estimate is only the
-                // fallback for backends that report nothing (ADR-0015).
-                match &turn.usage {
-                    Some(usage) => meter.observe(usage),
-                    None => meter.observe_text(&req.input, &turn.text, &model_name),
-                }
-                let reported_model = turn
-                    .usage
-                    .as_ref()
-                    .map(|u| u.model.clone())
-                    .filter(|m| !m.is_empty())
-                    .unwrap_or_else(|| model_name.clone());
-                yield Ok(AgentEvent::Usage {
-                    input_tokens: meter.usage().input_tokens,
-                    output_tokens: meter.usage().output_tokens,
-                    model: reported_model.clone(),
-                });
-                recorder.push(SessionEvent::Usage {
-                    input_tokens: meter.usage().input_tokens,
-                    output_tokens: meter.usage().output_tokens,
-                    model: reported_model,
-                });
-
-                if turn.tool_calls.is_empty() {
-                    yield Ok(AgentEvent::Token { text: turn.text.clone() });
-                    recorder.push(SessionEvent::TextDone { text: turn.text.clone() });
-                    let asst = ContextFragment::new(
-                        &session,
-                        FragmentKind::Message,
-                        turn.text.clone(),
-                    );
-                    let asst_id = asst.id.clone();
-                    let _ = memo.memorize(asst).await;
-                    if graph_enabled {
-                        graph_relate_store(
-                            &memo,
-                            &session,
-                            &user_id,
-                            &asst_id,
-                            RelationKind::Temporal,
-                        )
-                        .await;
-                        maybe_compact_store(&memo, &session, threshold).await;
-                    }
-                    recorder.push(SessionEvent::TurnCompleted {
-                        turn_id: turn_id.clone(),
-                        output: turn.text.clone(),
-                    });
-                    let _ = recorder.flush().await;
-                    yield Ok(AgentEvent::Done { text: turn.text });
-                    break;
-                }
-
-                // 4) execute each requested tool call through the pipeline.
-                for call in &turn.tool_calls {
-                    yield Ok(AgentEvent::Step {
-                        phase: "tool_exec".into(),
-                        label: Some(call.name.clone()),
-                    });
-                    recorder.push(SessionEvent::ItemAdded {
-                        item_id: call.id.clone(),
-                        kind: "tool_call".into(),
-                        payload: json!({
-                            "name": call.name,
-                            "arguments": call.arguments,
-                        }),
-                    });
-
-                    let (result, _approval) = match pipeline.authorize(call, &session).await {
-                        Authz::Denied { decision, reason } => {
-                            yield Ok(AgentEvent::Approval {
-                                id: call.id.clone(),
-                                tool: call.name.clone(),
-                                decision: decision.as_str().to_string(),
-                                reason: Some(reason.clone()),
-                            });
-                            recorder.push(SessionEvent::Approval {
-                                id: call.id.clone(),
-                                tool: call.name.clone(),
-                                decision: decision.as_str().to_string(),
-                                reason: Some(reason.clone()),
-                            });
-                            (
-                                ToolExecutionPipeline::denied_result(call, &reason),
-                                Some(decision),
-                            )
-                        }
-                        Authz::Allowed { approval } => {
-                            if let Some(decision) = &approval {
-                                yield Ok(AgentEvent::Approval {
-                                    id: call.id.clone(),
-                                    tool: call.name.clone(),
-                                    decision: decision.as_str().to_string(),
-                                    reason: None,
-                                });
-                                recorder.push(SessionEvent::Approval {
-                                    id: call.id.clone(),
-                                    tool: call.name.clone(),
-                                    decision: decision.as_str().to_string(),
-                                    reason: None,
-                                });
-                            }
-                            let raw = match pipeline.dispatch(call, &memo, &session).await {
-                                Some(result) => result,
-                                None => {
-                                    match sandbox_exec(&sandbox, &memo, &session, call).await {
-                                        Ok(result) => result,
-                                        Err(e) => ToolResult {
-                                            call_id: call.id.clone(),
-                                            content: e.to_string(),
-                                            is_error: true,
-                                        },
-                                    }
-                                }
-                            };
-                            let outcome = pipeline.post_execute(&call.id, raw, approval.clone());
-                            (outcome.result, approval)
-                        }
-                    };
-
-                    tool_log.push_str(&format!(
-                        "\n\nTOOL_RESULT[{}]: {}",
-                        call.name, result.content
-                    ));
-                    recorder.push(SessionEvent::ItemDone {
-                        item_id: call.id.clone(),
-                        result: json!({
-                            "content": result.content,
-                            "spill": result.content.len(),
-                        }),
-                        is_error: result.is_error,
-                    });
-                    yield Ok(AgentEvent::ToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                        result,
-                    });
-                }
-            }
-        };
-        Ok(Box::pin(wrapped))
+        self.agent_loop
+            .run(self.loop_context(tools.to_vec()), input)
+            .await
     }
 
     /// Run an agentic turn and fold the event stream into the final text.
@@ -750,6 +413,416 @@ impl Agent {
             }
         }
         Ok(out)
+    }
+
+    /// Snapshot every dependency a turn may touch.
+    ///
+    /// Seams are resolved once at assembly, so this only clones handles
+    /// (ADR-0014); it is never called per tool call.
+    pub(crate) fn loop_context(&self, tools: Vec<Tool>) -> LoopContext {
+        LoopContext {
+            config: self.config.clone(),
+            model: self.model.clone(),
+            context: self.context.clone(),
+            sandbox: self.sandbox.clone(),
+            pipeline: self.pipeline.clone(),
+            prompt: self.prompt.clone(),
+            session_log: self.session_log.clone(),
+            tools,
+            title_pending: self.title_pending.clone(),
+            title_provider: self.title_provider.clone(),
+        }
+    }
+}
+
+/// The native event-stream loop: recall → model → tool pipeline → events.
+///
+/// Every event is mirrored into the append-only session recorder and flushed at
+/// turn boundaries (ADR-0015). Behaviour is identical to the historical
+/// `Agent::run_event_stream` body; only the dependency snapshot differs.
+async fn native_run(
+    ctx: LoopContext,
+    input: &str,
+) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
+    let memo = ctx.context.clone();
+    let model = ctx.model.clone();
+    let sandbox = ctx.sandbox.clone();
+    let pipeline = ctx.pipeline.clone();
+    let system = ctx.system_text();
+    let session = ctx.config.session.clone();
+    let model_name = ctx.config.model.clone();
+    let tools: Vec<Tool> = ctx.tools.clone();
+    let input_owned = input.to_string();
+    let graph_enabled = ctx.config.memory_graph;
+    let threshold = ctx.config.memory_compact_threshold;
+    let context_limit = ctx.config.context_limit;
+    let title_pending = ctx.title_pending.clone();
+    let title_provider = ctx.title_provider.clone();
+    let mut recorder = recorder_for(&session, ctx.session_log.as_ref());
+
+    // 1) recall context from memo (+ optional graph expansion).
+    let mut initial_context = recall_ctx(&memo, &ctx.config, &input_owned).await?;
+    // 2) persist the user turn.
+    let user = ContextFragment::new(&session, FragmentKind::Message, input_owned.clone());
+    let user_id = user.id.clone();
+    memo.memorize(user).await?;
+
+    let wrapped = async_stream::stream! {
+        let mut meter = TokenMeter::new(context_limit, crate::token_meter::DEFAULT_PRESSURE_RATIO);
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        // Deterministic first-prompt title plus an optional provider
+        // override (ADR-0015); shared with `run` / `run_stream` so a session
+        // is titled no matter which loop drives it.
+        record_turn_open(
+            &mut recorder,
+            &title_pending,
+            &title_provider,
+            &session,
+            &turn_id,
+            &input_owned,
+        )
+        .await;
+        yield Ok(AgentEvent::Step { phase: "recall".into(), label: None });
+        recorder.push(SessionEvent::Step { phase: "recall".into(), label: None });
+
+        let mut tool_log = String::new();
+        let mut step = 0usize;
+        let mut overflow_retried = false;
+
+        loop {
+            step += 1;
+            if step > Agent::MAX_AGENTIC_STEPS {
+                let label = "max agentic steps exceeded".to_string();
+                yield Ok(AgentEvent::Step {
+                    phase: "loop_guard".into(),
+                    label: Some(label.clone()),
+                });
+                recorder.push(SessionEvent::Step {
+                    phase: "loop_guard".into(),
+                    label: Some(label),
+                });
+                recorder.push(SessionEvent::TurnCompleted {
+                    turn_id: turn_id.clone(),
+                    output: String::new(),
+                });
+                let _ = recorder.flush().await;
+                yield Ok(AgentEvent::Done { text: String::new() });
+                break;
+            }
+
+            // Context pressure: compact before asking the model again.
+            if meter.under_pressure() {
+                yield Ok(AgentEvent::Step { phase: "compact".into(), label: None });
+                if let Ok(frag) = memo.compact(&session).await {
+                    meter.reset();
+                    recorder.push(SessionEvent::Compacted {
+                        fragment_id: frag.id.clone(),
+                        removed: 0,
+                        reason: "context pressure".into(),
+                    });
+                    yield Ok(AgentEvent::Step {
+                        phase: "compact_done".into(),
+                        label: None,
+                    });
+                }
+            }
+
+            yield Ok(AgentEvent::Step { phase: "model".into(), label: None });
+            recorder.push(SessionEvent::Step { phase: "model".into(), label: None });
+            let context = if tool_log.is_empty() {
+                initial_context.clone()
+            } else {
+                format!("{}\n{}", initial_context, tool_log)
+            };
+            let req = ModelRequest {
+                system: system.clone(),
+                context,
+                input: input_owned.clone(),
+            };
+            let turn = match model.complete_with_tools(&req, &tools).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let message = e.to_string();
+                    // Provider reported a context overflow: compact once and
+                    // retry with the shrunken context (ADR-0015). A second
+                    // overflow is terminal so the loop cannot spin.
+                    let recover = !overflow_retried
+                        && matches!(
+                            CompactionPolicy::default().after_error(Some(&message)),
+                            CompactDecision::Compact(CompactReason::ContextOverflow)
+                        );
+                    if !recover {
+                        recorder.push(SessionEvent::TurnFailed {
+                            turn_id: turn_id.clone(),
+                            message: message.clone(),
+                        });
+                        let _ = recorder.flush().await;
+                        yield Err(CoreError::Model(message));
+                        return;
+                    }
+                    overflow_retried = true;
+                    yield Ok(AgentEvent::Step {
+                        phase: "compact".into(),
+                        label: Some(CompactReason::ContextOverflow.as_str().into()),
+                    });
+                    match memo.compact(&session).await {
+                        Ok(frag) => {
+                            meter.reset();
+                            recorder.push(SessionEvent::Compacted {
+                                fragment_id: frag.id.clone(),
+                                removed: 0,
+                                reason: CompactReason::ContextOverflow.as_str().into(),
+                            });
+                            // Re-recall so the retry genuinely carries less
+                            // context than the rejected request.
+                            initial_context = match memo
+                                .recall(&RecallQuery::new(&session, &input_owned))
+                                .await
+                            {
+                                Ok(frags) => render_fragments(&frags),
+                                Err(_) => String::new(),
+                            };
+                        }
+                        Err(err) => {
+                            let reason = format!("{message}; compaction failed: {err}");
+                            recorder.push(SessionEvent::TurnFailed {
+                                turn_id: turn_id.clone(),
+                                message: reason.clone(),
+                            });
+                            let _ = recorder.flush().await;
+                            yield Err(CoreError::Model(reason));
+                            return;
+                        }
+                    }
+                    yield Ok(AgentEvent::Step {
+                        phase: "compact_done".into(),
+                        label: None,
+                    });
+                    continue;
+                }
+            };
+
+            // Provider-reported usage wins; the local estimate is only the
+            // fallback for backends that report nothing (ADR-0015).
+            match &turn.usage {
+                Some(usage) => meter.observe(usage),
+                None => meter.observe_text(&req.input, &turn.text, &model_name),
+            }
+            let reported_model = turn
+                .usage
+                .as_ref()
+                .map(|u| u.model.clone())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| model_name.clone());
+            yield Ok(AgentEvent::Usage {
+                input_tokens: meter.usage().input_tokens,
+                output_tokens: meter.usage().output_tokens,
+                model: reported_model.clone(),
+            });
+            recorder.push(SessionEvent::Usage {
+                input_tokens: meter.usage().input_tokens,
+                output_tokens: meter.usage().output_tokens,
+                model: reported_model,
+            });
+
+            if turn.tool_calls.is_empty() {
+                yield Ok(AgentEvent::Token { text: turn.text.clone() });
+                recorder.push(SessionEvent::TextDone { text: turn.text.clone() });
+                let asst = ContextFragment::new(
+                    &session,
+                    FragmentKind::Message,
+                    turn.text.clone(),
+                );
+                let asst_id = asst.id.clone();
+                let _ = memo.memorize(asst).await;
+                if graph_enabled {
+                    graph_relate_store(
+                        &memo,
+                        &session,
+                        &user_id,
+                        &asst_id,
+                        RelationKind::Temporal,
+                    )
+                    .await;
+                    maybe_compact_store(&memo, &session, threshold).await;
+                }
+                recorder.push(SessionEvent::TurnCompleted {
+                    turn_id: turn_id.clone(),
+                    output: turn.text.clone(),
+                });
+                let _ = recorder.flush().await;
+                yield Ok(AgentEvent::Done { text: turn.text });
+                break;
+            }
+
+            // 4) execute each requested tool call through the pipeline.
+            for call in &turn.tool_calls {
+                yield Ok(AgentEvent::Step {
+                    phase: "tool_exec".into(),
+                    label: Some(call.name.clone()),
+                });
+                recorder.push(SessionEvent::ItemAdded {
+                    item_id: call.id.clone(),
+                    kind: "tool_call".into(),
+                    payload: json!({
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }),
+                });
+
+                let (result, _approval) = match pipeline.authorize(call, &session).await {
+                    Authz::Denied { decision, reason } => {
+                        yield Ok(AgentEvent::Approval {
+                            id: call.id.clone(),
+                            tool: call.name.clone(),
+                            decision: decision.as_str().to_string(),
+                            reason: Some(reason.clone()),
+                        });
+                        recorder.push(SessionEvent::Approval {
+                            id: call.id.clone(),
+                            tool: call.name.clone(),
+                            decision: decision.as_str().to_string(),
+                            reason: Some(reason.clone()),
+                        });
+                        (
+                            ToolExecutionPipeline::denied_result(call, &reason),
+                            Some(decision),
+                        )
+                    }
+                    Authz::Allowed { approval } => {
+                        if let Some(decision) = &approval {
+                            yield Ok(AgentEvent::Approval {
+                                id: call.id.clone(),
+                                tool: call.name.clone(),
+                                decision: decision.as_str().to_string(),
+                                reason: None,
+                            });
+                            recorder.push(SessionEvent::Approval {
+                                id: call.id.clone(),
+                                tool: call.name.clone(),
+                                decision: decision.as_str().to_string(),
+                                reason: None,
+                            });
+                        }
+                        let raw = match pipeline.dispatch(call, &memo, &session).await {
+                            Some(result) => result,
+                            None => {
+                                match sandbox_exec(&sandbox, &memo, &session, call).await {
+                                    Ok(result) => result,
+                                    Err(e) => ToolResult {
+                                        call_id: call.id.clone(),
+                                        content: e.to_string(),
+                                        is_error: true,
+                                    },
+                                }
+                            }
+                        };
+                        let outcome = pipeline.post_execute(&call.id, raw, approval.clone());
+                        (outcome.result, approval)
+                    }
+                };
+
+                tool_log.push_str(&format!(
+                    "\n\nTOOL_RESULT[{}]: {}",
+                    call.name, result.content
+                ));
+                recorder.push(SessionEvent::ItemDone {
+                    item_id: call.id.clone(),
+                    result: json!({
+                        "content": result.content,
+                        "spill": result.content.len(),
+                    }),
+                    is_error: result.is_error,
+                });
+                yield Ok(AgentEvent::ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    result,
+                });
+            }
+        }
+    };
+    Ok(Box::pin(wrapped))
+}
+
+/// The native loop: a single Rust implementation of the [`AgentLoop`] contract.
+pub struct NativeLoop;
+
+#[async_trait]
+impl crate::seams::AgentLoop for NativeLoop {
+    async fn run(
+        &self,
+        ctx: LoopContext,
+        input: &str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
+        native_run(ctx, input).await
+    }
+
+    /// The historical one-shot path: a single `complete` call with recalled
+    /// context and **no** tool calls (`POST …/turns`, FFI `run`, sub-agents).
+    async fn run_once(&self, ctx: LoopContext, input: &str) -> Result<String, CoreError> {
+        let session = ctx.config.session.clone();
+        let mut recorder = recorder_for(&session, ctx.session_log.as_ref());
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        record_turn_open(
+            &mut recorder,
+            &ctx.title_pending,
+            &ctx.title_provider,
+            &session,
+            &turn_id,
+            input,
+        )
+        .await;
+        // Flush before calling the model: a title must survive a provider that
+        // hangs or fails.
+        let _ = recorder.flush().await;
+
+        let context = recall_ctx(&ctx.context, &ctx.config, input).await?;
+
+        let user = ContextFragment::new(&session, FragmentKind::Message, input);
+        let user_id = user.id.clone();
+        ctx.context.memorize(user).await?;
+
+        let req = ModelRequest {
+            system: ctx.system_text(),
+            context,
+            input: input.to_string(),
+        };
+        let resp = match ctx.model.complete(&req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                recorder.push(SessionEvent::TurnFailed {
+                    turn_id,
+                    message: e.to_string(),
+                });
+                let _ = recorder.flush().await;
+                return Err(e);
+            }
+        };
+
+        let asst = ContextFragment::new(&session, FragmentKind::Message, resp.text.clone());
+        let asst_id = asst.id.clone();
+        ctx.context.memorize(asst).await?;
+        graph_relate_store(
+            &ctx.context,
+            &session,
+            &user_id,
+            &asst_id,
+            RelationKind::Temporal,
+        )
+        .await;
+        maybe_compact_store(&ctx.context, &session, ctx.config.memory_compact_threshold).await;
+
+        recorder.push(SessionEvent::TextDone {
+            text: resp.text.clone(),
+        });
+        recorder.push(SessionEvent::TurnCompleted {
+            turn_id,
+            output: resp.text.clone(),
+        });
+        let _ = recorder.flush().await;
+        Ok(resp.text)
     }
 }
 
@@ -1588,5 +1661,149 @@ mod one_shot_turn_tests {
         let projection = SessionProjection::replay(&records);
         assert_eq!(projection.title.as_deref(), Some("stream me"));
         assert_eq!(projection.turns[0].status, TurnStatus::Completed);
+    }
+
+    /// Collect the events of one turn, handing the loop a single tool schema.
+    async fn collect_events(agent: &Agent, input: &str) -> Vec<AgentEvent> {
+        let tools = vec![Tool {
+            name: "shell".into(),
+            description: "run a shell command".into(),
+            parameters: json!({"type": "object"}),
+        }];
+        let mut stream = agent
+            .run_event_stream(input, &tools)
+            .await
+            .expect("stream starts");
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            events.push(ev.expect("event"));
+        }
+        events
+    }
+
+    /// Minimal external-harness double: emits one step and a final `Done`.
+    struct HarnessLoop;
+
+    #[async_trait]
+    impl crate::seams::AgentLoop for HarnessLoop {
+        async fn run(
+            &self,
+            ctx: LoopContext,
+            input: &str,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, CoreError>>, CoreError> {
+            let text = format!("harness[{}]:{input}", ctx.config.session);
+            let tools = ctx.tools.len();
+            let stream = async_stream::stream! {
+                yield Ok(AgentEvent::Step { phase: "harness".into(), label: Some(format!("{tools} tools")) });
+                yield Ok(AgentEvent::Done { text: text.clone() });
+            };
+            Ok(Box::pin(stream))
+        }
+    }
+
+    #[test]
+    fn harness_resolution_fails_closed() {
+        let mut cfg = AgentConfig::default();
+        assert_eq!(cfg.harness, "native");
+        assert!(crate::default_agent_loop(&cfg).is_ok());
+
+        // Configs written before the field existed deserialize to "native".
+        let parsed: AgentConfig = serde_json::from_str(
+            r#"{"session":"s","agent_name":"a","sandbox_provider":"docker","model":"m"}"#,
+        )
+        .expect("config parses");
+        assert_eq!(parsed.harness, "native");
+        cfg.harness = String::new();
+        assert!(crate::default_agent_loop(&cfg).is_ok());
+
+        // `dsh` must be injected, never silently downgraded to the Rust loop.
+        cfg.harness = "dsh".into();
+        let err = crate::default_agent_loop(&cfg)
+            .err()
+            .expect("dsh needs injection");
+        assert!(
+            matches!(&err, CoreError::Config(m) if m.contains("aria_agent_dsh")),
+            "{err:?}"
+        );
+
+        cfg.harness = "codex".into();
+        let err = crate::default_agent_loop(&cfg)
+            .err()
+            .expect("unknown harness");
+        assert!(
+            matches!(&err, CoreError::Config(m) if m.contains("unknown harness")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dsh_harness_without_injection_refuses_to_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let cfg = AgentConfig {
+            harness: "dsh".into(),
+            workspace_root: root.clone(),
+            session_log_dir: root,
+            ..AgentConfig::default()
+        };
+        let err = Agent::with_sandbox(
+            cfg,
+            Box::new(EchoModel),
+            in_memory_context(),
+            Arc::new(NullSandbox),
+        )
+        .err()
+        .expect("construction must fail closed");
+        assert!(matches!(err, CoreError::Config(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_injected_loop_drives_both_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let cfg = AgentConfig {
+            session: "s-harness".into(),
+            harness: "dsh".into(),
+            workspace_root: root.clone(),
+            session_log_dir: root,
+            ..AgentConfig::default()
+        };
+        let agent = Agent::with_components(
+            cfg,
+            Box::new(EchoModel),
+            in_memory_context(),
+            Arc::new(NullSandbox),
+            Vec::new(),
+            Arc::new(HarnessLoop),
+        )
+        .expect("injected harness builds");
+
+        let events = collect_events(&agent, "hi").await;
+        assert!(
+            matches!(&events[0], AgentEvent::Step { phase, .. } if phase == "harness"),
+            "{:?}",
+            events[0]
+        );
+        assert!(
+            matches!(&events[0], AgentEvent::Step { label, .. } if label.as_deref() == Some("1 tools")),
+            "{:?}",
+            events[0]
+        );
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Done { text }) if text == "harness[s-harness]:hi")
+        );
+
+        // The default `run_once` folds the injected stream.
+        assert_eq!(agent.run("hi").await.expect("run"), "harness[s-harness]:hi");
+
+        // Swapping the runtime post-construction keeps the same contract.
+        let swapped = agent.with_agent_loop(Arc::new(NativeLoop));
+        let events = collect_events(&swapped, "hi").await;
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::Done {
+                text: "echo: hi".into()
+            })
+        );
     }
 }

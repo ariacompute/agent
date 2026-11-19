@@ -8,7 +8,8 @@
 以能力接缝（capability seams）组合的 agent 运行时，向上提供 (a)<br/>
 **Rust + 云端 API**（对应 **OpenAI beta Agents** 资源面）、(b) **JS / Python<br/>
 SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** —— 它们共享<br/>
-同一套 `recall → model → memorize` 运行时与可插拔 sandbox。
+同一套 `recall → runtime → memorize` 外壳与可插拔 sandbox；每一轮默认由<br/>
+**DeepSeek Harness** 执行。
 
 [English](./README.md) · **简体中文** · [文档](./docs/architecture.md)
 
@@ -58,9 +59,10 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 `agent` 让每个 SDK 都遵循同样的三步形态——定义 `Agent`、运行一次，然后复用会话
 继续对话并流式输出——而运行时自行决定记忆存于何处、工具在何处执行：
 
-- 🧩 **分层 agent 运行时** —— `aria-agent-core` 运行 `recall → model → memorize`；工具在可插拔的 `Sandbox`（Docker / Kata / Cube / Browser）中执行。
-- 🔌 **能力接缝** —— 模型、sandbox、存储、会话、工具、审批、子智能体与调度都是可替换接缝，由插件注册表在启动期装配并 fail-closed（`aria-agent-plugin`，ADR-0014）。
-- 🛠️ **统一工具管线** —— 解析 → 权限预设 → 审批 → 分发 → 结果后处理（截断 + 外置），无审批方时拒绝并回灌原因而不是放行（`aria-agent-tools`，ADR-0016）。
+- 🐋 **默认由 DeepSeek Harness 执行** —— 每一轮对话跑在外部 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh --profile sdk`，stdio 上的逐行 JSON-RPC）上，turn/step 编排、模型调用与工具执行都归 dsh；进程内 Rust 循环保留为显式 `native` 回退（`aria-agent-dsh`）。
+- 🧩 **Agent 外壳** —— `aria-agent-core` 负责 `recall → memorize`、提示词装配、工具管线、会话事件与冻结的流式信封，与"由谁驱动本轮"解耦。
+- 🔌 **能力接缝** —— 模型、sandbox、存储、会话、工具、审批、子智能体与调度都是可替换接缝，由插件注册表在启动期装配并 fail-closed（`aria-agent-plugin`）。
+- 🛠️ **统一工具管线** —— 解析 → 权限预设 → 审批 → 分发 → 结果后处理（截断 + 外置），无审批方时拒绝并回灌原因而不是放行（`aria-agent-tools`）。
 - ☁️ **云端 API** —— `aria-agent-cloud` 是一个 axum 服务，讲 OpenAI **beta Agents** 资源面，Postgres + pgvector 同时保存元数据与上下文，并支持 SSE 流式。
 - 📱 **端侧存储** —— `aria-agent-memo`（aria memo / SQLite）保存 local-first 的上下文副本，与云端后端通过同一个 `ContextStore` trait 互换。
 - 🌐 **五语言 SDK** —— JS / Python 是云端 API 的薄客户端；Rust / Swift / Kotlin 把运行时嵌入进程内，无需服务端、无需网络。
@@ -74,8 +76,22 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 
 ## 🏗️ 架构
 
-以能力接缝组合的 agent 运行时：`aria-agent-core` 负责主循环，每项能力都是可替换的
-provider；云端与原生前端共享同一套 `recall → model → memorize` 运行时。
+以能力接缝组合的 agent 运行时：`aria-agent-core` 负责 agent 外壳，每项能力都是可替换的
+provider；云端与原生前端共享同一套 `recall → runtime → memorize` 流程。
+
+### 本轮运行时（turn runtime）
+
+turn 循环本身就是 `agent_loop` 接缝，默认提供方是 **DeepSeek Harness**：每个会话一个
+`dsh` 子进程，经 JSON-RPC 通信，拥有独立的 `DSH_HOME` 与工作目录、白名单环境变量，并以
+池化方式复用（空闲回收）。dsh 同时执行模型调用**与它自己的工具**，所以在
+`harness = "dsh"` 下 aria 的 sandbox/工具管线不再参与本轮；aria 仍负责 recall、记忆落库、
+会话事件与标题、审批/提问桥接以及对外信封。`AGENT_HARNESS=native` 可显式切回
+内置 Rust 循环；未知取值，或选了 `dsh` 却没有可用运行时，都直接报错，绝不静默降级。
+
+```bash
+just dsh-smoke  # 脚本化假运行时：握手 + 回合帧序，离线可跑
+just dsh-e2e    # 真实一轮（需 ARIA_DSH_E2E=1 + DSH_BIN + 供应商密钥）
+```
 
 ### 技术栈
 
@@ -101,7 +117,8 @@ provider；云端与原生前端共享同一套 `recall → model → memorize` 
 | **aria-agent-memo** | 端侧/嵌入式**上下文存储**（aria memo / SQLite，与 `aria-memo` CLI 同款 `memories` 表结构），实现 `aria-agent-core::context` 契约。 |
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube / Browser。 |
 | **aria-agent-browser** | 浏览器 sandbox：六镜像 `BrowserCatalog` + `BrowserSandbox`（复用 Docker/Kata）+ 浏览器工具族。 |
-| **aria-agent-core** | 统一的 agent 运行时：`recall → 模型 → memorize`、接缝定义、会话事件流、工具管线。 |
+| **aria-agent-core** | Agent 外壳：`recall → 运行时 → memorize`、接缝定义（含 `agent_loop`）、会话事件流、工具管线、提示词装配。 |
+| **aria-agent-dsh** | `agent_loop` 接缝的 DeepSeek Harness 提供方：stdio JSON-RPC 传输、按会话复用的运行时池、审批/提问桥接、通知 → `AgentEvent` 映射。 |
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
 | **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
@@ -227,7 +244,13 @@ cp .env.example .env
 |------|--------|------|
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres（pgvector）账号与库：元数据 **与** 上下文记忆。 |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
-| `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，用于模型调用；仅 stub/离线可留空。 |
+| `AGENT_HARNESS` | `dsh` | 本轮运行时：`dsh`（DeepSeek Harness）或 `native`（内置 Rust 循环）；未知取值启动即失败。 |
+| `DSH_BIN` | `PATH` 上的 `dsh` | 运行时可执行文件（镜像内为 `/opt/dsh/bin/dsh`）。缺失即给出可操作报错，绝不降级。 |
+| `DSH_HOME_ROOT` | `.aria/dsh` | 每租户/每会话 `DSH_HOME` 的根目录。 |
+| `DSH_POOL_MAX` | `8` | 每租户保留的活跃运行时上限。 |
+| `DSH_IDLE_TTL_SEC` | `900` | 池化运行时被回收前的空闲窗口（会话可凭 `DSH_HOME` 续用）。 |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | _(未设置)_ | 交给 harness 的 OpenAI 兼容端点（如阿里云 Model Studio）。仅显式转发；子进程环境为白名单。 |
+| `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，供 `native` 运行时调用模型；仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
 | `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
@@ -504,7 +527,7 @@ agent 不只是读/写 `aria-agent-memo` 存储——它会在**运行过程中�
 | 事件 | 载荷 |
 |---|---|
 | `agent.turn.created` | `turn{id,status,session_id,agent_id}` |
-| `agent.turn.in_progress` | 阶段边界；额外带 `phase`（`recall` / `model` / `tool_exec` / `loop_guard`）与 `label` |
+| `agent.turn.in_progress` | 阶段边界；额外带 `phase`（`recall` / `harness` / `step` / `model` / `tool_exec` / `loop_guard`）与 `label` |
 | `agent.turn.item.added` | `item` —— `message`（assistant，`role`）或 `function_call`（`name`、`arguments`） |
 | `agent.turn.item.done` | 完成的 `item`；`function_call` 还附带执行结果 `result` |
 | `agent.turn.output_text.delta` | `item_id`、`delta` |
@@ -750,6 +773,10 @@ if (result.usage) console.log(`tokens: ${result.usage.totalTokens}`);
 ```
 
 ### Rust（进程内）
+
+> **运行时选择。** 进程内 SDK 默认使用 `native` 循环（移动端通常没有 `dsh` 二进制）；
+> 设 `ARIA_AGENT_HARNESS=dsh` 可让它们的回合同样跑在 DeepSeek Harness 上。选了 `dsh`
+> 却没有可用运行时会得到可操作报错，绝不降级。
 
 ```rust
 use aria_agent_ffi::{create_agent, SdkAgentListener, SdkStreamEvent};
