@@ -1,6 +1,8 @@
 # Agent platform task runner.
 # Usage: just <recipe>
 
+egress-proxy-image-name := "aria-egress-proxy:local"
+
 # Build all rust crates.
 build:
     cargo build --workspace
@@ -16,17 +18,20 @@ test:
 
 # Real-socket E2E suite. DB/Docker scenarios skip when their dependency is
 # absent; set DATABASE_URL for the Postgres case and ARIA_E2E_DOCKER=1 for the
+
 # Docker case (requires a cached alpine:latest image).
 e2e:
     cargo test -p agent-tests --test e2e_http
 
 # DeepSeek Harness: spawn a scripted fake `dsh` and verify the JSON-RPC
+
 # handshake + turn framing (offline, no credentials).
 dsh-smoke:
     cargo test -p aria-agent-dsh --test stdio -- --nocapture
 
 # DeepSeek Harness live turn. Requires ARIA_DSH_E2E=1, a real `dsh` binary
 # (DSH_BIN) and a provider endpoint + key (DEEPSEEK_BASE_URL/DEEPSEEK_API_KEY,
+
 # e.g. Alibaba Model Studio's OpenAI-compatible route). Skips loudly when unset.
 dsh-e2e:
     ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture
@@ -68,9 +73,10 @@ migrate:
     sqlx migrate run
 
 # Egress proxy image (network enforcement sidecar, ADR-0024).
+
 # The build context is the repo root because the crate is a workspace member.
 egress-proxy-image:
-    docker build -f crates/aria-agent-egress-proxy/Dockerfile -t {{egress-proxy-image-name | default("aria-egress-proxy:local")}} .
+    docker build -f crates/aria-agent-egress-proxy/Dockerfile -t {{ egress-proxy-image-name }} .
 
 # Build the proxy binary only (fast local check, no image).
 egress-proxy-build:
