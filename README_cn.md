@@ -119,7 +119,7 @@ just dsh-e2e    # 真实一轮（需 ARIA_DSH_E2E=1 + DSH_BIN + 供应商密钥�
 | **aria-agent-memo** | 端侧/嵌入式**上下文存储**（aria memo / SQLite，与 `aria-memo` CLI 同款 `memories` 表结构），实现 `aria-agent-core::context` 契约。 |
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube / Browser。 |
 | **aria-agent-browser** | 浏览器 sandbox：六镜像 `BrowserCatalog` + `BrowserSandbox`（复用 Docker/Kata）+ 浏览器工具族。 |
-| **aria-agent-core** | Agent 外壳：`recall → 运行时 → memorize`、接缝定义（含 `agent_loop`）、会话事件流、工具管线、提示词装配。 |
+| **aria-agent-core** | Agent 外壳：`recall → runtime → memorize`、接缝定义（含 `agent_loop`）、会话事件流、工具管线、提示词装配。 |
 | **aria-agent-dsh** | `agent_loop` 接缝的 DeepSeek Harness 提供方：stdio JSON-RPC 传输、按会话复用的运行时池、审批/提问桥接、通知 → `AgentEvent` 映射。 |
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
