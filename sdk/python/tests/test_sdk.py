@@ -312,6 +312,21 @@ class RunnerMaxTurnsTest(unittest.TestCase):
         with self.assertRaises(AriaError) as ctx:
             asyncio.run(main())
         self.assertEqual(ctx.exception.kind, AriaErrorKind.CONFIG)
+        self.assertIn("exceeded maxTurns", str(ctx.exception))
+
+    def test_empty_stream_is_an_error(self):
+        fake_request, _ = self._fake([])
+        agent = Agent(name="tutor", client=ClientOptions(base_url="http://aria.test"))
+
+        async def main():
+            with mock.patch.object(transport, "_request", side_effect=fake_request):
+                streamed = await Runner.run_streamed(agent, "go")
+                await streamed.completed
+
+        with self.assertRaises(AriaError) as ctx:
+            asyncio.run(main())
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.UNKNOWN)
+        self.assertIn("without any event", str(ctx.exception))
 
     def test_failed_frame_surfaces_typed_api_error(self):
         frames = [{"type": "agent.turn.failed", "error": {"message": "boom"}}]

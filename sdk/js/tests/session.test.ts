@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Agent, Session } from "../src/index.js";
 import type { ClientOptions } from "../src/types.js";
+import { AriaError } from "../src/types.js";
 
 function jsonResponse(body: unknown, status = 200) {
   return {
@@ -80,13 +81,24 @@ describe("Session backend guards", () => {
   test("unknown backend override is rejected on memorize and recall", async () => {
     const session = new Session("sess_1", client);
     // @ts-expect-error runtime guard check
-    await expect(session.memorize("k", "v", { backend: "nonsense" })).rejects.toThrow(
-      /unknown memory backend/,
-    );
+    await expect(session.memorize("k", "v", { backend: "nonsense" })).rejects.toMatchObject({
+      kind: "config",
+    });
     // @ts-expect-error runtime guard check
-    await expect(session.recall("k", { backend: "nonsense" })).rejects.toThrow(
-      /unknown memory backend/,
-    );
+    await expect(session.recall("k", { backend: "nonsense" })).rejects.toMatchObject({
+      kind: "config",
+    });
+  });
+
+  test("an unknown configured backend is a typed config error", () => {
+    const build = () => new Session("sess_1", { ...client, backend: "nonsense" as any });
+    expect(build).toThrow(/unknown memory backend/);
+    try {
+      build();
+    } catch (err) {
+      expect(err).toBeInstanceOf(AriaError);
+      expect((err as AriaError).kind).toBe("config");
+    }
   });
 
   test("record appends the user input and assistant reply", () => {

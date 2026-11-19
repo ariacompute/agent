@@ -29,6 +29,8 @@ from .memory import (
     CompositeMemoryStore,
     LocalMemoryStore,
     MemoryBackend,
+    decode_local,
+    encode_local,
 )
 from .runner import Runner
 from .session import Session
@@ -61,6 +63,8 @@ __all__ = [
     "LocalMemoryStore",
     "CloudMemoryStore",
     "CompositeMemoryStore",
+    "encode_local",
+    "decode_local",
     "function_tool",
     "tool_from_function",
     "ClientOptions",

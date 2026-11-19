@@ -16,7 +16,8 @@ kept as an explicit `native` fallback (ADR-0019).
   `aria-agent-plugin` (manifest + registry + freeze),
   `aria-agent-tools` (fs/shell/jobs/terminal/skills/web/ask/plan/todo/memo families),
   `aria-agent-orchestrator` (sub-agents, teams, scheduled jobs), `aria-agent-sandbox`,
-  `aria-agent-memo` (aria memo), `ariacompute-agent`, `aria-agent-cloud`,
+  `aria-agent-memo` (aria memo), `ariacompute-agent` (UniFFI cloud API client
+  for Swift/Kotlin — no embedded runtime), `aria-agent-cloud`,
   `aria-agent-ffigen`, `aria-agent-browser` (browser sandbox: six-image
   `BrowserCatalog` + `BrowserSandbox` + browser tool family)
 * `bindings/swift` (`Package.swift` SwiftPM + `AriaComputeAgent.podspec` CocoaPods),
@@ -49,10 +50,14 @@ kept as an explicit `native` fallback (ADR-0019).
      `ContextFragment`, `FragmentKind`, `RecallQuery`, `LocalEmbedder`,
      `MemoryBackend`, `CompositeContextStore`, ranking helpers). Never bypass it
      with ad-hoc queries.
-2. **FFI is stable.** Only change `ariacompute-agent`'s exported surface
-   deliberately. After any change run `just ffi` and commit the regenerated
-   bindings. See `docs/adr/0002-ffi-boundary.md`. The public SDK ergonomics
-   (session-less happy path) are specified in `docs/adr/0008-sdk-interface.md`.
+2. **Every SDK is a cloud API client — the FFI is stable but not embedded.**
+   `ariacompute-agent` is a thin HTTP client (`AriaAgent` / `Session` / `run` /
+   `runStreamed` / `memorize` / `recall`, JS/Python vocabulary); it must never
+   link `aria-agent-core`, a sandbox, tools or a model client again — device
+   binaries carry no runtime and no provider key. Only change the exported
+   surface deliberately, then run `just ffi` and commit the regenerated bindings.
+   See `docs/adr/0002-ffi-boundary.md`, `docs/adr/0008-sdk-interface.md` and
+   `docs/adr/0020-sdk-cloud-client.md` (the native path was removed).
 3. **Sandbox is pluggable.** Add providers by implementing the `Sandbox` trait
    and registering them in `from_provider`. Docker is the default. The cloud
    default is **docker** (ADR-0003/ADR-0018); Kata/Cube remain available through

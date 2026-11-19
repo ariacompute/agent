@@ -576,6 +576,20 @@ mod tests {
             .unwrap();
         let c = store.compact("s2").await.unwrap();
         assert!(c.content.contains("a") && c.content.contains("b"));
+        // Compacting again reuses the note's id instead of accumulating copies.
+        let again = store.compact("s2").await.unwrap();
+        assert_eq!(again.id, c.id);
+        assert_eq!(
+            store
+                .recall(&agent_core::context::RecallQuery::new(
+                    "s2",
+                    "__compact__s2"
+                ))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(matches!(
             store.compact("ghost").await,
             Err(ContextError::NotFound(_))

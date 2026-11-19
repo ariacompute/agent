@@ -43,7 +43,7 @@ def _validate_max_turns(max_turns: Optional[int]) -> None:
     if max_turns is None:
         return
     if not isinstance(max_turns, int) or max_turns < 1:
-        raise AriaError(f"max_turns must be a positive integer, got {max_turns}", AriaErrorKind.CONFIG)
+        raise AriaError(f"maxTurns must be a positive integer, got {max_turns}", AriaErrorKind.CONFIG)
 
 
 def _to_text(value: HistoryInput) -> str:
@@ -140,7 +140,13 @@ class Runner:
         text = _to_text(input)
 
         cap = max_turns if max_turns is not None else None
-        state: dict[str, Any] = {"text": "", "turn_id": None, "error": None, "usage": None}
+        state: dict[str, Any] = {
+            "text": "",
+            "turn_id": None,
+            "error": None,
+            "kind": None,
+            "usage": None,
+        }
         buffered: list[dict[str, Any]] = []
         drained = asyncio.Event()
 
@@ -158,21 +164,30 @@ class Runner:
                 state["usage"] = _token_usage(frame)
             elif kind == "agent.turn.failed":
                 state["error"] = (frame.get("error") or {}).get("message") or "run failed"
+                state["kind"] = AriaErrorKind.API
 
         async def _drain() -> None:
             turns = 0
+            seen = 0
             async for frame in async_stream_json(
                 resolved,
                 f"/v1/agents/sessions/{sess.id}/events/stream",
                 {"input": text},
             ):
+                seen += 1
                 buffered.append(frame)
                 if frame.get("type") == "agent.turn.created" and cap is not None:
                     turns += 1
                     if turns > cap:
-                        state["error"] = f"exceeded max_turns ({cap})"
+                        state["error"] = f"exceeded maxTurns ({cap})"
+                        state["kind"] = AriaErrorKind.CONFIG
                         break
                 _note(frame)
+            if seen == 0:
+                # Same contract as Rust / Swift / Kotlin: no frames is an error,
+                # never an empty answer.
+                state["error"] = "the stream ended without any event"
+                state["kind"] = AriaErrorKind.UNKNOWN
             drained.set()
 
         drain_task = asyncio.ensure_future(_drain())
@@ -185,12 +200,7 @@ class Runner:
         async def completed() -> RunResult:
             await asyncio.shield(drain_task)
             if state["error"]:
-                kind = (
-                    AriaErrorKind.CONFIG
-                    if str(state["error"]).startswith("exceeded max_turns")
-                    else AriaErrorKind.API
-                )
-                raise AriaError(state["error"], kind)
+                raise AriaError(state["error"], state["kind"] or AriaErrorKind.API)
             sess.record(input, state["text"])
             return RunResult(
                 final_output=state["text"],

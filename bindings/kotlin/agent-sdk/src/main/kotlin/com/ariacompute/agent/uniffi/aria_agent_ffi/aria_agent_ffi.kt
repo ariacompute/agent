@@ -654,25 +654,33 @@ internal open class UniffiForeignFutureStructVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
 }
-internal interface UniffiCallbackInterfaceSdkAgentListenerMethod0 : com.sun.jna.Callback {
+internal interface UniffiCallbackInterfaceStreamListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 @Structure.FieldOrder("onEvent", "uniffiFree")
-internal open class UniffiVTableCallbackInterfaceSdkAgentListener(
-    @JvmField internal var `onEvent`: UniffiCallbackInterfaceSdkAgentListenerMethod0? = null,
+internal open class UniffiVTableCallbackInterfaceStreamListener(
+    @JvmField internal var `onEvent`: UniffiCallbackInterfaceStreamListenerMethod0? = null,
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
 ) : Structure() {
     class UniffiByValue(
-        `onEvent`: UniffiCallbackInterfaceSdkAgentListenerMethod0? = null,
+        `onEvent`: UniffiCallbackInterfaceStreamListenerMethod0? = null,
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    ): UniffiVTableCallbackInterfaceSdkAgentListener(`onEvent`,`uniffiFree`,), Structure.ByValue
+    ): UniffiVTableCallbackInterfaceStreamListener(`onEvent`,`uniffiFree`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceSdkAgentListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceStreamListener) {
         `onEvent` = other.`onEvent`
         `uniffiFree` = other.`uniffiFree`
     }
 
 }
+
+
+
+
+
+
+
+
 
 
 
@@ -771,7 +779,7 @@ internal interface UniffiLib : Library {
             .also { lib: UniffiLib ->
                 uniffiCheckContractApiVersion(lib)
                 uniffiCheckApiChecksums(lib)
-                uniffiCallbackInterfaceSdkAgentListener.register(lib)
+                uniffiCallbackInterfaceStreamListener.register(lib)
                 }
         }
         
@@ -781,40 +789,48 @@ internal interface UniffiLib : Library {
         }
     }
 
-    fun uniffi_aria_agent_ffi_fn_clone_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_clone_ariaagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_aria_agent_ffi_fn_free_sdkagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_free_ariaagent(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_constructor_ariaagent_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_create_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_id(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_aria_agent_ffi_fn_method_sdkagent_run(`ptr`: Pointer,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_model(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(`ptr`: Pointer,`input`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_name(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_run(`ptr`: Pointer,`input`: RustBuffer.ByValue,`session`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_run_streamed(`ptr`: Pointer,`input`: RustBuffer.ByValue,`session`: RustBuffer.ByValue,`listener`: Long,`maxTurns`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_ariaagent_session(`ptr`: Pointer,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_clone_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_free_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_aria_agent_ffi_fn_method_sdkagent_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_session_history_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_aria_agent_ffi_fn_clone_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_aria_agent_ffi_fn_free_sdksession(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_aria_agent_ffi_fn_method_sdksession_memorize(`ptr`: Pointer,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,`backend`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_session_id(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_aria_agent_ffi_fn_method_sdksession_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,`backend`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_aria_agent_ffi_fn_method_session_items_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(`vtable`: UniffiVTableCallbackInterfaceSdkAgentListener,
+    fun uniffi_aria_agent_ffi_fn_method_session_memorize(`ptr`: Pointer,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,`backend`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_aria_agent_ffi_fn_func_create_agent(`agentName`: RustBuffer.ByValue,`model`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(`tenantId`: RustBuffer.ByValue,`agentName`: RustBuffer.ByValue,`model`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(`tenantId`: RustBuffer.ByValue,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_aria_agent_ffi_fn_func_create_agent_with(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
+    fun uniffi_aria_agent_ffi_fn_method_session_memory_backend(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_session_recall(`ptr`: Pointer,`key`: RustBuffer.ByValue,`backend`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_session_title_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_method_session_turns_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_aria_agent_ffi_fn_init_callback_vtable_streamlistener(`vtable`: UniffiVTableCallbackInterfaceStreamListener,
+    ): Unit
     fun ffi_aria_agent_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun ffi_aria_agent_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -927,31 +943,39 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_aria_agent_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_aria_agent_ffi_checksum_func_create_agent(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_create_session(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_id(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_model(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_func_create_agent_with(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_name(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_run(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_run_streamed(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream(
+    fun uniffi_aria_agent_ffi_checksum_method_ariaagent_session(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session(
+    fun uniffi_aria_agent_ffi_checksum_method_session_history_json(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id(
+    fun uniffi_aria_agent_ffi_checksum_method_session_id(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdksession_memorize(
+    fun uniffi_aria_agent_ffi_checksum_method_session_items_json(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend(
+    fun uniffi_aria_agent_ffi_checksum_method_session_memorize(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdksession_recall(
+    fun uniffi_aria_agent_ffi_checksum_method_session_memory_backend(
     ): Short
-    fun uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event(
+    fun uniffi_aria_agent_ffi_checksum_method_session_recall(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_session_title_json(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_session_turns_json(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_constructor_ariaagent_new(
+    ): Short
+    fun uniffi_aria_agent_ffi_checksum_method_streamlistener_on_event(
     ): Short
     fun ffi_aria_agent_ffi_uniffi_contract_version(
     ): Int
@@ -970,43 +994,55 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent() != 7131.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_create_session() != 42681.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 41014.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_id() != 64714.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_model() != 9045.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 4189.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_name() != 63890.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend() != 43728.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_run() != 22267.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_run_streamed() != 29547.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream() != 38484.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_ariaagent_session() != 13572.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_history_json() != 34945.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 6609.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_id() != 27291.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 5103.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_items_json() != 56341.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend() != 60477.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_memorize() != 58482.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 29904.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_memory_backend() != 24047.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event() != 35179.toShort()) {
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_recall() != 15671.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_title_json() != 26916.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_session_turns_json() != 32062.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_constructor_ariaagent_new() != 30406.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_aria_agent_ffi_checksum_method_streamlistener_on_event() != 41112.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1059,23 +1095,46 @@ object NoPointer
 /**
  * @suppress
  */
-public object FfiConverterULong: FfiConverter<ULong, Long> {
-    override fun lift(value: Long): ULong {
-        return value.toULong()
+public object FfiConverterUShort: FfiConverter<UShort, Short> {
+    override fun lift(value: Short): UShort {
+        return value.toUShort()
     }
 
-    override fun read(buf: ByteBuffer): ULong {
-        return lift(buf.getLong())
+    override fun read(buf: ByteBuffer): UShort {
+        return lift(buf.getShort())
     }
 
-    override fun lower(value: ULong): Long {
-        return value.toLong()
+    override fun lower(value: UShort): Short {
+        return value.toShort()
     }
 
-    override fun allocationSize(value: ULong) = 8UL
+    override fun allocationSize(value: UShort) = 2UL
 
-    override fun write(value: ULong, buf: ByteBuffer) {
-        buf.putLong(value.toLong())
+    override fun write(value: UShort, buf: ByteBuffer) {
+        buf.putShort(value.toShort())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
     }
 }
 
@@ -1299,46 +1358,58 @@ private class JavaLangRefCleanable(
     override fun clean() = cleanable.clean()
 }
 /**
- * A native agent handle. Construct via [`create_agent`].
+ * The agent definition plus its client configuration.
  */
-public interface SdkAgentInterface {
+public interface AriaAgentInterface {
     
     /**
-     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     * Create a server-side session bound to this agent.
      */
-    fun `memoryBackend`(): kotlin.String
+    fun `createSession`(): Session
     
     /**
-     * Run a single turn and return the assistant reply.
+     * The cloud agent id, when the caller supplied one.
      */
-    fun `run`(`input`: kotlin.String): kotlin.String
+    fun `id`(): kotlin.String?
     
     /**
-     * Run a single agentic turn, streaming events to `listener` as they arrive.
-     * The call blocks until the run terminates (a `Done` or `Error` event). The
-     * memo contract (recall before / persist both turns after) is honored by the
-     * underlying runtime.
+     * The configured model, if any.
      */
-    fun `runStream`(`input`: kotlin.String, `listener`: SdkAgentListener)
+    fun `model`(): kotlin.String?
     
     /**
-     * Get the session memory handle for this agent.
+     * The agent's name.
      */
-    fun `session`(): SdkSession
+    fun `name`(): kotlin.String
     
     /**
-     * The auto-assigned session id (context scope). Useful when relaying a run
-     * to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
+     * Run one turn to completion (`POST …/events`).
+     *
+     * `session` is created on demand when `None`.
      */
-    fun `sessionId`(): kotlin.String
+    fun `run`(`input`: kotlin.String, `session`: Session?): RunResult
+    
+    /**
+     * Run one turn, streaming every `agent.*` frame to `listener`.
+     *
+     * Returns once the terminal frame arrives. `max_turns` is a client-side
+     * safety cap on `agent.turn.created` frames (the cloud controls multi-step
+     * execution); it must be a positive integer when provided.
+     */
+    fun `runStreamed`(`input`: kotlin.String, `session`: Session?, `listener`: StreamListener, `maxTurns`: kotlin.UInt?): RunResult
+    
+    /**
+     * Wrap an existing server-side session id.
+     */
+    fun `session`(`id`: kotlin.String): Session
     
     companion object
 }
 
 /**
- * A native agent handle. Construct via [`create_agent`].
+ * The agent definition plus its client configuration.
  */
-open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
+open class AriaAgent: Disposable, AutoCloseable, AriaAgentInterface {
 
     constructor(pointer: Pointer) {
         this.pointer = pointer
@@ -1355,6 +1426,16 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
         this.pointer = null
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
     }
+    /**
+     * Validate the config and resolve the client (config → env → defaults).
+     */
+    constructor(`config`: AriaAgentConfig) :
+        this(
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_constructor_ariaagent_new(
+        FfiConverterTypeAriaAgentConfig.lower(`config`),_status)
+}
+    )
 
     protected val pointer: Pointer?
     protected val cleanable: UniffiCleaner.Cleanable
@@ -1407,7 +1488,7 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_free_sdkagent(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_free_ariaagent(ptr, status)
                 }
             }
         }
@@ -1415,35 +1496,20 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_sdkagent(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_ariaagent(pointer!!, status)
         }
     }
 
     
     /**
-     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
-     */override fun `memoryBackend`(): kotlin.String {
-            return FfiConverterString.lift(
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(
-        it, _status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * Run a single turn and return the assistant reply.
+     * Create a server-side session bound to this agent.
      */
-    @Throws(SdkException::class)override fun `run`(`input`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+    @Throws(AriaException::class)override fun `createSession`(): Session {
+            return FfiConverterTypeSession.lift(
     callWithPointer {
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_run(
-        it, FfiConverterString.lower(`input`),_status)
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_create_session(
+        it, _status)
 }
     }
     )
@@ -1452,31 +1518,61 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
 
     
     /**
-     * Run a single agentic turn, streaming events to `listener` as they arrive.
-     * The call blocks until the run terminates (a `Done` or `Error` event). The
-     * memo contract (recall before / persist both turns after) is honored by the
-     * underlying runtime.
+     * The cloud agent id, when the caller supplied one.
+     */override fun `id`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_id(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The configured model, if any.
+     */override fun `model`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_model(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The agent's name.
+     */override fun `name`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_name(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Run one turn to completion (`POST …/events`).
+     *
+     * `session` is created on demand when `None`.
      */
-    @Throws(SdkException::class)override fun `runStream`(`input`: kotlin.String, `listener`: SdkAgentListener)
-        = 
+    @Throws(AriaException::class)override fun `run`(`input`: kotlin.String, `session`: Session?): RunResult {
+            return FfiConverterTypeRunResult.lift(
     callWithPointer {
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(
-        it, FfiConverterString.lower(`input`),FfiConverterTypeSdkAgentListener.lower(`listener`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * Get the session memory handle for this agent.
-     */override fun `session`(): SdkSession {
-            return FfiConverterTypeSdkSession.lift(
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_session(
-        it, _status)
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_run(
+        it, FfiConverterString.lower(`input`),FfiConverterOptionalTypeSession.lower(`session`),_status)
 }
     }
     )
@@ -1485,14 +1581,34 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
 
     
     /**
-     * The auto-assigned session id (context scope). Useful when relaying a run
-     * to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
-     */override fun `sessionId`(): kotlin.String {
-            return FfiConverterString.lift(
+     * Run one turn, streaming every `agent.*` frame to `listener`.
+     *
+     * Returns once the terminal frame arrives. `max_turns` is a client-side
+     * safety cap on `agent.turn.created` frames (the cloud controls multi-step
+     * execution); it must be a positive integer when provided.
+     */
+    @Throws(AriaException::class)override fun `runStreamed`(`input`: kotlin.String, `session`: Session?, `listener`: StreamListener, `maxTurns`: kotlin.UInt?): RunResult {
+            return FfiConverterTypeRunResult.lift(
     callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(
-        it, _status)
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_run_streamed(
+        it, FfiConverterString.lower(`input`),FfiConverterOptionalTypeSession.lower(`session`),FfiConverterTypeStreamListener.lower(`listener`),FfiConverterOptionalUInt.lower(`maxTurns`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Wrap an existing server-side session id.
+     */
+    @Throws(AriaException::class)override fun `session`(`id`: kotlin.String): Session {
+            return FfiConverterTypeSession.lift(
+    callWithPointer {
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_ariaagent_session(
+        it, FfiConverterString.lower(`id`),_status)
 }
     }
     )
@@ -1510,25 +1626,25 @@ open class SdkAgent: Disposable, AutoCloseable, SdkAgentInterface {
 /**
  * @suppress
  */
-public object FfiConverterTypeSdkAgent: FfiConverter<SdkAgent, Pointer> {
+public object FfiConverterTypeAriaAgent: FfiConverter<AriaAgent, Pointer> {
 
-    override fun lower(value: SdkAgent): Pointer {
+    override fun lower(value: AriaAgent): Pointer {
         return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Pointer): SdkAgent {
-        return SdkAgent(value)
+    override fun lift(value: Pointer): AriaAgent {
+        return AriaAgent(value)
     }
 
-    override fun read(buf: ByteBuffer): SdkAgent {
+    override fun read(buf: ByteBuffer): AriaAgent {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
     }
 
-    override fun allocationSize(value: SdkAgent) = 8UL
+    override fun allocationSize(value: AriaAgent) = 8UL
 
-    override fun write(value: SdkAgent, buf: ByteBuffer) {
+    override fun write(value: AriaAgent, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -1635,44 +1751,57 @@ public object FfiConverterTypeSdkAgent: FfiConverter<SdkAgent, Pointer> {
 
 
 /**
- * A session's context handle (long-term / externalized memory).
- *
- * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
- * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
- * override it for a single call.
+ * A server-side session: conversation id plus its keyed memory.
  */
-public interface SdkSessionInterface {
+public interface SessionInterface {
     
     /**
-     * Write a long-term memory under `key`.
-     *
-     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
-     * this call; pass `null` to use the default.
+     * The client-side conversation mirror (`[{role, content}]`).
+     */
+    fun `historyJson`(): kotlin.String
+    
+    /**
+     * The server-side session id.
+     */
+    fun `id`(): kotlin.String
+    
+    /**
+     * `GET …/items` as a JSON array.
+     */
+    fun `itemsJson`(): kotlin.String
+    
+    /**
+     * Write one keyed long-term memory (`backend` overrides the default).
      */
     fun `memorize`(`key`: kotlin.String, `value`: kotlin.String, `backend`: kotlin.String?)
     
     /**
-     * The backend this session defaults to (`cloud` / `local` / `both`).
+     * The memory backend used when a call does not override it.
      */
     fun `memoryBackend`(): kotlin.String
     
     /**
-     * Read a long-term memory by `key` (same `backend` override as
-     * [`SdkSession::memorize`]).
+     * Read one keyed long-term memory (`None` when the key is missing).
      */
     fun `recall`(`key`: kotlin.String, `backend`: kotlin.String?): kotlin.String?
+    
+    /**
+     * `GET …/title` as a JSON object (404 before the first turn).
+     */
+    fun `titleJson`(): kotlin.String
+    
+    /**
+     * `GET …/turns` as a JSON array.
+     */
+    fun `turnsJson`(): kotlin.String
     
     companion object
 }
 
 /**
- * A session's context handle (long-term / externalized memory).
- *
- * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
- * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
- * override it for a single call.
+ * A server-side session: conversation id plus its keyed memory.
  */
-open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
+open class Session: Disposable, AutoCloseable, SessionInterface {
 
     constructor(pointer: Pointer) {
         this.pointer = pointer
@@ -1741,7 +1870,7 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_free_sdksession(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_free_session(ptr, status)
                 }
             }
         }
@@ -1749,36 +1878,18 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_sdksession(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_clone_session(pointer!!, status)
         }
     }
 
     
     /**
-     * Write a long-term memory under `key`.
-     *
-     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
-     * this call; pass `null` to use the default.
-     */
-    @Throws(SdkException::class)override fun `memorize`(`key`: kotlin.String, `value`: kotlin.String, `backend`: kotlin.String?)
-        = 
-    callWithPointer {
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_memorize(
-        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`value`),FfiConverterOptionalString.lower(`backend`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * The backend this session defaults to (`cloud` / `local` / `both`).
-     */override fun `memoryBackend`(): kotlin.String {
+     * The client-side conversation mirror (`[{role, content}]`).
+     */override fun `historyJson`(): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_history_json(
         it, _status)
 }
     }
@@ -1788,15 +1899,107 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 
     
     /**
-     * Read a long-term memory by `key` (same `backend` override as
-     * [`SdkSession::memorize`]).
+     * The server-side session id.
+     */override fun `id`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_id(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * `GET …/items` as a JSON array.
      */
-    @Throws(SdkException::class)override fun `recall`(`key`: kotlin.String, `backend`: kotlin.String?): kotlin.String? {
+    @Throws(AriaException::class)override fun `itemsJson`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_items_json(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Write one keyed long-term memory (`backend` overrides the default).
+     */
+    @Throws(AriaException::class)override fun `memorize`(`key`: kotlin.String, `value`: kotlin.String, `backend`: kotlin.String?)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_memorize(
+        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`value`),FfiConverterOptionalString.lower(`backend`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * The memory backend used when a call does not override it.
+     */override fun `memoryBackend`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_memory_backend(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Read one keyed long-term memory (`None` when the key is missing).
+     */
+    @Throws(AriaException::class)override fun `recall`(`key`: kotlin.String, `backend`: kotlin.String?): kotlin.String? {
             return FfiConverterOptionalString.lift(
     callWithPointer {
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_sdksession_recall(
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_recall(
         it, FfiConverterString.lower(`key`),FfiConverterOptionalString.lower(`backend`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * `GET …/title` as a JSON object (404 before the first turn).
+     */
+    @Throws(AriaException::class)override fun `titleJson`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_title_json(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * `GET …/turns` as a JSON array.
+     */
+    @Throws(AriaException::class)override fun `turnsJson`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(AriaException) { _status ->
+    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_method_session_turns_json(
+        it, _status)
 }
     }
     )
@@ -1814,25 +2017,25 @@ open class SdkSession: Disposable, AutoCloseable, SdkSessionInterface {
 /**
  * @suppress
  */
-public object FfiConverterTypeSdkSession: FfiConverter<SdkSession, Pointer> {
+public object FfiConverterTypeSession: FfiConverter<Session, Pointer> {
 
-    override fun lower(value: SdkSession): Pointer {
+    override fun lower(value: Session): Pointer {
         return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Pointer): SdkSession {
-        return SdkSession(value)
+    override fun lift(value: Pointer): Session {
+        return Session(value)
     }
 
-    override fun read(buf: ByteBuffer): SdkSession {
+    override fun read(buf: ByteBuffer): Session {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
     }
 
-    override fun allocationSize(value: SdkSession) = 8UL
+    override fun allocationSize(value: Session) = 8UL
 
-    override fun write(value: SdkSession, buf: ByteBuffer) {
+    override fun write(value: Session, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -1842,26 +2045,33 @@ public object FfiConverterTypeSdkSession: FfiConverter<SdkSession, Pointer> {
 
 
 /**
- * SDK-side agent configuration (advanced path). `session` is intentionally
- * absent: the runtime assigns one isolated context scope per agent instance.
- *
- * Agent definition: name + instructions + model.
+ * The agent definition sent to the cloud (name, instructions, model).
  */
-data class SdkAgentConfig (
-    var `agentName`: kotlin.String, 
-    var `instructions`: kotlin.String, 
-    var `model`: kotlin.String, 
-    var `sandboxProvider`: kotlin.String, 
-    var `memory`: SdkMemoryConfig, 
+data class AriaAgentConfig (
     /**
-     * `read_only` | `workspace_write` | `danger_full_access` (default
-     * `workspace_write`, the trusted-local preset).
+     * Display name; the cloud resolves or creates the agent by name.
      */
-    var `permissionPreset`: kotlin.String, 
+    var `name`: kotlin.String, 
     /**
-     * `auto` (default, trusted local run) | `deny` (fail-closed).
+     * Instructions appended to the agent's base prompt.
      */
-    var `approvalMode`: kotlin.String
+    var `instructions`: kotlin.String?, 
+    /**
+     * Model override (provider-specific id).
+     */
+    var `model`: kotlin.String?, 
+    /**
+     * Existing cloud agent id (skips the name lookup).
+     */
+    var `id`: kotlin.String?, 
+    /**
+     * Client configuration.
+     */
+    var `client`: ClientOptions?, 
+    /**
+     * Memory configuration inherited by sessions created from this agent.
+     */
+    var `memory`: MemoryConfig?
 ) {
     
     companion object
@@ -1870,66 +2080,56 @@ data class SdkAgentConfig (
 /**
  * @suppress
  */
-public object FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer<SdkAgentConfig> {
-    override fun read(buf: ByteBuffer): SdkAgentConfig {
-        return SdkAgentConfig(
+public object FfiConverterTypeAriaAgentConfig: FfiConverterRustBuffer<AriaAgentConfig> {
+    override fun read(buf: ByteBuffer): AriaAgentConfig {
+        return AriaAgentConfig(
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterTypeSdkMemoryConfig.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeClientOptions.read(buf),
+            FfiConverterOptionalTypeMemoryConfig.read(buf),
         )
     }
 
-    override fun allocationSize(value: SdkAgentConfig) = (
-            FfiConverterString.allocationSize(value.`agentName`) +
-            FfiConverterString.allocationSize(value.`instructions`) +
-            FfiConverterString.allocationSize(value.`model`) +
-            FfiConverterString.allocationSize(value.`sandboxProvider`) +
-            FfiConverterTypeSdkMemoryConfig.allocationSize(value.`memory`) +
-            FfiConverterString.allocationSize(value.`permissionPreset`) +
-            FfiConverterString.allocationSize(value.`approvalMode`)
+    override fun allocationSize(value: AriaAgentConfig) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`instructions`) +
+            FfiConverterOptionalString.allocationSize(value.`model`) +
+            FfiConverterOptionalString.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeClientOptions.allocationSize(value.`client`) +
+            FfiConverterOptionalTypeMemoryConfig.allocationSize(value.`memory`)
     )
 
-    override fun write(value: SdkAgentConfig, buf: ByteBuffer) {
-            FfiConverterString.write(value.`agentName`, buf)
-            FfiConverterString.write(value.`instructions`, buf)
-            FfiConverterString.write(value.`model`, buf)
-            FfiConverterString.write(value.`sandboxProvider`, buf)
-            FfiConverterTypeSdkMemoryConfig.write(value.`memory`, buf)
-            FfiConverterString.write(value.`permissionPreset`, buf)
-            FfiConverterString.write(value.`approvalMode`, buf)
+    override fun write(value: AriaAgentConfig, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`instructions`, buf)
+            FfiConverterOptionalString.write(value.`model`, buf)
+            FfiConverterOptionalString.write(value.`id`, buf)
+            FfiConverterOptionalTypeClientOptions.write(value.`client`, buf)
+            FfiConverterOptionalTypeMemoryConfig.write(value.`memory`, buf)
     }
 }
 
 
 
 /**
- * Where the agent's memory context lives.
- *
- * `backend` is `cloud` | `local` | `both` (unknown values fall back to
- * `local`, the offline-first default for the native SDK).
+ * Where the client points and how it authenticates.
  */
-data class SdkMemoryConfig (
+data class ClientOptions (
     /**
-     * `cloud` | `local` | `both`.
+     * Base URL of the cloud service (default `ARIA_AGENT_BASE_URL`, else
+     * `http://localhost:3000`).
      */
-    var `backend`: kotlin.String, 
+    var `baseUrl`: kotlin.String?, 
     /**
-     * aria memo database path (empty ⇒ a temporary per-process database).
+     * API key sent as `Authorization: Bearer <key>` (default `ARIA_AGENT_API_KEY`).
      */
-    var `localDbPath`: kotlin.String, 
+    var `apiKey`: kotlin.String?, 
     /**
-     * agent-cloud base URL for the `cloud` / `both` backends
-     * (empty ⇒ `ARIA_AGENT_BASE_URL` or `http://localhost:3000`).
+     * Override the `OpenAI-Beta` header (default `agents=v1`).
      */
-    var `cloudBaseUrl`: kotlin.String, 
-    /**
-     * API key for the cloud backend (empty ⇒ `ARIA_AGENT_API_KEY`).
-     */
-    var `cloudApiKey`: kotlin.String
+    var `betaHeader`: kotlin.String?
 ) {
     
     companion object
@@ -1938,28 +2138,291 @@ data class SdkMemoryConfig (
 /**
  * @suppress
  */
-public object FfiConverterTypeSdkMemoryConfig: FfiConverterRustBuffer<SdkMemoryConfig> {
-    override fun read(buf: ByteBuffer): SdkMemoryConfig {
-        return SdkMemoryConfig(
+public object FfiConverterTypeClientOptions: FfiConverterRustBuffer<ClientOptions> {
+    override fun read(buf: ByteBuffer): ClientOptions {
+        return ClientOptions(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ClientOptions) = (
+            FfiConverterOptionalString.allocationSize(value.`baseUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`apiKey`) +
+            FfiConverterOptionalString.allocationSize(value.`betaHeader`)
+    )
+
+    override fun write(value: ClientOptions, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`baseUrl`, buf)
+            FfiConverterOptionalString.write(value.`apiKey`, buf)
+            FfiConverterOptionalString.write(value.`betaHeader`, buf)
+    }
+}
+
+
+
+/**
+ * Memory backend configuration shared by the agent and its sessions.
+ */
+data class MemoryConfig (
+    /**
+     * Default backend for `memorize` / `recall`: `cloud` | `local` | `both`.
+     */
+    var `backend`: kotlin.String?, 
+    /**
+     * `aria-memo` binary for the local backend (default `aria-memo`, or
+     * `ARIA_MEMO_BIN`).
+     */
+    var `memoBin`: kotlin.String?, 
+    /**
+     * aria memo database path (default `memo.db`, or `ARIA_MEMO_DB`).
+     */
+    var `memoDb`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMemoryConfig: FfiConverterRustBuffer<MemoryConfig> {
+    override fun read(buf: ByteBuffer): MemoryConfig {
+        return MemoryConfig(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MemoryConfig) = (
+            FfiConverterOptionalString.allocationSize(value.`backend`) +
+            FfiConverterOptionalString.allocationSize(value.`memoBin`) +
+            FfiConverterOptionalString.allocationSize(value.`memoDb`)
+    )
+
+    override fun write(value: MemoryConfig, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`backend`, buf)
+            FfiConverterOptionalString.write(value.`memoBin`, buf)
+            FfiConverterOptionalString.write(value.`memoDb`, buf)
+    }
+}
+
+
+
+/**
+ * Result of a completed run.
+ */
+data class RunResult (
+    /**
+     * The assistant's final reply.
+     */
+    var `finalOutput`: kotlin.String, 
+    /**
+     * Server-side session id (reuse it to continue the conversation).
+     */
+    var `sessionId`: kotlin.String, 
+    /**
+     * Server-side turn id, when the server reported one.
+     */
+    var `turnId`: kotlin.String?, 
+    /**
+     * Accumulated token usage, when the server reported it.
+     */
+    var `usage`: TokenUsage?, 
+    /**
+     * Conversation mirror as a JSON array of `{role, content}`.
+     */
+    var `historyJson`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRunResult: FfiConverterRustBuffer<RunResult> {
+    override fun read(buf: ByteBuffer): RunResult {
+        return RunResult(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeTokenUsage.read(buf),
             FfiConverterString.read(buf),
         )
     }
 
-    override fun allocationSize(value: SdkMemoryConfig) = (
-            FfiConverterString.allocationSize(value.`backend`) +
-            FfiConverterString.allocationSize(value.`localDbPath`) +
-            FfiConverterString.allocationSize(value.`cloudBaseUrl`) +
-            FfiConverterString.allocationSize(value.`cloudApiKey`)
+    override fun allocationSize(value: RunResult) = (
+            FfiConverterString.allocationSize(value.`finalOutput`) +
+            FfiConverterString.allocationSize(value.`sessionId`) +
+            FfiConverterOptionalString.allocationSize(value.`turnId`) +
+            FfiConverterOptionalTypeTokenUsage.allocationSize(value.`usage`) +
+            FfiConverterString.allocationSize(value.`historyJson`)
     )
 
-    override fun write(value: SdkMemoryConfig, buf: ByteBuffer) {
-            FfiConverterString.write(value.`backend`, buf)
-            FfiConverterString.write(value.`localDbPath`, buf)
-            FfiConverterString.write(value.`cloudBaseUrl`, buf)
-            FfiConverterString.write(value.`cloudApiKey`, buf)
+    override fun write(value: RunResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`finalOutput`, buf)
+            FfiConverterString.write(value.`sessionId`, buf)
+            FfiConverterOptionalString.write(value.`turnId`, buf)
+            FfiConverterOptionalTypeTokenUsage.write(value.`usage`, buf)
+            FfiConverterString.write(value.`historyJson`, buf)
+    }
+}
+
+
+
+/**
+ * One decoded streaming event (`agent.*` frame).
+ *
+ * `kind` is the frame type; the remaining fields are populated per kind and
+ * `raw_json` always carries the untouched frame for anything not modelled here.
+ */
+data class StreamEvent (
+    /**
+     * e.g. `agent.turn.output_text.delta`.
+     */
+    var `kind`: kotlin.String, 
+    var `turnId`: kotlin.String?, 
+    /**
+     * `recall` / `harness` / `step` / `model` / `tool_exec` / `loop_guard`.
+     */
+    var `phase`: kotlin.String?, 
+    var `label`: kotlin.String?, 
+    /**
+     * Text increment for `agent.turn.output_text.delta`.
+     */
+    var `delta`: kotlin.String?, 
+    /**
+     * Full text for `agent.turn.output_text.done`.
+     */
+    var `text`: kotlin.String?, 
+    /**
+     * `item` object (JSON) for `agent.turn.item.added` / `.done`.
+     */
+    var `itemJson`: kotlin.String?, 
+    var `tool`: kotlin.String?, 
+    /**
+     * `allow` / `deny` / `unavailable`.
+     */
+    var `decision`: kotlin.String?, 
+    var `reason`: kotlin.String?, 
+    /**
+     * Error message for `agent.turn.failed`.
+     */
+    var `error`: kotlin.String?, 
+    /**
+     * Final output for `agent.turn.completed`.
+     */
+    var `output`: kotlin.String?, 
+    /**
+     * The untouched frame as JSON.
+     */
+    var `rawJson`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeStreamEvent: FfiConverterRustBuffer<StreamEvent> {
+    override fun read(buf: ByteBuffer): StreamEvent {
+        return StreamEvent(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: StreamEvent) = (
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterOptionalString.allocationSize(value.`turnId`) +
+            FfiConverterOptionalString.allocationSize(value.`phase`) +
+            FfiConverterOptionalString.allocationSize(value.`label`) +
+            FfiConverterOptionalString.allocationSize(value.`delta`) +
+            FfiConverterOptionalString.allocationSize(value.`text`) +
+            FfiConverterOptionalString.allocationSize(value.`itemJson`) +
+            FfiConverterOptionalString.allocationSize(value.`tool`) +
+            FfiConverterOptionalString.allocationSize(value.`decision`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`) +
+            FfiConverterOptionalString.allocationSize(value.`error`) +
+            FfiConverterOptionalString.allocationSize(value.`output`) +
+            FfiConverterString.allocationSize(value.`rawJson`)
+    )
+
+    override fun write(value: StreamEvent, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterOptionalString.write(value.`turnId`, buf)
+            FfiConverterOptionalString.write(value.`phase`, buf)
+            FfiConverterOptionalString.write(value.`label`, buf)
+            FfiConverterOptionalString.write(value.`delta`, buf)
+            FfiConverterOptionalString.write(value.`text`, buf)
+            FfiConverterOptionalString.write(value.`itemJson`, buf)
+            FfiConverterOptionalString.write(value.`tool`, buf)
+            FfiConverterOptionalString.write(value.`decision`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+            FfiConverterOptionalString.write(value.`error`, buf)
+            FfiConverterOptionalString.write(value.`output`, buf)
+            FfiConverterString.write(value.`rawJson`, buf)
+    }
+}
+
+
+
+/**
+ * Token accounting reported for a run.
+ */
+data class TokenUsage (
+    var `inputTokens`: kotlin.UInt, 
+    var `outputTokens`: kotlin.UInt, 
+    var `totalTokens`: kotlin.UInt, 
+    /**
+     * Model the provider reported (may differ from the requested one).
+     */
+    var `model`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTokenUsage: FfiConverterRustBuffer<TokenUsage> {
+    override fun read(buf: ByteBuffer): TokenUsage {
+        return TokenUsage(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TokenUsage) = (
+            FfiConverterUInt.allocationSize(value.`inputTokens`) +
+            FfiConverterUInt.allocationSize(value.`outputTokens`) +
+            FfiConverterUInt.allocationSize(value.`totalTokens`) +
+            FfiConverterOptionalString.allocationSize(value.`model`)
+    )
+
+    override fun write(value: TokenUsage, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`inputTokens`, buf)
+            FfiConverterUInt.write(value.`outputTokens`, buf)
+            FfiConverterUInt.write(value.`totalTokens`, buf)
+            FfiConverterOptionalString.write(value.`model`, buf)
     }
 }
 
@@ -1967,19 +2430,72 @@ public object FfiConverterTypeSdkMemoryConfig: FfiConverterRustBuffer<SdkMemoryC
 
 
 
-sealed class SdkException: kotlin.Exception() {
+/**
+ * Typed error surfaced to Swift/Kotlin. Every transport failure is normalised so
+ * callers branch on the variant instead of matching message strings.
+ */
+sealed class AriaException: kotlin.Exception() {
     
-    class Core(
+    /**
+     * Bad configuration (missing name, unknown backend, unparseable URL, …).
+     */
+    class Config(
         
-        val v1: kotlin.String
-        ) : SdkException() {
+        val `message`: kotlin.String
+        ) : AriaException() {
         override val message
-            get() = "v1=${ v1 }"
+            get() = "message=${ `message` }"
+    }
+    
+    /**
+     * The server rejected the API key (`401` / `403`).
+     */
+    class Auth(
+        
+        val `message`: kotlin.String
+        ) : AriaException() {
+        override val message
+            get() = "message=${ `message` }"
+    }
+    
+    /**
+     * The request never reached the server (DNS, TLS, timeout, refused, …).
+     */
+    class Network(
+        
+        val `message`: kotlin.String
+        ) : AriaException() {
+        override val message
+            get() = "message=${ `message` }"
+    }
+    
+    /**
+     * The server answered with a non-2xx status.
+     */
+    class Api(
+        
+        val `status`: kotlin.UShort, 
+        
+        val `message`: kotlin.String
+        ) : AriaException() {
+        override val message
+            get() = "status=${ `status` }, message=${ `message` }"
+    }
+    
+    /**
+     * Anything else (malformed body, CLI failure, …).
+     */
+    class Unknown(
+        
+        val `message`: kotlin.String
+        ) : AriaException() {
+        override val message
+            get() = "message=${ `message` }"
     }
     
 
-    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<SdkException> {
-        override fun lift(error_buf: RustBuffer.ByValue): SdkException = FfiConverterTypeSdkError.lift(error_buf)
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<AriaException> {
+        override fun lift(error_buf: RustBuffer.ByValue): AriaException = FfiConverterTypeAriaError.lift(error_buf)
     }
 
     
@@ -1988,282 +2504,108 @@ sealed class SdkException: kotlin.Exception() {
 /**
  * @suppress
  */
-public object FfiConverterTypeSdkError : FfiConverterRustBuffer<SdkException> {
-    override fun read(buf: ByteBuffer): SdkException {
+public object FfiConverterTypeAriaError : FfiConverterRustBuffer<AriaException> {
+    override fun read(buf: ByteBuffer): AriaException {
         
 
         return when(buf.getInt()) {
-            1 -> SdkException.Core(
+            1 -> AriaException.Config(
+                FfiConverterString.read(buf),
+                )
+            2 -> AriaException.Auth(
+                FfiConverterString.read(buf),
+                )
+            3 -> AriaException.Network(
+                FfiConverterString.read(buf),
+                )
+            4 -> AriaException.Api(
+                FfiConverterUShort.read(buf),
+                FfiConverterString.read(buf),
+                )
+            5 -> AriaException.Unknown(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
 
-    override fun allocationSize(value: SdkException): ULong {
+    override fun allocationSize(value: AriaException): ULong {
         return when(value) {
-            is SdkException.Core -> (
+            is AriaException.Config -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.v1)
+                + FfiConverterString.allocationSize(value.`message`)
             )
-        }
-    }
-
-    override fun write(value: SdkException, buf: ByteBuffer) {
-        when(value) {
-            is SdkException.Core -> {
-                buf.putInt(1)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-
-}
-
-
-
-/**
- * A single streaming event delivered to [`SdkAgentListener`] during
- * [`SdkAgent::run_stream`]. Mirrors the core [`AgentEvent`] so native apps can
- * render the agentic turn (phases, tool calls, streamed tokens, completion).
- */
-sealed class SdkStreamEvent {
-    
-    /**
-     * A phase boundary (`recall` / `model` / `tool_exec` / `loop_guard`).
-     */
-    data class Step(
-        val `phase`: kotlin.String, 
-        val `label`: kotlin.String?) : SdkStreamEvent() {
-        companion object
-    }
-    
-    /**
-     * A streamed model text delta.
-     */
-    data class Token(
-        val `text`: kotlin.String) : SdkStreamEvent() {
-        companion object
-    }
-    
-    /**
-     * A tool invocation and its executed result (content only).
-     */
-    data class ToolCall(
-        val `id`: kotlin.String, 
-        val `name`: kotlin.String, 
-        val `arguments`: kotlin.String, 
-        val `result`: kotlin.String?) : SdkStreamEvent() {
-        companion object
-    }
-    
-    /**
-     * An approval decision for a tool call (`allow` / `deny` / `unavailable`).
-     */
-    data class Approval(
-        val `id`: kotlin.String, 
-        val `tool`: kotlin.String, 
-        val `decision`: kotlin.String, 
-        val `reason`: kotlin.String?) : SdkStreamEvent() {
-        companion object
-    }
-    
-    /**
-     * Token accounting for one model call.
-     */
-    data class Usage(
-        val `inputTokens`: kotlin.ULong, 
-        val `outputTokens`: kotlin.ULong, 
-        val `model`: kotlin.String) : SdkStreamEvent() {
-        companion object
-    }
-    
-    /**
-     * Terminal event carrying the full final reply.
-     */
-    data class Done(
-        val `text`: kotlin.String) : SdkStreamEvent() {
-        companion object
-    }
-    
-    /**
-     * A stream error; the run terminates after this event.
-     */
-    data class Error(
-        val `message`: kotlin.String) : SdkStreamEvent() {
-        companion object
-    }
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeSdkStreamEvent : FfiConverterRustBuffer<SdkStreamEvent>{
-    override fun read(buf: ByteBuffer): SdkStreamEvent {
-        return when(buf.getInt()) {
-            1 -> SdkStreamEvent.Step(
-                FfiConverterString.read(buf),
-                FfiConverterOptionalString.read(buf),
-                )
-            2 -> SdkStreamEvent.Token(
-                FfiConverterString.read(buf),
-                )
-            3 -> SdkStreamEvent.ToolCall(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterOptionalString.read(buf),
-                )
-            4 -> SdkStreamEvent.Approval(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterOptionalString.read(buf),
-                )
-            5 -> SdkStreamEvent.Usage(
-                FfiConverterULong.read(buf),
-                FfiConverterULong.read(buf),
-                FfiConverterString.read(buf),
-                )
-            6 -> SdkStreamEvent.Done(
-                FfiConverterString.read(buf),
-                )
-            7 -> SdkStreamEvent.Error(
-                FfiConverterString.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: SdkStreamEvent) = when(value) {
-        is SdkStreamEvent.Step -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
+            is AriaException.Auth -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`phase`)
-                + FfiConverterOptionalString.allocationSize(value.`label`)
+                + FfiConverterString.allocationSize(value.`message`)
             )
-        }
-        is SdkStreamEvent.Token -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
+            is AriaException.Network -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`text`)
+                + FfiConverterString.allocationSize(value.`message`)
             )
-        }
-        is SdkStreamEvent.ToolCall -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
+            is AriaException.Api -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterString.allocationSize(value.`name`)
-                + FfiConverterString.allocationSize(value.`arguments`)
-                + FfiConverterOptionalString.allocationSize(value.`result`)
+                + FfiConverterUShort.allocationSize(value.`status`)
+                + FfiConverterString.allocationSize(value.`message`)
             )
-        }
-        is SdkStreamEvent.Approval -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterString.allocationSize(value.`tool`)
-                + FfiConverterString.allocationSize(value.`decision`)
-                + FfiConverterOptionalString.allocationSize(value.`reason`)
-            )
-        }
-        is SdkStreamEvent.Usage -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterULong.allocationSize(value.`inputTokens`)
-                + FfiConverterULong.allocationSize(value.`outputTokens`)
-                + FfiConverterString.allocationSize(value.`model`)
-            )
-        }
-        is SdkStreamEvent.Done -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`text`)
-            )
-        }
-        is SdkStreamEvent.Error -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
+            is AriaException.Unknown -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterString.allocationSize(value.`message`)
             )
         }
     }
 
-    override fun write(value: SdkStreamEvent, buf: ByteBuffer) {
+    override fun write(value: AriaException, buf: ByteBuffer) {
         when(value) {
-            is SdkStreamEvent.Step -> {
+            is AriaException.Config -> {
                 buf.putInt(1)
-                FfiConverterString.write(value.`phase`, buf)
-                FfiConverterOptionalString.write(value.`label`, buf)
+                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
-            is SdkStreamEvent.Token -> {
+            is AriaException.Auth -> {
                 buf.putInt(2)
-                FfiConverterString.write(value.`text`, buf)
+                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
-            is SdkStreamEvent.ToolCall -> {
+            is AriaException.Network -> {
                 buf.putInt(3)
-                FfiConverterString.write(value.`id`, buf)
-                FfiConverterString.write(value.`name`, buf)
-                FfiConverterString.write(value.`arguments`, buf)
-                FfiConverterOptionalString.write(value.`result`, buf)
+                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
-            is SdkStreamEvent.Approval -> {
+            is AriaException.Api -> {
                 buf.putInt(4)
-                FfiConverterString.write(value.`id`, buf)
-                FfiConverterString.write(value.`tool`, buf)
-                FfiConverterString.write(value.`decision`, buf)
-                FfiConverterOptionalString.write(value.`reason`, buf)
+                FfiConverterUShort.write(value.`status`, buf)
+                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
-            is SdkStreamEvent.Usage -> {
+            is AriaException.Unknown -> {
                 buf.putInt(5)
-                FfiConverterULong.write(value.`inputTokens`, buf)
-                FfiConverterULong.write(value.`outputTokens`, buf)
-                FfiConverterString.write(value.`model`, buf)
-                Unit
-            }
-            is SdkStreamEvent.Done -> {
-                buf.putInt(6)
-                FfiConverterString.write(value.`text`, buf)
-                Unit
-            }
-            is SdkStreamEvent.Error -> {
-                buf.putInt(7)
                 FfiConverterString.write(value.`message`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
+
 }
 
 
 
 
 
-
-
 /**
- * Receives streaming events from [`SdkAgent::run_stream`].
+ * Streaming callback implemented on the Swift/Kotlin side.
  */
-public interface SdkAgentListener {
+public interface StreamListener {
     
-    fun `onEvent`(`event`: SdkStreamEvent)
+    /**
+     * Called once per SSE frame, in wire order.
+     */
+    fun `onEvent`(`event`: StreamEvent)
     
     companion object
 }
@@ -2302,13 +2644,13 @@ public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: Ffi
 }
 
 // Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfaceSdkAgentListener {
-    internal object `onEvent`: UniffiCallbackInterfaceSdkAgentListenerMethod0 {
+internal object uniffiCallbackInterfaceStreamListener {
+    internal object `onEvent`: UniffiCallbackInterfaceStreamListenerMethod0 {
         override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeSdkAgentListener.handleMap.get(uniffiHandle)
+            val uniffiObj = FfiConverterTypeStreamListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onEvent`(
-                    FfiConverterTypeSdkStreamEvent.lift(`event`),
+                    FfiConverterTypeStreamEvent.lift(`event`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -2318,11 +2660,11 @@ internal object uniffiCallbackInterfaceSdkAgentListener {
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
-            FfiConverterTypeSdkAgentListener.handleMap.remove(handle)
+            FfiConverterTypeStreamListener.handleMap.remove(handle)
         }
     }
 
-    internal var vtable = UniffiVTableCallbackInterfaceSdkAgentListener.UniffiByValue(
+    internal var vtable = UniffiVTableCallbackInterfaceStreamListener.UniffiByValue(
         `onEvent`,
         uniffiFree,
     )
@@ -2330,7 +2672,7 @@ internal object uniffiCallbackInterfaceSdkAgentListener {
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
     internal fun register(lib: UniffiLib) {
-        lib.uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(vtable)
+        lib.uniffi_aria_agent_ffi_fn_init_callback_vtable_streamlistener(vtable)
     }
 }
 
@@ -2339,7 +2681,39 @@ internal object uniffiCallbackInterfaceSdkAgentListener {
  *
  * @suppress
  */
-public object FfiConverterTypeSdkAgentListener: FfiConverterCallbackInterface<SdkAgentListener>()
+public object FfiConverterTypeStreamListener: FfiConverterCallbackInterface<StreamListener>()
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
+}
 
 
 
@@ -2372,62 +2746,132 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         }
     }
 }
-        /**
-         * Minimal quickstart entry — `Agent(name, model)`, no session required.
-         *
-         * The sandbox defaults to Docker and the memory backend to **local**
-         * (aria memo). Streaming is via [`SdkAgent::run_stream`].
-         */
-    @Throws(SdkException::class) fun `createAgent`(`agentName`: kotlin.String, `model`: kotlin.String): SdkAgent {
-            return FfiConverterTypeSdkAgent.lift(
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent(
-        FfiConverterString.lower(`agentName`),FfiConverterString.lower(`model`),_status)
-}
-    )
-    }
-    
 
-        /**
-         * Minimal tenant-scoped quickstart entry: the tenant id selects a separate
-         * aria memo database (local backend). Empty `tenant_id` behaves like
-         * [`create_agent`].
-         */
-    @Throws(SdkException::class) fun `createAgentForTenant`(`tenantId`: kotlin.String, `agentName`: kotlin.String, `model`: kotlin.String): SdkAgent {
-            return FfiConverterTypeSdkAgent.lift(
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
-        FfiConverterString.lower(`tenantId`),FfiConverterString.lower(`agentName`),FfiConverterString.lower(`model`),_status)
-}
-    )
-    }
-    
 
-        /**
-         * Advanced tenant-scoped entry accepting a full [`SdkAgentConfig`].
-         */
-    @Throws(SdkException::class) fun `createAgentForTenantWith`(`tenantId`: kotlin.String, `config`: SdkAgentConfig): SdkAgent {
-            return FfiConverterTypeSdkAgent.lift(
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(
-        FfiConverterString.lower(`tenantId`),FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
-}
-    )
-    }
-    
 
-        /**
-         * Advanced entry accepting a full [`SdkAgentConfig`] (instructions, custom
-         * sandbox, memory backend, …).
-         */
-    @Throws(SdkException::class) fun `createAgentWith`(`config`: SdkAgentConfig): SdkAgent {
-            return FfiConverterTypeSdkAgent.lift(
-    uniffiRustCallWithError(SdkException) { _status ->
-    UniffiLib.INSTANCE.uniffi_aria_agent_ffi_fn_func_create_agent_with(
-        FfiConverterTypeSdkAgentConfig.lower(`config`),_status)
-}
-    )
-    }
-    
 
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeSession: FfiConverterRustBuffer<Session?> {
+    override fun read(buf: ByteBuffer): Session? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeSession.read(buf)
+    }
+
+    override fun allocationSize(value: Session?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeSession.allocationSize(value)
+        }
+    }
+
+    override fun write(value: Session?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeSession.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeClientOptions: FfiConverterRustBuffer<ClientOptions?> {
+    override fun read(buf: ByteBuffer): ClientOptions? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeClientOptions.read(buf)
+    }
+
+    override fun allocationSize(value: ClientOptions?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeClientOptions.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ClientOptions?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeClientOptions.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMemoryConfig: FfiConverterRustBuffer<MemoryConfig?> {
+    override fun read(buf: ByteBuffer): MemoryConfig? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMemoryConfig.read(buf)
+    }
+
+    override fun allocationSize(value: MemoryConfig?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMemoryConfig.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MemoryConfig?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMemoryConfig.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeTokenUsage: FfiConverterRustBuffer<TokenUsage?> {
+    override fun read(buf: ByteBuffer): TokenUsage? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeTokenUsage.read(buf)
+    }
+
+    override fun allocationSize(value: TokenUsage?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeTokenUsage.allocationSize(value)
+        }
+    }
+
+    override fun write(value: TokenUsage?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeTokenUsage.write(value, buf)
+        }
+    }
+}
 

@@ -1,5 +1,34 @@
 # Release notes
 
+## Rust / Swift / Kotlin SDKs are cloud API clients
+
+The UniFFI surface no longer embeds the runtime: `ariacompute-agent` is now a
+thin HTTP client for the beta Agents API, with the same vocabulary as the
+JS/Python SDKs. Device binaries carry no loop, sandbox, tool family or model key
+(ADR-0020).
+
+### Highlights
+
+- **New surface**: `AriaAgent` (`createSession`, `session`, `run`,
+  `runStreamed`), `Session` (`memorize` / `recall` / `itemsJson` / `turnsJson` /
+  `titleJson`), `AriaAgentConfig`, `ClientOptions`, `MemoryConfig`, `RunResult`,
+  `TokenUsage`, `StreamEvent`, `StreamListener`, `AriaError`.
+- **Removed**: the in-process runtime, `create_agent_for_tenant[_with]`,
+  `sandbox_provider` / `permission_preset` / `approval_mode`, and the embedded
+  context store.
+- **Memory** still supports `cloud` (session memory REST), `local` (aria memo
+  CLI) and `both`; a missing CLI is an actionable config error.
+- **Errors** are typed (`config` / `auth` / `network` / `api` / `unknown`) with
+  the HTTP status on `api`.
+- **Streaming** delivers every `agent.*` frame to a `StreamListener` and honours
+  `maxTurns`; an empty stream is an error, never an empty answer.
+- **Cross-SDK parity**: JS and Python enforce the same contracts — an empty stream
+  is an `unknown` error, an unknown memory backend is `config`, `local` memory
+  rows use the `key: value` convention (so aria memo rows are interchangeable
+  between the SDKs and the CLI), and `maxTurns` is worded the same way.
+- Bindings regenerated with `just ffi` — Swift/Kotlin callers migrate to the new
+  names (README examples updated).
+
 ## DeepSeek Harness as the default turn runtime
 
 Turns are now executed by **DeepSeek Harness (dsh)** by default: `dsh` runs as an

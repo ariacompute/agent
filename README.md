@@ -66,7 +66,7 @@ where tools execute:
 - 🛠️ **One tool pipeline** — resolve → permission preset → approval → dispatch → post-process (truncate + spill), so a call without an approval provider is refused with a reason instead of running (`aria-agent-tools`).
 - ☁️ **Cloud API** — `aria-agent-cloud` is an axum service speaking the OpenAI **beta Agents** surface, with Postgres + pgvector holding both metadata *and* context, and SSE streaming.
 - 📱 **On-device store** — `aria-agent-memo` (aria memo / SQLite) keeps a local-first context copy that is interchangeable with the cloud backend behind one `ContextStore` trait.
-- 🌐 **Five-language SDKs** — JS / Python are thin clients over the cloud API; Rust / Swift / Kotlin embed the runtime in-process with no server or network.
+- 🌐 **Five-language SDKs** — all of them (JS / Python / Rust / Swift / Kotlin) are thin clients over the cloud API; nothing is embedded, so a mobile app only needs network access plus an API key.
 - 🧭 **Pluggable sandbox** — every tool container is capped by `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` and reaches the daemon through `DOCKER_HOST` / `ARIA_DOCKER_SOCKET`.
 
 <div align="right">
@@ -128,7 +128,7 @@ of truth for both persistence and SSE streaming.
 | **aria-agent-plugin** | Plugin registry: manifests, seam keys/roles, dependency topo-sort, cycle + core-uniqueness checks, frozen snapshot. |
 | **aria-agent-tools** | Built-in tool families: fs, shell, jobs, terminal (`pty`), skills, web (`web`), ask_user, plan, todo, memo. |
 | **aria-agent-orchestrator** | Sub-agents (in-process fork), agent teams (task DAG), scheduled jobs (single-flight ticker). |
-| **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent` / `SdkSession` / `create_agent`. |
+| **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): cloud API client — `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`. |
 | **aria-agent-cloud** | axum service: Postgres + pgvector (metadata **and** context), OpenAI beta Agents API. `/v1/agents`, `/v1/agents/sessions`, SSE `/v1/agents/sessions/{id}/events/stream`. |
 | **bindings** | `bindings/swift` (SwiftPM) and `bindings/kotlin` (Android). |
 | **sdk/js** | npm `@ariacompute/agent` — TypeScript/JavaScript client for the beta Agents API (`Agent`, `run`, `runStreamed`, `tool`, `Session`). |
@@ -136,7 +136,7 @@ of truth for both persistence and SSE streaming.
 
 > **Storage boundary:** the **cloud** stores conversational / long-term context in
 > Postgres + pgvector (`context_fragments`, per-principal) — pgvector is required
-> and boot fails without it. The **on-device** SDK keeps its aria memo (SQLite) store.
+> and boot fails without it. The SDKs' `local` backend keeps an aria memo (SQLite) copy.
 > See `docs/adr/0010-context-storage-pgvector.md`.
 
 <div align="right">
@@ -162,7 +162,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 just ffi
 
 # 5. run pgvector locally and start the cloud API (cargo run)
-[ -f .env ] || cp .env.example .env   # then set GATEWAY_API_KEY in .env
+[ -f .env ] || cp .env.example .env  # then set GATEWAY_API_KEY in .env
 set -a
 source ./.env
 set +a
@@ -374,8 +374,8 @@ Postgres image is `pgvector/pgvector:pg16`; the service runs
 `CREATE EXTENSION IF NOT EXISTS vector` at boot and **refuses to start** if the
 extension is unavailable (no silent keyword-only fallback).
 
-The on-device SDK keeps its own aria memo (SQLite) store
-(`aria-agent-memo`) and is not affected by this requirement.
+The SDKs' `local` memory backend keeps an aria memo (SQLite) copy on the device
+(through the `aria-memo` CLI) and is not affected by this requirement.
 
 ### 5. Sandbox via the Docker socket
 
@@ -628,15 +628,15 @@ SDKs expose the same shape: define an `Agent`, then run it.
 |---|---|---|
 | Python | `pip install ariacompute-agent` | `ariacompute_agent` (cloud API client) |
 | TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent` (cloud API client) |
-| Rust | `cargo add ariacompute-agent` | `aria_agent_ffi` (in-process, native) |
-| Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift` (in-process, native) |
-| Kotlin | `com.ariacompute:agent` | `bindings/kotlin` (in-process, native) |
+| Rust | `cargo add ariacompute-agent` | `aria_agent_ffi` (cloud API client) |
+| Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift` (cloud API client) |
+| Kotlin | `com.ariacompute:agent` | `bindings/kotlin` (cloud API client) |
 
-The JS / Python SDKs are thin clients over the beta Agents REST API that the
-service still exposes — see
-[OpenAI Agents API compatibility](#-openai-agents-api-compatibility) for the wire
-contract. The Rust / Swift / Kotlin SDKs embed the runtime **in-process** and keep
-their context in the on-device store (no server, no network).
+Every SDK is a thin client over the beta Agents REST API the service exposes —
+see [OpenAI Agents API compatibility](#-openai-agents-api-compatibility) for the
+wire contract. Rust / Swift / Kotlin use the same HTTP surface through UniFFI, so
+there is no embedded runtime, no sandbox and no provider key on the device; the
+only local artefact is the optional aria memo copy for `backend = "local"`.
 
 Cloud SDKs need a running service (see Quick start). Configure
 `ARIA_AGENT_BASE_URL` (default `http://localhost:3000`) and, when
@@ -649,10 +649,12 @@ Every example follows the same three steps:
    long-term memory with `memorize`),
 3. **streaming run** — `runStreamed` / `Runner.run_streamed`.
 
-Long-term memory lives in the agent's own context store: `memorize(key, value)`
+Long-term memory lives in the session's context store: `memorize(key, value)`
 persists a fact (as a `long_term` context fragment) that later turns of the same
-session recall semantically — even after a restart. For the cloud SDKs that store
-is Postgres + pgvector; for the native SDKs it is the on-device store.
+session recall semantically — even after a restart. Every SDK shares the same
+three backends (below): `cloud` is the service's Postgres + pgvector store, and
+`local` is the aria memo SQLite store reached through the `aria-memo` CLI. No SDK
+embeds a store of its own — that includes Rust / Swift / Kotlin.
 
 ### Memory backends: cloud / local / both
 
@@ -673,7 +675,10 @@ session.recall("user_name", backend="local")  # -> local copy only
 ```
 
 ```typescript
-const agent = new Agent({ name: "History tutor", memory: "both", memoDb: "~/.ariacompute/memo.db" });
+const agent = new Agent({
+  name: "History tutor",
+  memory: { backend: "both", memoDb: "~/.ariacompute/memo.db" },
+});
 await session.memorize("user_name", "Ada");               // -> both backends
 await session.recall("user_name", { backend: "local" });  // -> local copy only
 ```
@@ -747,7 +752,9 @@ asyncio.run(main())
 Transports normalize failures into a typed `AriaError` (`kind ∈ {auth, network,
 api, config, unknown}`): `401/403` → `auth`, other non-2xx → `api` (with the HTTP
 `status`), a connection failure → `network`, and local misuse (e.g. a non-positive
-`max_turns`) → `config`. Branch on `err.kind` instead of matching message text.
+`max_turns` or an unknown memory backend) → `config`. A stream that ends without a
+single `agent.*` frame is `unknown` — never an empty answer. Branch on `err.kind`
+instead of matching message text.
 
 ```python
 from ariacompute_agent import AriaError, AriaErrorKind
@@ -786,8 +793,7 @@ const agent = new Agent({
   model: "gpt-4o-mini",
   tools: [historyFunFact],
   // memory backend: cloud | local (aria memo) | both
-  memory: "both",
-  memoDb: "~/.ariacompute/memo.db",
+  memory: { backend: "both", memoDb: "~/.ariacompute/memo.db" },
 });
 
 const session = await Session.create(agent);
@@ -823,168 +829,184 @@ console.log(result.finalOutput);
 if (result.usage) console.log(`tokens: ${result.usage.totalTokens}`);
 ```
 
-### Rust (in-process)
+### Rust (cloud client)
 
-> **Runtime choice.** In-process SDKs default to the `native` loop (a mobile host
-> ships no `dsh` binary); set `ARIA_AGENT_HARNESS=dsh` to run their turns on
-> DeepSeek Harness as well. Selecting `dsh` without an available runtime is an
-> actionable error, never a downgrade.
+The Rust surface is the same HTTP client as JS/Python: no runtime, no sandbox,
+no model key — just the cloud API. `run` creates a session when none is passed,
+`memorize`/`recall` pick `cloud` | `local` (aria memo CLI) | `both`, and
+`run_streamed` delivers every `agent.*` frame to a listener.
 
 ```rust
-use aria_agent_ffi::{create_agent, SdkAgentListener, SdkStreamEvent};
+use aria_agent_ffi::{
+    AriaAgent, AriaAgentConfig, ClientOptions, MemoryConfig, StreamEvent, StreamListener,
+};
 
 struct Printer;
 
-impl SdkAgentListener for Printer {
-    fn on_event(&self, event: SdkStreamEvent) {
-        match event {
-            SdkStreamEvent::Token { text } => print!("{text}"),
-            SdkStreamEvent::Approval { tool, decision, reason, .. } => {
-                eprintln!("\n[tool {tool}: {decision} - {}]", reason.unwrap_or_default());
-            }
-            SdkStreamEvent::Usage {
-                input_tokens,
-                output_tokens,
-                ..
-            } => eprintln!("\n[tokens: {}]", input_tokens + output_tokens),
+impl StreamListener for Printer {
+    fn on_event(&self, event: StreamEvent) {
+        match event.kind.as_str() {
+            "agent.turn.output_text.delta" => print!("{}", event.delta.unwrap_or_default()),
+            "agent.turn.usage" => eprintln!("\n[tokens]"),
             _ => {}
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // No session argument: the runtime assigns one isolated context scope per agent.
-    // `memory` selects cloud | local (aria memo) | both; default is `local`.
-    let agent = create_agent_with(SdkAgentConfig {
-        agent_name: "History tutor".into(),
-        model: "gpt-4o-mini".into(),
-        memory: SdkMemoryConfig {
-            backend: "both".into(),
-            local_db_path: "~/.ariacompute/memo.db".into(),
-            cloud_base_url: "http://localhost:3000".into(),
-            cloud_api_key: String::new(),
-        },
-        ..Default::default()
+    let agent = AriaAgent::new(AriaAgentConfig {
+        name: "History tutor".into(),
+        instructions: Some("Be concise.".into()),
+        model: None,
+        id: None,
+        client: Some(ClientOptions {
+            base_url: Some("http://localhost:3000".into()),
+            api_key: Some(std::env::var("ARIA_AGENT_API_KEY")?),
+            beta_header: None,
+        }),
+        // cloud | local (aria-memo CLI) | both; per-call `backend` overrides it.
+        memory: Some(MemoryConfig {
+            backend: Some("both".into()),
+            memo_bin: None,
+            memo_db: Some("~/.ariacompute/memo.db".into()),
+        }),
     })?;
 
-    // 1) One-shot run.
-    println!("{}", agent.run("When did the Roman Empire fall?".into())?);
+    // 1) One-shot run — a session is created server-side and returned.
+    let first = agent.run("When did the Roman Empire fall?".into(), None)?;
+    println!("{}", first.final_output);
 
-    // Long-term memory lives in the on-device store: `memorize` persists a fact
-    // as a `long_term` fragment that later turns of this agent recall.
-    let session = agent.session();
-    session.memorize("user_name".into(), "Ada".into())?;
-
-    // 2) Continue the same conversation (same agent / session scope) — the reply
-    //    can draw on the earlier turn and the remembered fact.
-    println!("{}", agent.run("What is my name?".into())?);
+    // 2) Reuse the session so later turns see the earlier ones.
+    let session = agent.create_session()?;
+    session.memorize("user_name".into(), "Ada".into(), None)?;
+    println!("{}", agent.run("What is my name?".into(), Some(session.clone()))?.final_output);
     println!("{:?}", session.recall("user_name".into(), None)?);  // -> Some("Ada")
-    // Per-call override: read the aria memo copy only.
     println!("{:?}", session.recall("user_name".into(), Some("local".into()))?);
 
-    // 3) Streaming run — events are pushed to the listener.
-    agent.run_stream("Tell me something surprising".into(), Box::new(Printer))?;
+    // 3) Streaming run — every frame reaches the listener in wire order.
+    let result = agent.run_streamed(
+        "Tell me something surprising".into(),
+        Some(session),
+        Box::new(Printer),
+        None,
+    )?;
+    println!("\n{}", result.final_output);
     Ok(())
 }
 ```
 
-### Swift (in-process)
+### Swift (cloud client)
 
 Embed `libaria-agent_ffi` and the generated `AriaComputeAgent` module (see
-`bindings/swift/README.md`).
+`bindings/swift/README.md`). Only HTTP is used, so the same code runs on iOS.
 
 ```swift
 import AriaComputeAgent
 
+final class Printer: StreamListener {
+    func onEvent(event: StreamEvent) {
+        switch event.kind {
+        case "agent.turn.output_text.delta": print(event.delta ?? "", terminator: "")
+        case "agent.turn.usage": print("\n[tokens]")
+        default: break
+        }
+    }
+}
+
 do {
-    // No session argument: the runtime assigns one isolated context scope per agent.
-    // `memory` selects cloud | local (aria memo) | both; default is `local`.
-    let agent = try createAgentWith(config: SdkAgentConfig(
-        agentName: "History tutor",
-        instructions: "",
-        model: "gpt-4o-mini",
-        sandboxProvider: "docker",
-        memory: SdkMemoryConfig(
-            backend: "both",
-            localDbPath: "~/.ariacompute/memo.db",
-            cloudBaseUrl: "http://localhost:3000",
-            cloudApiKey: ""
+    let agent = try AriaAgent(config: AriaAgentConfig(
+        name: "History tutor",
+        instructions: "Be concise.",
+        model: nil,
+        id: nil,
+        client: ClientOptions(
+            baseUrl: "http://localhost:3000",
+            apiKey: ProcessInfo.processInfo.environment["ARIA_AGENT_API_KEY"],
+            betaHeader: nil
         ),
-        // Permission preset: read_only | workspace_write | danger_full_access.
-        permissionPreset: "workspace_write",
-        // Approval mode: auto (trusted local run) | deny (fail-closed).
-        approvalMode: "auto"
+        // cloud | local (aria-memo CLI) | both.
+        memory: MemoryConfig(
+            backend: "both",
+            memoBin: nil,
+            memoDb: "~/.ariacompute/memo.db"
+        )
     ))
 
-    // 1) One-shot run.
-    print(try agent.run("When did the Roman Empire fall?"))
+    // 1) One-shot run — a session is created server-side and returned.
+    print(try agent.run(input: "When did the Roman Empire fall?", session: nil).finalOutput)
 
-    // Long-term memory lives in the on-device store: `memorize` persists a fact
-    // as a `long_term` fragment that later turns of this agent recall.
-    let session = agent.session()
-    try session.memorize(key: "user_name", value: "Ada")
-
-    // 2) Continue the same conversation (same agent / session scope) — the reply
-    //    can draw on the earlier turn and the remembered fact.
-    print(try agent.run("What is my name?"))
+    // 2) Reuse the session so later turns see the earlier ones.
+    let session = try agent.createSession()
+    try session.memorize(key: "user_name", value: "Ada", backend: nil)
+    print(try agent.run(input: "What is my name?", session: session).finalOutput)
     print(try session.recall(key: "user_name", backend: nil) ?? "")  // -> "Ada"
-    // Per-call override: read the aria memo copy only.
     print(try session.recall(key: "user_name", backend: "local") ?? "")
 
-    // 3) Streaming run — events are delivered to the listener.
-    try agent.runStream("Tell me something surprising", listener: Printer())
+    // 3) Streaming run — every frame reaches the listener in wire order.
+    let result = try agent.runStreamed(
+        input: "Tell me something surprising",
+        session: session,
+        listener: Printer(),
+        maxTurns: nil
+    )
+    print(result.finalOutput)
 } catch {
     print(error)
 }
 ```
 
-### Kotlin (in-process)
+### Kotlin (cloud client)
 
 Add the `com.ariacompute:agent` artifact and the `libaria-agent_ffi` native
-library (see `bindings/kotlin/agent-sdk/README.md`).
+library (see `bindings/kotlin/agent-sdk/README.md`). Only HTTP is used, so the
+same code runs on Android.
 
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
+class Printer : StreamListener {
+    override fun onEvent(event: StreamEvent) {
+        when (event.kind) {
+            "agent.turn.output_text.delta" -> print(event.delta ?: "")
+            "agent.turn.usage" -> println("\n[tokens]")
+        }
+    }
+}
+
 fun main() {
-    // No session argument: the runtime assigns one isolated context scope per agent.
-    // `memory` selects cloud | local (aria memo) | both; default is `local`.
-    val agent = createAgentWith(
-        SdkAgentConfig(
-            agentName = "History tutor",
-            instructions = "",
-            model = "gpt-4o-mini",
-            sandboxProvider = "docker",
-            memory = SdkMemoryConfig(
-                backend = "both",
-                localDbPath = "~/.ariacompute/memo.db",
-                cloudBaseUrl = "http://localhost:3000",
-                cloudApiKey = ""
+    val agent = AriaAgent(
+        AriaAgentConfig(
+            name = "History tutor",
+            instructions = "Be concise.",
+            model = null,
+            id = null,
+            client = ClientOptions(
+                baseUrl = "http://localhost:3000",
+                apiKey = System.getenv("ARIA_AGENT_API_KEY"),
+                betaHeader = null
             ),
-            // Permission preset: read_only | workspace_write | danger_full_access.
-            permissionPreset = "workspace_write",
-            // Approval mode: auto (trusted local run) | deny (fail-closed).
-            approvalMode = "auto"
+            // cloud | local (aria-memo CLI) | both.
+            memory = MemoryConfig(
+                backend = "both",
+                memoBin = null,
+                memoDb = "~/.ariacompute/memo.db"
+            )
         )
     )
 
-    // 1) One-shot run.
-    println(agent.run("When did the Roman Empire fall?"))
+    // 1) One-shot run — a session is created server-side and returned.
+    println(agent.run("When did the Roman Empire fall?", null).finalOutput)
 
-    // Long-term memory lives in the on-device store: `memorize` persists a fact
-    // as a `long_term` fragment that later turns of this agent recall.
-    val session = agent.session()
-    session.memorize("user_name", "Ada")
-
-    // 2) Continue the same conversation (same agent / session scope) — the reply
-    //    can draw on the earlier turn and the remembered fact.
-    println(agent.run("What is my name?"))
+    // 2) Reuse the session so later turns see the earlier ones.
+    val session = agent.createSession()
+    session.memorize("user_name", "Ada", null)
+    println(agent.run("What is my name?", session).finalOutput)
     println(session.recall("user_name", null))  // -> "Ada"
-    // Per-call override: read the aria memo copy only.
     println(session.recall("user_name", "local"))
 
-    // 3) Streaming run — events are delivered to the listener.
-    agent.runStream("Tell me something surprising", Printer())
+    // 3) Streaming run — every frame reaches the listener in wire order.
+    val result = agent.runStreamed("Tell me something surprising", session, Printer(), null)
+    println(result.finalOutput)
 }
 ```
 

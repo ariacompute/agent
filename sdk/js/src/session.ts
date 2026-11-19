@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 import type { Agent } from "./agent.js";
 import { getJson, postJson, resolveClient } from "./transport.js";
+import { AriaError } from "./types.js";
 import {
   CloudMemoryStore,
   CompositeMemoryStore,
@@ -23,6 +24,15 @@ import {
   type LocalMemoryOptions,
   type MemoryStore,
 } from "./memory.js";
+
+/** Validate a backend name (`cloud` / `local` / `both`) as a typed config error. */
+function parseBackend(value: string): MemoryBackend {
+  if (value === "cloud" || value === "local" || value === "both") return value;
+  throw new AriaError(
+    `unknown memory backend: ${value} (expected cloud|local|both)`,
+    "config",
+  );
+}
 
 interface SessionResponse {
   id: string;
@@ -48,7 +58,7 @@ export class Session {
     this.id = id;
     this.client = options;
     this.history = history;
-    this.backend = options.backend ?? "cloud";
+    this.backend = parseBackend(options.backend ?? "cloud");
     this.local = new LocalMemoryStore(options as LocalMemoryOptions);
     this.cloud = new CloudMemoryStore(id, options);
     this.defaultStore = this.resolve(this.backend);
@@ -86,12 +96,9 @@ export class Session {
     }
   }
 
-  private storeFor(backend?: MemoryBackend): MemoryStore {
+  private storeFor(backend?: string): MemoryStore {
     if (!backend) return this.defaultStore;
-    if (!["cloud", "local", "both"].includes(backend)) {
-      throw new Error(`unknown memory backend: ${backend}`);
-    }
-    return this.resolve(backend);
+    return this.resolve(parseBackend(backend));
   }
 
   /**

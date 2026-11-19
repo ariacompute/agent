@@ -3,7 +3,7 @@ name = "ariacompute-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "UniFFI FFI surface for the agent platform (Swift / Kotlin bindings)."
+description = "UniFFI cloud API client for the agent platform (Swift / Kotlin bindings)."
 
 [lib]
 name = "aria_agent_ffi"
@@ -11,24 +11,14 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 uniffi = "0.28"
-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-futures = "0.3"
-async-trait = "0.1"
-aria-agent-core = { workspace = true, features = ["openai"] }
-aria-agent-dsh = { path = "../aria-agent-dsh" }
-aria-agent-memo.workspace = true
-aria-agent-sandbox.workspace = true
-aria-agent-tools.workspace = true
-aria-agent-browser.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-[features]
-default = ["openai"]
-# Wire real OpenAI calls in the SDK agent runtime.
-openai = ["aria-agent-core/openai"]
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
 
 [dev-dependencies]
 # Local HTTP stubs for the cloud backend (no real network in tests).

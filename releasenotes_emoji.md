@@ -1,5 +1,26 @@
 # 发布说明 ✨
 
+## ☁️ Rust / Swift / Kotlin SDK 改为云端 API 客户端 🚀
+
+UniFFI 表面不再内嵌运行时：`ariacompute-agent` 现在是 beta Agents API 的薄 HTTP 客户端，词汇与 JS/Python SDK 一致。设备二进制里没有循环、sandbox、工具族，也不需要模型密钥（ADR-0020）。
+
+### 🧩 新接口
+
+- 🤖 `AriaAgent`（`createSession`、`session`、`run`、`runStreamed`）与 `Session`（`memorize` / `recall` / `itemsJson` / `turnsJson` / `titleJson`）。
+- 🧾 配套类型：`AriaAgentConfig`、`ClientOptions`、`MemoryConfig`、`RunResult`、`TokenUsage`、`StreamEvent`、`StreamListener`、`AriaError`。
+
+### ⚠️ 破坏性变更
+
+- 🗑️ 移除进程内运行时、`create_agent_for_tenant[_with]`、`sandbox_provider` / `permission_preset` / `approval_mode`，以及内嵌上下文存储。
+- 🔁 绑定已用 `just ffi` 重新生成，Swift/Kotlin 调用方需按 README 示例迁移。
+
+### ✅ 行为保证
+
+- 🧠 记忆仍支持 `cloud`（会话记忆 REST）、`local`（aria memo CLI）与 `both`；缺少 CLI 时是可直接处理的配置错误。
+- 🚦 错误类型化（`config` / `auth` / `network` / `api` / `unknown`），`api` 附带 HTTP 状态码。
+- 📡 流式把每个 `agent.*` 帧交给 `StreamListener`，并遵守 `maxTurns`；空流是错误，绝不当成空答案。
+- 🤝 跨 SDK 一致：JS / Python 与 Rust / Swift / Kotlin 同契约 —— 空流是 `unknown` 错误、未知记忆后端是 `config`、`local` 记忆行统一为 `key: value`（aria memo 数据可互相读取）、`maxTurns` 文案一致。
+
 ## 🐋 默认运行时切换为 DeepSeek Harness
 
 - 🧵 `agent_loop` 成为真正的接缝（`AgentLoop` + `LoopContext`），原循环原样保留为 `NativeLoop`，`AGENT_HARNESS=native` 可显式回退。

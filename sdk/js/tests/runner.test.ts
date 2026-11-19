@@ -80,16 +80,17 @@ describe("runStreamed maxTurns", () => {
     });
   });
 
-  test("empty stream resolves with empty output", async () => {
+  test("empty stream is an error, never an empty answer", async () => {
     const { impl } = fakeFetch((url: string) => {
       if (url.endsWith("/v1/agents/sessions")) return jsonResponse({ id: "sess_1" });
       return sseResponse([]);
     });
     const agent = new Agent({ name: "tutor", client: { ...client, fetch: impl } });
     const streamed = await runStreamed(agent, "go");
-    const result = await streamed.completed;
-    expect(result.finalOutput).toBe("");
-    expect(result.sessionId).toBe("sess_1");
+    const err = await streamed.completed.catch((e) => e);
+    expect(err).toBeInstanceOf(AriaError);
+    expect((err as AriaError).kind).toBe("unknown");
+    expect(String(err)).toContain("without any event");
   });
 
   test("failed frame surfaces a typed api error", async () => {

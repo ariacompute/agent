@@ -396,6 +396,23 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
 - [x] Docs: ADR-0019, AGENTS.md rule 16, architecture "Harness boundary",
       requirements §10, release notes.
 
+## Milestone 17 — Rust/Swift/Kotlin SDKs become cloud clients (ADR-0020)
+- [x] `ariacompute-agent` rewritten as a thin HTTP client: blocking `reqwest`
+      transport, SSE line reader, typed `AriaError` (`config`/`auth`/`network`/
+      `api`/`unknown`).
+- [x] JS/Python vocabulary on the FFI: `AriaAgent` (constructor, `createSession`,
+      `session`, `run`, `runStreamed`), `Session` (`id`, `memoryBackend`,
+      `memorize`, `recall`, `itemsJson`, `turnsJson`, `titleJson`,
+      `historyJson`), `StreamListener`, `RunResult`, `TokenUsage`.
+- [x] Native path removed: no `aria-agent-core` / sandbox / tools / model client
+      / embedded context store; `cloud_context.rs`, `create_agent_for_tenant*`,
+      `sandbox_provider` / `permission_preset` / `approval_mode` deleted.
+- [x] Memory keeps `cloud` (session memory REST), `local` (aria memo CLI) and
+      `both` (write both, read merged, cloud wins).
+- [x] Bindings regenerated (`just ffi`); README/architecture/requirements/
+      AGENTS.md updated; hermetic stub-server tests cover request shape, SSE
+      decoding, error mapping and the CLI seam.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

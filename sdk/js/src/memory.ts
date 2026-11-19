@@ -129,9 +129,10 @@ export class LocalMemoryStore implements MemoryStore {
   async get(key: string): Promise<string | null> {
     const raw = await this.run(this.args(["search", "--text", key, "--top-k", "5", "--json"]));
     const rows = parseJsonLines(raw);
+    // Only a row carrying the `key: ` prefix is this key's memory; returning an
+    // unrelated top hit would fabricate data for a missing key.
     const hit = rows.find((r) => typeof r.content === "string" && r.content.startsWith(`${key}: `));
-    const content = hit?.content ?? rows[0]?.content;
-    return typeof content === "string" ? decodeLocal(key, content) : null;
+    return typeof hit?.content === "string" ? decodeLocal(key, hit.content) : null;
   }
 }
 

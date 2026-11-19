@@ -51,12 +51,15 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 * **Memory backend switch**: every SDK accepts `cloud` / `local` / `both`
   (constructor config + per-call override); `local` is aria memo.
 
-* **Native SDK (UniFFI, Swift / Kotlin)**: stable FFI surface — `SdkAgent`
-  (`run`, `run_stream`, `session`, `session_id`), `SdkSession`
-  (`memorize`, `recall`), `create_agent`, `create_agent_with`,
-  `create_agent_for_tenant[_with]`, `SdkAgentConfig`, `SdkError`,
-  `SdkStreamEvent`, `SdkAgentListener`; compiled to `libaria-agent_ffi`.
-  Regenerate bindings with `just ffi` (ADR-0002 / ADR-0008).
+* **Rust / Swift / Kotlin (UniFFI)**: a **cloud API client**, same surface and
+  vocabulary as JS/Python — `AriaAgent` (constructor + `name`/`model`/`id`,
+  `createSession`, `session(id)`, `run`, `runStreamed`),
+  `Session` (`id`, `memoryBackend`, `memorize`, `recall`, `itemsJson`,
+  `turnsJson`, `titleJson`, `historyJson`), `AriaAgentConfig`, `ClientOptions`,
+  `MemoryConfig`, `RunResult`, `TokenUsage`, `StreamEvent`, `StreamListener`,
+  `AriaError`; compiled to `libaria-agent_ffi`. No runtime, sandbox or model key
+  is embedded — requests go to `/v1/agents/...` exactly like the other SDKs.
+  Regenerate bindings with `just ffi` (ADR-0002 / ADR-0008 / ADR-0020).
 
 ### 3.1 SDK 行为契约（js / python 对齐）
 
@@ -68,11 +71,15 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 - **`maxTurns`**：`run`/`runStreamed` 接受正整数上限；`runStreamed` 按
   `agent.turn.created` 计数，超过则早退并抛 `config` 型错误（云端控制多步执行，
   此仅作流防护）。
+- **空流**：`runStreamed` 收到零个 `agent.*` 帧时抛 `unknown` 型错误，绝不返回
+  空答案（js / python / Rust / Swift / Kotlin 一致）。
 - **`Agent` 校验**：`name` 必填非空；`tools` 名称唯一（重复抛 `duplicate tool
   name`）；`toolSchemas()` 不透传 `execute`，默认 `parameters`。
 - **记忆三态**：`cloud`（agent-cloud REST）/ `local`（aria memo；js 经
   `aria-memo` CLI、python 直连 SQLite `memories` 表）/ `both`（双侧写入、读取
-  合并、cloud 优先、local 兜底，单侧失败可容忍）。
+  合并、cloud 优先、local 兜底，单侧失败可容忍）。三端 `local` 行统一为
+  `key: value`（可被 `aria-memo list` 及任一 SDK 读出）；未知后端 → `config`
+  型错误；缺失键返回 `None`，不回落到无关命中。
 - **离线可测**：js 注入 `fetch`、python mock `transport._request`，零网络/零 LLM
   覆盖正常 + 异常路径；不改 `event_envelope.rs`（冻结 SSE 契约），不引入 memo
   记忆内部实现。

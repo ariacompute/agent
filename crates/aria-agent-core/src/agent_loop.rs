@@ -925,6 +925,14 @@ mod tests {
             .expect("agent builds")
     }
 
+    #[tokio::test]
+    async fn the_agent_exposes_its_config_and_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent = agent(tmp.path(), "deny", "read_only");
+        assert_eq!(agent.session(), agent.config().session.as_str());
+        assert_eq!(agent.config().approval_mode, "deny");
+    }
+
     fn agent(log_dir: &Path, approval_mode: &str, preset: &str) -> Agent {
         let root = log_dir.to_string_lossy().to_string();
         let cfg = AgentConfig {

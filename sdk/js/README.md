@@ -48,6 +48,24 @@ Frames use the `agent.*` envelope: `agent.turn.created`, `agent.turn.in_progress
 result carries `result.usage` (`TokenUsage`: input / output / total tokens and
 model) when the server reports it.
 
+A stream that ends without a single `agent.*` frame rejects with `AriaError`
+(`kind: "unknown"`) instead of resolving an empty answer; `maxTurns` must be a
+positive integer and caps a runaway stream with `kind: "config"`.
+
+## Memory
+
+Keyed long-term memory lives in `cloud` (session REST), `local` (aria memo via
+the `aria-memo` CLI, rows stored as `key: value`) or `both` (write both, read
+merged with the cloud copy winning). Configure it on the agent
+(`memory: { backend, memoDb }`) and override per call:
+
+```ts
+await session.memorize("user_name", "Ada");               // default backend
+await session.recall("user_name", { backend: "local" });  // local copy only
+```
+
+An unknown backend throws `AriaError` with `kind: "config"`.
+
 ## Sessions
 
 ```ts

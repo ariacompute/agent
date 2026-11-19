@@ -14,11 +14,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ariacompute_agent import (  # noqa: E402
     Agent,
+    AriaError,
+    AriaErrorKind,
     CloudMemoryStore,
     CompositeMemoryStore,
     LocalMemoryStore,
     MemoryBackend,
     Session,
+    decode_local,
+    encode_local,
 )
 from ariacompute_agent import transport  # noqa: E402
 from ariacompute_agent.types import ClientOptions  # noqa: E402
@@ -57,8 +61,16 @@ class MemoryBackendEnumTest(unittest.TestCase):
         self.assertEqual(MemoryBackend.parse("both"), MemoryBackend.BOTH)
         self.assertEqual(MemoryBackend.parse(None), MemoryBackend.CLOUD)
         self.assertEqual(MemoryBackend.parse(MemoryBackend.BOTH), MemoryBackend.BOTH)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(AriaError) as ctx:
             MemoryBackend.parse("nonsense")
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.CONFIG)
+
+
+class LocalMemoryFormatTest(unittest.TestCase):
+    def test_encode_decode_roundtrip(self):
+        self.assertEqual(encode_local("k", "v"), "k: v")
+        self.assertEqual(decode_local("k", "k: v"), "v")
+        self.assertEqual(decode_local("k", "other"), "other")
 
 
 class LocalMemoryStoreTest(unittest.TestCase):
@@ -78,7 +90,8 @@ class LocalMemoryStoreTest(unittest.TestCase):
             ).fetchone()
             conn.close()
             self.assertEqual(row[1], "long_term:semantic")
-            self.assertEqual(row[2], "Ada")
+            # The cross-SDK `key: value` convention, the same as aria-memo/JS/Rust.
+            self.assertEqual(row[2], "user_name: Ada")
             self.assertEqual(json.loads(row[3])["key"], "user_name")
 
     def test_put_overwrites_the_same_key(self):
@@ -87,6 +100,27 @@ class LocalMemoryStoreTest(unittest.TestCase):
             store.put("k", "v1")
             store.put("k", "v2")
             self.assertEqual(store.get("k"), "v2")
+
+    def test_rows_written_by_the_cli_are_recallable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "memo.db")
+            store = LocalMemoryStore(db)
+            store.put("seed", "x")  # creates the schema
+            import sqlite3
+
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, memo_type, content, embedding, metadata, importance, version, "
+                " created_at, updated_at, deleted) "
+                "VALUES ('cli-1', 'long_term:semantic', 'user_name: Ada', ?, '{}', "
+                "0.8, 1, 0, 0, 0)",
+                (b"",),
+            )
+            conn.commit()
+            conn.close()
+            self.assertEqual(store.get("user_name"), "Ada")
+            self.assertIsNone(store.get("ghost"))
 
 
 class CloudMemoryStoreTest(unittest.TestCase):
@@ -203,8 +237,9 @@ class SessionBackendTest(unittest.TestCase):
 
     def test_unknown_backend_override_is_rejected(self):
         session = Session("sess_1", ClientOptions(base_url="http://aria.test"))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(AriaError) as ctx:
             session.recall("k", backend="nonsense")
+        self.assertEqual(ctx.exception.kind, AriaErrorKind.CONFIG)
 
     def test_session_create_inherits_agent_backend(self):
         def fake_request(client, method, path, body=None, stream=False):

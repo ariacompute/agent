@@ -62,6 +62,24 @@ Frames use the `agent.*` envelope, including `agent.turn.approval.requested` /
 server reports it. `agent.turn.completed` (or `agent.turn.failed`) is the
 **only** terminal event — there is no `data: [DONE]` sentinel.
 
+A stream that ends without a single `agent.*` frame raises `AriaError` with
+`AriaErrorKind.UNKNOWN` instead of returning an empty answer; `max_turns` must be
+a positive integer and caps a runaway stream with `AriaErrorKind.CONFIG`.
+
+## Memory
+
+Keyed long-term memory lives in `cloud` (session REST), `local` (aria memo
+SQLite, rows stored as `key: value`, readable with `aria-memo list --json`) or
+`both` (write both, read with the cloud copy winning). Configure it on the agent
+(`memory_backend=`, `memo_db=`) and override per call:
+
+```python
+session.memorize("user_name", "Ada")                      # default backend
+session.recall("user_name", backend="local")              # local copy only
+```
+
+An unknown backend raises `AriaError` with `AriaErrorKind.CONFIG`.
+
 ## Sessions
 
 ```python

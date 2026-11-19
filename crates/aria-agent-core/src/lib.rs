@@ -2324,3 +2324,16 @@ pub(crate) mod tests {
         assert!(streamed.last().unwrap().context.contains("zzz trivia"));
     }
 }
+
+/// The OpenAI-compatible client is constructed lazily and never connects, so a
+/// single offline test can cover the env -> `OpenAIConfig` wiring.
+#[cfg(all(test, feature = "openai"))]
+mod openai_default_model_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_model_is_an_openai_compatible_client() {
+        let cfg = AgentConfig::default();
+        let _model = default_model(&cfg);
+    }
+}

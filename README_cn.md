@@ -65,7 +65,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 - 🛠️ **统一工具管线** —— 解析 → 权限预设 → 审批 → 分发 → 结果后处理（截断 + 外置），无审批方时拒绝并回灌原因而不是放行（`aria-agent-tools`）。
 - ☁️ **云端 API** —— `aria-agent-cloud` 是一个 axum 服务，讲 OpenAI **beta Agents** 资源面，Postgres + pgvector 同时保存元数据与上下文，并支持 SSE 流式。
 - 📱 **端侧存储** —— `aria-agent-memo`（aria memo / SQLite）保存 local-first 的上下文副本，与云端后端通过同一个 `ContextStore` trait 互换。
-- 🌐 **五语言 SDK** —— JS / Python 是云端 API 的薄客户端；Rust / Swift / Kotlin 把运行时嵌入进程内，无需服务端、无需网络。
+- 🌐 **五语言 SDK** —— JS / Python / Rust / Swift / Kotlin 全部是云端 API 的薄客户端；不内嵌运行时，移动端只需网络与一个 API Key。
 - 🧭 **可插拔 sandbox** —— 每个工具容器都受 `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` 限制，并经由 `DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 访问守护进程。
 
 <div align="right">
@@ -122,7 +122,7 @@ just dsh-e2e    # 真实一轮（需 ARIA_DSH_E2E=1 + DSH_BIN + 供应商密钥�
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
 | **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
-| **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：`SdkAgent` / `SdkSession` / `create_agent`。 |
+| **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：云端 API 客户端 —— `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`。 |
 | **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
 | **bindings** | `bindings/swift`（SwiftPM）与 `bindings/kotlin`（Android）。 |
 | **sdk/js** | npm `@ariacompute/agent` —— beta Agents API 的 TypeScript/JavaScript 客户端（`Agent`、`run`、`runStreamed`、`tool`、`Session`）。 |
@@ -130,7 +130,7 @@ just dsh-e2e    # 真实一轮（需 ARIA_DSH_E2E=1 + DSH_BIN + 供应商密钥�
 
 > **存储边界：** **云端**把对话 / 长期上下文保存在 Postgres + pgvector
 >（`context_fragments`，按 principal 分片）—— pgvector 为必需，缺少则启动失败。
-> **端侧** SDK 则保留其 aria memo（SQLite）存储。详见
+> SDK 的 `local` 后端则在端侧保留一份 aria memo（SQLite）副本。详见
 >`docs/adr/0010-context-storage-pgvector.md`。
 
 <div align="right">
@@ -156,7 +156,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 just ffi
 
 # 5. 本地启动 pgvector，然后用 cargo run 运行云端 API
-[ -f .env ] || cp .env.example .env   # 先在 .env 中设置 GATEWAY_API_KEY
+[ -f .env ] || cp .env.example .env  # 先在 .env 中设置 GATEWAY_API_KEY
 set -a
 source ./.env
 set +a
@@ -349,7 +349,7 @@ HNSW 余弦索引），按 `principal_id` 分片。compose 使用
 `CREATE EXTENSION IF NOT EXISTS vector` 并校验，缺少扩展时**直接启动失败**
 （不做关键词降级）。
 
-端侧 SDK 继续使用自己的 aria memo（SQLite）存储（`aria-agent-memo`），不受此约束。
+SDK 的 `local` 后端通过 `aria-memo` CLI 在端侧保留 aria memo（SQLite）副本，不受此约束。
 
 ### 5. 通过 Docker socket 的 sandbox
 
@@ -585,13 +585,14 @@ async for event in streamed.events:
 |---|---|---|
 | Python | `pip install ariacompute-agent` | `ariacompute_agent`（云端 API 客户端） |
 | TypeScript / JavaScript | `npm i @ariacompute/agent` | `@ariacompute/agent`（云端 API 客户端） |
-| Rust | `cargo add ariacompute-agent` | `aria_agent_ffi`（进程内 / 原生） |
-| Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift`（进程内 / 原生） |
-| Kotlin | `com.ariacompute:agent` | `bindings/kotlin`（进程内 / 原生） |
+| Rust | `cargo add ariacompute-agent` | `aria_agent_ffi`（云端 API 客户端） |
+| Swift | SwiftPM / CocoaPods `AriaComputeAgent` | `bindings/swift`（云端 API 客户端） |
+| Kotlin | `com.ariacompute:agent` | `bindings/kotlin`（云端 API 客户端） |
 
-JS / Python SDK 是服务仍然暴露的 beta Agents REST API 的薄客户端 —— 协议细节见
-[OpenAI Agents API 兼容性](#-openai-agents-api-兼容性)；Rust / Swift / Kotlin SDK
-把运行时**嵌入进程内**，上下文保存在端侧存储（无服务端、无网络）。
+所有 SDK 都是服务暴露的 beta Agents REST API 的薄客户端 —— 协议细节见
+[OpenAI Agents API 兼容性](#-openai-agents-api-兼容性)。Rust / Swift / Kotlin 通过
+UniFFI 使用同一套 HTTP 接口：设备上没有内嵌运行时、没有 sandbox、也不需要模型密钥；
+唯一的本地产物是 `backend = "local"` 时的那份 aria memo 副本。
 
 云端 SDK 需要服务已启动（见「快速开始」），并通过 `ARIA_AGENT_BASE_URL`
 （默认 `http://localhost:3000`）与 `ARIA_AGENT_API_KEY`（当设置了
@@ -603,9 +604,11 @@ JS / Python SDK 是服务仍然暴露的 beta Agents REST API 的薄客户端 �
 2. **复用同一会话继续对话**（先用 `memorize` 写入一条长期记忆）；
 3. **流式运行（streaming run）** —— `runStreamed` / `Runner.run_streamed`。
 
-长期记忆保存在 agent 自己的上下文存储中：`memorize(key, value)` 会把一条事实以
+长期记忆保存在会话的上下文存储中：`memorize(key, value)` 会把一条事实以
 `long_term` 上下文片段持久化，同一会话的后续轮次可以语义召回它（重启后依然有效）。
-云端 SDK 的存储是 Postgres + pgvector；原生 SDK 的存储是端侧（on-device）存储。
+所有 SDK 共用同样的三种后端（见下）：`cloud` 是服务的 Postgres + pgvector 存储，
+`local` 是经 `aria-memo` CLI 读写的 aria memo（SQLite）存储；Rust / Swift / Kotlin
+同样不再内嵌任何存储。
 
 ### 记忆后端：cloud / local / both
 
@@ -626,7 +629,10 @@ session.recall("user_name", backend="local")  # -> 只读 local 副本
 ```
 
 ```typescript
-const agent = new Agent({ name: "History tutor", memory: "both", memoDb: "~/.ariacompute/memo.db" });
+const agent = new Agent({
+  name: "History tutor",
+  memory: { backend: "both", memoDb: "~/.ariacompute/memo.db" },
+});
 await session.memorize("user_name", "Ada");               // -> 写入 both
 await session.recall("user_name", { backend: "local" });  // -> 只读 local 副本
 ```
@@ -697,7 +703,8 @@ asyncio.run(main())
 
 传输层会把失败统一归一化为带类型的 `AriaError`（`kind ∈ {auth, network, api,
 config, unknown}`）：`401/403` → `auth`，其他非 2xx → `api`（携带 HTTP
-`status`），连接失败 → `network`，本地误用（例如非正的 `max_turns`）→ `config`。
+`status`），连接失败 → `network`，本地误用（例如非正的 `max_turns`、未知的记忆后端）
+→ `config`。一个 `agent.*` 帧都没有的流属于 `unknown` —— 绝不当成空答案。
 请基于 `err.kind` 分支，而不是去匹配错误文案。
 
 ```python
@@ -736,8 +743,7 @@ const agent = new Agent({
   model: "gpt-4o-mini",
   tools: [historyFunFact],
   // 记忆后端：cloud | local（aria memo）| both
-  memory: "both",
-  memoDb: "~/.ariacompute/memo.db",
+  memory: { backend: "both", memoDb: "~/.ariacompute/memo.db" },
 });
 
 const session = await Session.create(agent);
@@ -772,163 +778,182 @@ console.log(result.finalOutput);
 if (result.usage) console.log(`tokens: ${result.usage.totalTokens}`);
 ```
 
-### Rust（进程内）
+### Rust（cloud 客户端）
 
-> **运行时选择。** 进程内 SDK 默认使用 `native` 循环（移动端通常没有 `dsh` 二进制）；
-> 设 `ARIA_AGENT_HARNESS=dsh` 可让它们的回合同样跑在 DeepSeek Harness 上。选了 `dsh`
-> 却没有可用运行时会得到可操作报错，绝不降级。
+Rust 侧与 JS/Python 是同一套 HTTP 客户端：没有运行时、没有 sandbox、没有模型密钥，
+只有云端 API。`run` 在未传会话时自动创建，`memorize`/`recall` 可选
+`cloud` | `local`（aria-memo CLI）| `both`，`run_streamed` 把每个 `agent.*` 帧交给监听器。
 
 ```rust
-use aria_agent_ffi::{create_agent, SdkAgentListener, SdkStreamEvent};
+use aria_agent_ffi::{
+    AriaAgent, AriaAgentConfig, ClientOptions, MemoryConfig, StreamEvent, StreamListener,
+};
 
 struct Printer;
 
-impl SdkAgentListener for Printer {
-    fn on_event(&self, event: SdkStreamEvent) {
-        match event {
-            SdkStreamEvent::Token { text } => print!("{text}"),
-            SdkStreamEvent::Approval { tool, decision, reason, .. } => {
-                eprintln!("\n[tool {tool}: {decision} - {}]", reason.unwrap_or_default());
-            }
-            SdkStreamEvent::Usage {
-                input_tokens,
-                output_tokens,
-                ..
-            } => eprintln!("\n[tokens: {}]", input_tokens + output_tokens),
+impl StreamListener for Printer {
+    fn on_event(&self, event: StreamEvent) {
+        match event.kind.as_str() {
+            "agent.turn.output_text.delta" => print!("{}", event.delta.unwrap_or_default()),
+            "agent.turn.usage" => eprintln!("\n[tokens]"),
             _ => {}
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
-    // `memory` 选择 cloud | local（aria memo）| both，默认 `local`
-    let agent = create_agent_with(SdkAgentConfig {
-        agent_name: "History tutor".into(),
-        model: "gpt-4o-mini".into(),
-        memory: SdkMemoryConfig {
-            backend: "both".into(),
-            local_db_path: "~/.ariacompute/memo.db".into(),
-            cloud_base_url: "http://localhost:3000".into(),
-            cloud_api_key: String::new(),
-        },
-        ..Default::default()
+    let agent = AriaAgent::new(AriaAgentConfig {
+        name: "History tutor".into(),
+        instructions: Some("Be concise.".into()),
+        model: None,
+        id: None,
+        client: Some(ClientOptions {
+            base_url: Some("http://localhost:3000".into()),
+            api_key: Some(std::env::var("ARIA_AGENT_API_KEY")?),
+            beta_header: None,
+        }),
+        // cloud | local（aria-memo CLI）| both；单次调用可用 backend 覆盖。
+        memory: Some(MemoryConfig {
+            backend: Some("both".into()),
+            memo_bin: None,
+            memo_db: Some("~/.ariacompute/memo.db".into()),
+        }),
     })?;
 
-    // 1) 一次性运行
-    println!("{}", agent.run("罗马帝国何时灭亡？".into())?);
+    // 1) 一次性运行 —— 云端会创建并返回会话。
+    let first = agent.run("When did the Roman Empire fall?".into(), None)?;
+    println!("{}", first.final_output);
 
-    // 长期记忆保存在端侧存储：`memorize` 把一条事实以 `long_term` 片段持久化，
-    // 该 agent 的后续轮次可以召回它。
-    let session = agent.session();
-    session.memorize("user_name".into(), "Ada".into())?;
-
-    // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
-    println!("{}", agent.run("我叫什么名字？".into())?);
+    // 2) 复用会话，后续回合能看到前面的对话。
+    let session = agent.create_session()?;
+    session.memorize("user_name".into(), "Ada".into(), None)?;
+    println!("{}", agent.run("What is my name?".into(), Some(session.clone()))?.final_output);
     println!("{:?}", session.recall("user_name".into(), None)?);  // -> Some("Ada")
-    // 单次覆盖：只读 aria memo 副本
     println!("{:?}", session.recall("user_name".into(), Some("local".into()))?);
 
-    // 3) 流式运行 —— 事件推送给监听器
-    agent.run_stream("讲一个冷知识".into(), Box::new(Printer))?;
+    // 3) 流式运行 —— 每个帧按线序交给监听器。
+    let result = agent.run_streamed(
+        "Tell me something surprising".into(),
+        Some(session),
+        Box::new(Printer),
+        None,
+    )?;
+    println!("\n{}", result.final_output);
     Ok(())
 }
 ```
 
-### Swift（进程内）
+### Swift（cloud 客户端）
 
-嵌入 `libaria-agent_ffi` 与生成的 `AriaComputeAgent` 模块（见 `bindings/swift/README.md`）。
+嵌入 `libaria-agent_ffi` 与生成的 `AriaComputeAgent` 模块（见
+`bindings/swift/README.md`）。全部走 HTTP，因此 iOS 上同样可用。
 
 ```swift
 import AriaComputeAgent
 
+final class Printer: StreamListener {
+    func onEvent(event: StreamEvent) {
+        switch event.kind {
+        case "agent.turn.output_text.delta": print(event.delta ?? "", terminator: "")
+        case "agent.turn.usage": print("\n[tokens]")
+        default: break
+        }
+    }
+}
+
 do {
-    // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
-    // `memory` 选择 cloud | local（aria memo）| both，默认 `local`
-    let agent = try createAgentWith(config: SdkAgentConfig(
-        agentName: "History tutor",
-        instructions: "",
-        model: "gpt-4o-mini",
-        sandboxProvider: "docker",
-        memory: SdkMemoryConfig(
-            backend: "both",
-            localDbPath: "~/.ariacompute/memo.db",
-            cloudBaseUrl: "http://localhost:3000",
-            cloudApiKey: ""
+    let agent = try AriaAgent(config: AriaAgentConfig(
+        name: "History tutor",
+        instructions: "Be concise.",
+        model: nil,
+        id: nil,
+        client: ClientOptions(
+            baseUrl: "http://localhost:3000",
+            apiKey: ProcessInfo.processInfo.environment["ARIA_AGENT_API_KEY"],
+            betaHeader: nil
         ),
-        // Permission preset: read_only | workspace_write | danger_full_access.
-        permissionPreset: "workspace_write",
-        // Approval mode: auto (trusted local run) | deny (fail-closed).
-        approvalMode: "auto"
+        // cloud | local（aria-memo CLI）| both。
+        memory: MemoryConfig(
+            backend: "both",
+            memoBin: nil,
+            memoDb: "~/.ariacompute/memo.db"
+        )
     ))
 
-    // 1) 一次性运行
-    print(try agent.run("罗马帝国何时灭亡？"))
+    // 1) 一次性运行 —— 云端会创建并返回会话。
+    print(try agent.run(input: "When did the Roman Empire fall?", session: nil).finalOutput)
 
-    // 长期记忆保存在端侧存储：`memorize` 把一条事实以 `long_term` 片段持久化，
-    // 该 agent 的后续轮次可以召回它。
-    let session = agent.session()
-    try session.memorize(key: "user_name", value: "Ada")
-
-    // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
-    print(try agent.run("我叫什么名字？"))
+    // 2) 复用会话，后续回合能看到前面的对话。
+    let session = try agent.createSession()
+    try session.memorize(key: "user_name", value: "Ada", backend: nil)
+    print(try agent.run(input: "What is my name?", session: session).finalOutput)
     print(try session.recall(key: "user_name", backend: nil) ?? "")  // -> "Ada"
-    // 单次覆盖：只读 aria memo 副本
     print(try session.recall(key: "user_name", backend: "local") ?? "")
 
-    // 3) 流式运行 —— 事件交给监听器处理
-    try agent.runStream("讲一个冷知识", listener: Printer())
+    // 3) 流式运行 —— 每个帧按线序交给监听器。
+    let result = try agent.runStreamed(
+        input: "Tell me something surprising",
+        session: session,
+        listener: Printer(),
+        maxTurns: nil
+    )
+    print(result.finalOutput)
 } catch {
     print(error)
 }
 ```
 
-### Kotlin（进程内）
+### Kotlin（cloud 客户端）
 
-添加 `com.ariacompute:agent` 依赖与 `libaria-agent_ffi` 原生库（见
-`bindings/kotlin/agent-sdk/README.md`）。
+引入 `com.ariacompute:agent` 构件与 `libaria-agent_ffi` 原生库（见
+`bindings/kotlin/agent-sdk/README.md`）。全部走 HTTP，因此 Android 上同样可用。
 
 ```kotlin
 import com.ariacompute.agent.uniffi.aria_agent_ffi.*
 
+class Printer : StreamListener {
+    override fun onEvent(event: StreamEvent) {
+        when (event.kind) {
+            "agent.turn.output_text.delta" -> print(event.delta ?: "")
+            "agent.turn.usage" -> println("\n[tokens]")
+        }
+    }
+}
+
 fun main() {
-    // 无需传入会话：运行时为每个 agent 实例分配一个隔离的上下文作用域
-    // `memory` 选择 cloud | local（aria memo）| both，默认 `local`
-    val agent = createAgentWith(
-        SdkAgentConfig(
-            agentName = "History tutor",
-            instructions = "",
-            model = "gpt-4o-mini",
-            sandboxProvider = "docker",
-            memory = SdkMemoryConfig(
-                backend = "both",
-                localDbPath = "~/.ariacompute/memo.db",
-                cloudBaseUrl = "http://localhost:3000",
-                cloudApiKey = ""
+    val agent = AriaAgent(
+        AriaAgentConfig(
+            name = "History tutor",
+            instructions = "Be concise.",
+            model = null,
+            id = null,
+            client = ClientOptions(
+                baseUrl = "http://localhost:3000",
+                apiKey = System.getenv("ARIA_AGENT_API_KEY"),
+                betaHeader = null
             ),
-            // Permission preset: read_only | workspace_write | danger_full_access.
-            permissionPreset = "workspace_write",
-            // Approval mode: auto (trusted local run) | deny (fail-closed).
-            approvalMode = "auto"
+            // cloud | local（aria-memo CLI）| both。
+            memory = MemoryConfig(
+                backend = "both",
+                memoBin = null,
+                memoDb = "~/.ariacompute/memo.db"
+            )
         )
     )
 
-    // 1) 一次性运行
-    println(agent.run("罗马帝国何时灭亡？"))
+    // 1) 一次性运行 —— 云端会创建并返回会话。
+    println(agent.run("When did the Roman Empire fall?", null).finalOutput)
 
-    // 长期记忆保存在端侧存储：`memorize` 把一条事实以 `long_term` 片段持久化，
-    // 该 agent 的后续轮次可以召回它。
-    val session = agent.session()
-    session.memorize("user_name", "Ada")
-
-    // 2) 复用同一会话继续对话（同一 agent / 会话作用域）—— 回复可引用前面的轮次与记忆
-    println(agent.run("我叫什么名字？"))
+    // 2) 复用会话，后续回合能看到前面的对话。
+    val session = agent.createSession()
+    session.memorize("user_name", "Ada", null)
+    println(agent.run("What is my name?", session).finalOutput)
     println(session.recall("user_name", null))  // -> "Ada"
-    // 单次覆盖：只读 aria memo 副本
     println(session.recall("user_name", "local"))
 
-    // 3) 流式运行 —— 事件交给监听器处理
-    agent.runStream("讲一个冷知识", Printer())
+    // 3) 流式运行 —— 每个帧按线序交给监听器。
+    val result = agent.runStreamed("Tell me something surprising", session, Printer(), null)
+    println(result.finalOutput)
 }
 ```
 

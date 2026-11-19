@@ -399,11 +399,27 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
-    typealias FfiType = UInt64
-    typealias SwiftType = UInt64
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
         return try lift(readInt(&buf))
     }
 
@@ -457,46 +473,58 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 /**
- * A native agent handle. Construct via [`create_agent`].
+ * The agent definition plus its client configuration.
  */
-public protocol SdkAgentProtocol : AnyObject {
+public protocol AriaAgentProtocol : AnyObject {
     
     /**
-     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     * Create a server-side session bound to this agent.
      */
-    func memoryBackend()  -> String
+    func createSession() throws  -> Session
     
     /**
-     * Run a single turn and return the assistant reply.
+     * The cloud agent id, when the caller supplied one.
      */
-    func run(input: String) throws  -> String
+    func id()  -> String?
     
     /**
-     * Run a single agentic turn, streaming events to `listener` as they arrive.
-     * The call blocks until the run terminates (a `Done` or `Error` event). The
-     * memo contract (recall before / persist both turns after) is honored by the
-     * underlying runtime.
+     * The configured model, if any.
      */
-    func runStream(input: String, listener: SdkAgentListener) throws 
+    func model()  -> String?
     
     /**
-     * Get the session memory handle for this agent.
+     * The agent's name.
      */
-    func session()  -> SdkSession
+    func name()  -> String
     
     /**
-     * The auto-assigned session id (context scope). Useful when relaying a run
-     * to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
+     * Run one turn to completion (`POST …/events`).
+     *
+     * `session` is created on demand when `None`.
      */
-    func sessionId()  -> String
+    func run(input: String, session: Session?) throws  -> RunResult
+    
+    /**
+     * Run one turn, streaming every `agent.*` frame to `listener`.
+     *
+     * Returns once the terminal frame arrives. `max_turns` is a client-side
+     * safety cap on `agent.turn.created` frames (the cloud controls multi-step
+     * execution); it must be a positive integer when provided.
+     */
+    func runStreamed(input: String, session: Session?, listener: StreamListener, maxTurns: UInt32?) throws  -> RunResult
+    
+    /**
+     * Wrap an existing server-side session id.
+     */
+    func session(id: String) throws  -> Session
     
 }
 
 /**
- * A native agent handle. Construct via [`create_agent`].
+ * The agent definition plus its client configuration.
  */
-open class SdkAgent:
-    SdkAgentProtocol {
+open class AriaAgent:
+    AriaAgentProtocol {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -530,73 +558,111 @@ open class SdkAgent:
     @_documentation(visibility: private)
 #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_aria_agent_ffi_fn_clone_sdkagent(self.pointer, $0) }
+        return try! rustCall { uniffi_aria_agent_ffi_fn_clone_ariaagent(self.pointer, $0) }
     }
-    // No primary constructor declared for this class.
+    /**
+     * Validate the config and resolve the client (config → env → defaults).
+     */
+public convenience init(config: AriaAgentConfig)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_constructor_ariaagent_new(
+        FfiConverterTypeAriaAgentConfig.lower(config),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
 
     deinit {
         guard let pointer = pointer else {
             return
         }
 
-        try! rustCall { uniffi_aria_agent_ffi_fn_free_sdkagent(pointer, $0) }
+        try! rustCall { uniffi_aria_agent_ffi_fn_free_ariaagent(pointer, $0) }
     }
 
     
 
     
     /**
-     * The memory backend this agent defaults to (`cloud` / `local` / `both`).
+     * Create a server-side session bound to this agent.
      */
-open func memoryBackend() -> String {
+open func createSession()throws  -> Session {
+    return try  FfiConverterTypeSession.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_ariaagent_create_session(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * The cloud agent id, when the caller supplied one.
+     */
+open func id() -> String? {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_ariaagent_id(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * The configured model, if any.
+     */
+open func model() -> String? {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_ariaagent_model(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * The agent's name.
+     */
+open func name() -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_aria_agent_ffi_fn_method_sdkagent_memory_backend(self.uniffiClonePointer(),$0
+    uniffi_aria_agent_ffi_fn_method_ariaagent_name(self.uniffiClonePointer(),$0
     )
 })
 }
     
     /**
-     * Run a single turn and return the assistant reply.
+     * Run one turn to completion (`POST …/events`).
+     *
+     * `session` is created on demand when `None`.
      */
-open func run(input: String)throws  -> String {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_method_sdkagent_run(self.uniffiClonePointer(),
-        FfiConverterString.lower(input),$0
-    )
-})
-}
-    
-    /**
-     * Run a single agentic turn, streaming events to `listener` as they arrive.
-     * The call blocks until the run terminates (a `Done` or `Error` event). The
-     * memo contract (recall before / persist both turns after) is honored by the
-     * underlying runtime.
-     */
-open func runStream(input: String, listener: SdkAgentListener)throws  {try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_method_sdkagent_run_stream(self.uniffiClonePointer(),
+open func run(input: String, session: Session?)throws  -> RunResult {
+    return try  FfiConverterTypeRunResult.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_ariaagent_run(self.uniffiClonePointer(),
         FfiConverterString.lower(input),
-        FfiConverterCallbackInterfaceSdkAgentListener.lower(listener),$0
-    )
-}
-}
-    
-    /**
-     * Get the session memory handle for this agent.
-     */
-open func session() -> SdkSession {
-    return try!  FfiConverterTypeSdkSession.lift(try! rustCall() {
-    uniffi_aria_agent_ffi_fn_method_sdkagent_session(self.uniffiClonePointer(),$0
+        FfiConverterOptionTypeSession.lower(session),$0
     )
 })
 }
     
     /**
-     * The auto-assigned session id (context scope). Useful when relaying a run
-     * to the cloud `POST /v1/agents/sessions/{id}/events/stream` endpoint.
+     * Run one turn, streaming every `agent.*` frame to `listener`.
+     *
+     * Returns once the terminal frame arrives. `max_turns` is a client-side
+     * safety cap on `agent.turn.created` frames (the cloud controls multi-step
+     * execution); it must be a positive integer when provided.
      */
-open func sessionId() -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_aria_agent_ffi_fn_method_sdkagent_session_id(self.uniffiClonePointer(),$0
+open func runStreamed(input: String, session: Session?, listener: StreamListener, maxTurns: UInt32?)throws  -> RunResult {
+    return try  FfiConverterTypeRunResult.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_ariaagent_run_streamed(self.uniffiClonePointer(),
+        FfiConverterString.lower(input),
+        FfiConverterOptionTypeSession.lower(session),
+        FfiConverterCallbackInterfaceStreamListener.lower(listener),
+        FfiConverterOptionUInt32.lower(maxTurns),$0
+    )
+})
+}
+    
+    /**
+     * Wrap an existing server-side session id.
+     */
+open func session(id: String)throws  -> Session {
+    return try  FfiConverterTypeSession.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_ariaagent_session(self.uniffiClonePointer(),
+        FfiConverterString.lower(id),$0
     )
 })
 }
@@ -607,20 +673,20 @@ open func sessionId() -> String {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSdkAgent: FfiConverter {
+public struct FfiConverterTypeAriaAgent: FfiConverter {
 
     typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = SdkAgent
+    typealias SwiftType = AriaAgent
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> SdkAgent {
-        return SdkAgent(unsafeFromRawPointer: pointer)
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AriaAgent {
+        return AriaAgent(unsafeFromRawPointer: pointer)
     }
 
-    public static func lower(_ value: SdkAgent) -> UnsafeMutableRawPointer {
+    public static func lower(_ value: AriaAgent) -> UnsafeMutableRawPointer {
         return value.uniffiClonePointer()
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkAgent {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AriaAgent {
         let v: UInt64 = try readInt(&buf)
         // The Rust code won't compile if a pointer won't fit in a UInt64.
         // We have to go via `UInt` because that's the thing that's the size of a pointer.
@@ -631,7 +697,7 @@ public struct FfiConverterTypeSdkAgent: FfiConverter {
         return try lift(ptr!)
     }
 
-    public static func write(_ value: SdkAgent, into buf: inout [UInt8]) {
+    public static func write(_ value: AriaAgent, into buf: inout [UInt8]) {
         // This fiddling is because `Int` is the thing that's the same size as a pointer.
         // The Rust code won't compile if a pointer won't fit in a `UInt64`.
         writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
@@ -644,59 +710,72 @@ public struct FfiConverterTypeSdkAgent: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkAgent_lift(_ pointer: UnsafeMutableRawPointer) throws -> SdkAgent {
-    return try FfiConverterTypeSdkAgent.lift(pointer)
+public func FfiConverterTypeAriaAgent_lift(_ pointer: UnsafeMutableRawPointer) throws -> AriaAgent {
+    return try FfiConverterTypeAriaAgent.lift(pointer)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkAgent_lower(_ value: SdkAgent) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeSdkAgent.lower(value)
+public func FfiConverterTypeAriaAgent_lower(_ value: AriaAgent) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAriaAgent.lower(value)
 }
 
 
 
 
 /**
- * A session's context handle (long-term / externalized memory).
- *
- * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
- * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
- * override it for a single call.
+ * A server-side session: conversation id plus its keyed memory.
  */
-public protocol SdkSessionProtocol : AnyObject {
+public protocol SessionProtocol : AnyObject {
     
     /**
-     * Write a long-term memory under `key`.
-     *
-     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
-     * this call; pass `null` to use the default.
+     * The client-side conversation mirror (`[{role, content}]`).
+     */
+    func historyJson()  -> String
+    
+    /**
+     * The server-side session id.
+     */
+    func id()  -> String
+    
+    /**
+     * `GET …/items` as a JSON array.
+     */
+    func itemsJson() throws  -> String
+    
+    /**
+     * Write one keyed long-term memory (`backend` overrides the default).
      */
     func memorize(key: String, value: String, backend: String?) throws 
     
     /**
-     * The backend this session defaults to (`cloud` / `local` / `both`).
+     * The memory backend used when a call does not override it.
      */
     func memoryBackend()  -> String
     
     /**
-     * Read a long-term memory by `key` (same `backend` override as
-     * [`SdkSession::memorize`]).
+     * Read one keyed long-term memory (`None` when the key is missing).
      */
     func recall(key: String, backend: String?) throws  -> String?
+    
+    /**
+     * `GET …/title` as a JSON object (404 before the first turn).
+     */
+    func titleJson() throws  -> String
+    
+    /**
+     * `GET …/turns` as a JSON array.
+     */
+    func turnsJson() throws  -> String
     
 }
 
 /**
- * A session's context handle (long-term / externalized memory).
- *
- * The default backend comes from the agent's [`SdkMemoryConfig`]; `memorize` /
- * `recall` accept an optional `backend` (`cloud` / `local` / `both`) to
- * override it for a single call.
+ * A server-side session: conversation id plus its keyed memory.
  */
-open class SdkSession:
-    SdkSessionProtocol {
+open class Session:
+    SessionProtocol {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -730,7 +809,7 @@ open class SdkSession:
     @_documentation(visibility: private)
 #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_aria_agent_ffi_fn_clone_sdksession(self.pointer, $0) }
+        return try! rustCall { uniffi_aria_agent_ffi_fn_clone_session(self.pointer, $0) }
     }
     // No primary constructor declared for this class.
 
@@ -739,20 +818,47 @@ open class SdkSession:
             return
         }
 
-        try! rustCall { uniffi_aria_agent_ffi_fn_free_sdksession(pointer, $0) }
+        try! rustCall { uniffi_aria_agent_ffi_fn_free_session(pointer, $0) }
     }
 
     
 
     
     /**
-     * Write a long-term memory under `key`.
-     *
-     * `backend` (`cloud` / `local` / `both`) overrides the agent default for
-     * this call; pass `null` to use the default.
+     * The client-side conversation mirror (`[{role, content}]`).
      */
-open func memorize(key: String, value: String, backend: String?)throws  {try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_method_sdksession_memorize(self.uniffiClonePointer(),
+open func historyJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_session_history_json(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * The server-side session id.
+     */
+open func id() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_aria_agent_ffi_fn_method_session_id(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * `GET …/items` as a JSON array.
+     */
+open func itemsJson()throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_session_items_json(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Write one keyed long-term memory (`backend` overrides the default).
+     */
+open func memorize(key: String, value: String, backend: String?)throws  {try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_session_memorize(self.uniffiClonePointer(),
         FfiConverterString.lower(key),
         FfiConverterString.lower(value),
         FfiConverterOptionString.lower(backend),$0
@@ -761,24 +867,43 @@ open func memorize(key: String, value: String, backend: String?)throws  {try rus
 }
     
     /**
-     * The backend this session defaults to (`cloud` / `local` / `both`).
+     * The memory backend used when a call does not override it.
      */
 open func memoryBackend() -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_aria_agent_ffi_fn_method_sdksession_memory_backend(self.uniffiClonePointer(),$0
+    uniffi_aria_agent_ffi_fn_method_session_memory_backend(self.uniffiClonePointer(),$0
     )
 })
 }
     
     /**
-     * Read a long-term memory by `key` (same `backend` override as
-     * [`SdkSession::memorize`]).
+     * Read one keyed long-term memory (`None` when the key is missing).
      */
 open func recall(key: String, backend: String?)throws  -> String? {
-    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_method_sdksession_recall(self.uniffiClonePointer(),
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_session_recall(self.uniffiClonePointer(),
         FfiConverterString.lower(key),
         FfiConverterOptionString.lower(backend),$0
+    )
+})
+}
+    
+    /**
+     * `GET …/title` as a JSON object (404 before the first turn).
+     */
+open func titleJson()throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_session_title_json(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * `GET …/turns` as a JSON array.
+     */
+open func turnsJson()throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAriaError.lift) {
+    uniffi_aria_agent_ffi_fn_method_session_turns_json(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -789,20 +914,20 @@ open func recall(key: String, backend: String?)throws  -> String? {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSdkSession: FfiConverter {
+public struct FfiConverterTypeSession: FfiConverter {
 
     typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = SdkSession
+    typealias SwiftType = Session
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> SdkSession {
-        return SdkSession(unsafeFromRawPointer: pointer)
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> Session {
+        return Session(unsafeFromRawPointer: pointer)
     }
 
-    public static func lower(_ value: SdkSession) -> UnsafeMutableRawPointer {
+    public static func lower(_ value: Session) -> UnsafeMutableRawPointer {
         return value.uniffiClonePointer()
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkSession {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Session {
         let v: UInt64 = try readInt(&buf)
         // The Rust code won't compile if a pointer won't fit in a UInt64.
         // We have to go via `UInt` because that's the thing that's the size of a pointer.
@@ -813,7 +938,7 @@ public struct FfiConverterTypeSdkSession: FfiConverter {
         return try lift(ptr!)
     }
 
-    public static func write(_ value: SdkSession, into buf: inout [UInt8]) {
+    public static func write(_ value: Session, into buf: inout [UInt8]) {
         // This fiddling is because `Int` is the thing that's the same size as a pointer.
         // The Rust code won't compile if a pointer won't fit in a `UInt64`.
         writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
@@ -826,65 +951,82 @@ public struct FfiConverterTypeSdkSession: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> SdkSession {
-    return try FfiConverterTypeSdkSession.lift(pointer)
+public func FfiConverterTypeSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> Session {
+    return try FfiConverterTypeSession.lift(pointer)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkSession_lower(_ value: SdkSession) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeSdkSession.lower(value)
+public func FfiConverterTypeSession_lower(_ value: Session) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeSession.lower(value)
 }
 
 
 /**
- * SDK-side agent configuration (advanced path). `session` is intentionally
- * absent: the runtime assigns one isolated context scope per agent instance.
- *
- * Agent definition: name + instructions + model.
+ * The agent definition sent to the cloud (name, instructions, model).
  */
-public struct SdkAgentConfig {
-    public var agentName: String
-    public var instructions: String
-    public var model: String
-    public var sandboxProvider: String
-    public var memory: SdkMemoryConfig
+public struct AriaAgentConfig {
     /**
-     * `read_only` | `workspace_write` | `danger_full_access` (default
-     * `workspace_write`, the trusted-local preset).
+     * Display name; the cloud resolves or creates the agent by name.
      */
-    public var permissionPreset: String
+    public var name: String
     /**
-     * `auto` (default, trusted local run) | `deny` (fail-closed).
+     * Instructions appended to the agent's base prompt.
      */
-    public var approvalMode: String
+    public var instructions: String?
+    /**
+     * Model override (provider-specific id).
+     */
+    public var model: String?
+    /**
+     * Existing cloud agent id (skips the name lookup).
+     */
+    public var id: String?
+    /**
+     * Client configuration.
+     */
+    public var client: ClientOptions?
+    /**
+     * Memory configuration inherited by sessions created from this agent.
+     */
+    public var memory: MemoryConfig?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(agentName: String, instructions: String, model: String, sandboxProvider: String, memory: SdkMemoryConfig, 
+    public init(
         /**
-         * `read_only` | `workspace_write` | `danger_full_access` (default
-         * `workspace_write`, the trusted-local preset).
-         */permissionPreset: String, 
+         * Display name; the cloud resolves or creates the agent by name.
+         */name: String, 
         /**
-         * `auto` (default, trusted local run) | `deny` (fail-closed).
-         */approvalMode: String) {
-        self.agentName = agentName
+         * Instructions appended to the agent's base prompt.
+         */instructions: String?, 
+        /**
+         * Model override (provider-specific id).
+         */model: String?, 
+        /**
+         * Existing cloud agent id (skips the name lookup).
+         */id: String?, 
+        /**
+         * Client configuration.
+         */client: ClientOptions?, 
+        /**
+         * Memory configuration inherited by sessions created from this agent.
+         */memory: MemoryConfig?) {
+        self.name = name
         self.instructions = instructions
         self.model = model
-        self.sandboxProvider = sandboxProvider
+        self.id = id
+        self.client = client
         self.memory = memory
-        self.permissionPreset = permissionPreset
-        self.approvalMode = approvalMode
     }
 }
 
 
 
-extension SdkAgentConfig: Equatable, Hashable {
-    public static func ==(lhs: SdkAgentConfig, rhs: SdkAgentConfig) -> Bool {
-        if lhs.agentName != rhs.agentName {
+extension AriaAgentConfig: Equatable, Hashable {
+    public static func ==(lhs: AriaAgentConfig, rhs: AriaAgentConfig) -> Bool {
+        if lhs.name != rhs.name {
             return false
         }
         if lhs.instructions != rhs.instructions {
@@ -893,29 +1035,25 @@ extension SdkAgentConfig: Equatable, Hashable {
         if lhs.model != rhs.model {
             return false
         }
-        if lhs.sandboxProvider != rhs.sandboxProvider {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.client != rhs.client {
             return false
         }
         if lhs.memory != rhs.memory {
-            return false
-        }
-        if lhs.permissionPreset != rhs.permissionPreset {
-            return false
-        }
-        if lhs.approvalMode != rhs.approvalMode {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(agentName)
+        hasher.combine(name)
         hasher.combine(instructions)
         hasher.combine(model)
-        hasher.combine(sandboxProvider)
+        hasher.combine(id)
+        hasher.combine(client)
         hasher.combine(memory)
-        hasher.combine(permissionPreset)
-        hasher.combine(approvalMode)
     }
 }
 
@@ -923,28 +1061,26 @@ extension SdkAgentConfig: Equatable, Hashable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkAgentConfig {
+public struct FfiConverterTypeAriaAgentConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AriaAgentConfig {
         return
-            try SdkAgentConfig(
-                agentName: FfiConverterString.read(from: &buf), 
-                instructions: FfiConverterString.read(from: &buf), 
-                model: FfiConverterString.read(from: &buf), 
-                sandboxProvider: FfiConverterString.read(from: &buf), 
-                memory: FfiConverterTypeSdkMemoryConfig.read(from: &buf), 
-                permissionPreset: FfiConverterString.read(from: &buf), 
-                approvalMode: FfiConverterString.read(from: &buf)
+            try AriaAgentConfig(
+                name: FfiConverterString.read(from: &buf), 
+                instructions: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                id: FfiConverterOptionString.read(from: &buf), 
+                client: FfiConverterOptionTypeClientOptions.read(from: &buf), 
+                memory: FfiConverterOptionTypeMemoryConfig.read(from: &buf)
         )
     }
 
-    public static func write(_ value: SdkAgentConfig, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.agentName, into: &buf)
-        FfiConverterString.write(value.instructions, into: &buf)
-        FfiConverterString.write(value.model, into: &buf)
-        FfiConverterString.write(value.sandboxProvider, into: &buf)
-        FfiConverterTypeSdkMemoryConfig.write(value.memory, into: &buf)
-        FfiConverterString.write(value.permissionPreset, into: &buf)
-        FfiConverterString.write(value.approvalMode, into: &buf)
+    public static func write(_ value: AriaAgentConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.instructions, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.id, into: &buf)
+        FfiConverterOptionTypeClientOptions.write(value.client, into: &buf)
+        FfiConverterOptionTypeMemoryConfig.write(value.memory, into: &buf)
     }
 }
 
@@ -952,80 +1088,163 @@ public struct FfiConverterTypeSdkAgentConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkAgentConfig_lift(_ buf: RustBuffer) throws -> SdkAgentConfig {
-    return try FfiConverterTypeSdkAgentConfig.lift(buf)
+public func FfiConverterTypeAriaAgentConfig_lift(_ buf: RustBuffer) throws -> AriaAgentConfig {
+    return try FfiConverterTypeAriaAgentConfig.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkAgentConfig_lower(_ value: SdkAgentConfig) -> RustBuffer {
-    return FfiConverterTypeSdkAgentConfig.lower(value)
+public func FfiConverterTypeAriaAgentConfig_lower(_ value: AriaAgentConfig) -> RustBuffer {
+    return FfiConverterTypeAriaAgentConfig.lower(value)
 }
 
 
 /**
- * Where the agent's memory context lives.
- *
- * `backend` is `cloud` | `local` | `both` (unknown values fall back to
- * `local`, the offline-first default for the native SDK).
+ * Where the client points and how it authenticates.
  */
-public struct SdkMemoryConfig {
+public struct ClientOptions {
     /**
-     * `cloud` | `local` | `both`.
+     * Base URL of the cloud service (default `ARIA_AGENT_BASE_URL`, else
+     * `http://localhost:3000`).
      */
-    public var backend: String
+    public var baseUrl: String?
     /**
-     * aria memo database path (empty ⇒ a temporary per-process database).
+     * API key sent as `Authorization: Bearer <key>` (default `ARIA_AGENT_API_KEY`).
      */
-    public var localDbPath: String
+    public var apiKey: String?
     /**
-     * agent-cloud base URL for the `cloud` / `both` backends
-     * (empty ⇒ `ARIA_AGENT_BASE_URL` or `http://localhost:3000`).
+     * Override the `OpenAI-Beta` header (default `agents=v1`).
      */
-    public var cloudBaseUrl: String
-    /**
-     * API key for the cloud backend (empty ⇒ `ARIA_AGENT_API_KEY`).
-     */
-    public var cloudApiKey: String
+    public var betaHeader: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
-         * `cloud` | `local` | `both`.
-         */backend: String, 
+         * Base URL of the cloud service (default `ARIA_AGENT_BASE_URL`, else
+         * `http://localhost:3000`).
+         */baseUrl: String?, 
         /**
-         * aria memo database path (empty ⇒ a temporary per-process database).
-         */localDbPath: String, 
+         * API key sent as `Authorization: Bearer <key>` (default `ARIA_AGENT_API_KEY`).
+         */apiKey: String?, 
         /**
-         * agent-cloud base URL for the `cloud` / `both` backends
-         * (empty ⇒ `ARIA_AGENT_BASE_URL` or `http://localhost:3000`).
-         */cloudBaseUrl: String, 
-        /**
-         * API key for the cloud backend (empty ⇒ `ARIA_AGENT_API_KEY`).
-         */cloudApiKey: String) {
-        self.backend = backend
-        self.localDbPath = localDbPath
-        self.cloudBaseUrl = cloudBaseUrl
-        self.cloudApiKey = cloudApiKey
+         * Override the `OpenAI-Beta` header (default `agents=v1`).
+         */betaHeader: String?) {
+        self.baseUrl = baseUrl
+        self.apiKey = apiKey
+        self.betaHeader = betaHeader
     }
 }
 
 
 
-extension SdkMemoryConfig: Equatable, Hashable {
-    public static func ==(lhs: SdkMemoryConfig, rhs: SdkMemoryConfig) -> Bool {
+extension ClientOptions: Equatable, Hashable {
+    public static func ==(lhs: ClientOptions, rhs: ClientOptions) -> Bool {
+        if lhs.baseUrl != rhs.baseUrl {
+            return false
+        }
+        if lhs.apiKey != rhs.apiKey {
+            return false
+        }
+        if lhs.betaHeader != rhs.betaHeader {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(baseUrl)
+        hasher.combine(apiKey)
+        hasher.combine(betaHeader)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClientOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClientOptions {
+        return
+            try ClientOptions(
+                baseUrl: FfiConverterOptionString.read(from: &buf), 
+                apiKey: FfiConverterOptionString.read(from: &buf), 
+                betaHeader: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClientOptions, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.baseUrl, into: &buf)
+        FfiConverterOptionString.write(value.apiKey, into: &buf)
+        FfiConverterOptionString.write(value.betaHeader, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClientOptions_lift(_ buf: RustBuffer) throws -> ClientOptions {
+    return try FfiConverterTypeClientOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClientOptions_lower(_ value: ClientOptions) -> RustBuffer {
+    return FfiConverterTypeClientOptions.lower(value)
+}
+
+
+/**
+ * Memory backend configuration shared by the agent and its sessions.
+ */
+public struct MemoryConfig {
+    /**
+     * Default backend for `memorize` / `recall`: `cloud` | `local` | `both`.
+     */
+    public var backend: String?
+    /**
+     * `aria-memo` binary for the local backend (default `aria-memo`, or
+     * `ARIA_MEMO_BIN`).
+     */
+    public var memoBin: String?
+    /**
+     * aria memo database path (default `memo.db`, or `ARIA_MEMO_DB`).
+     */
+    public var memoDb: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Default backend for `memorize` / `recall`: `cloud` | `local` | `both`.
+         */backend: String?, 
+        /**
+         * `aria-memo` binary for the local backend (default `aria-memo`, or
+         * `ARIA_MEMO_BIN`).
+         */memoBin: String?, 
+        /**
+         * aria memo database path (default `memo.db`, or `ARIA_MEMO_DB`).
+         */memoDb: String?) {
+        self.backend = backend
+        self.memoBin = memoBin
+        self.memoDb = memoDb
+    }
+}
+
+
+
+extension MemoryConfig: Equatable, Hashable {
+    public static func ==(lhs: MemoryConfig, rhs: MemoryConfig) -> Bool {
         if lhs.backend != rhs.backend {
             return false
         }
-        if lhs.localDbPath != rhs.localDbPath {
+        if lhs.memoBin != rhs.memoBin {
             return false
         }
-        if lhs.cloudBaseUrl != rhs.cloudBaseUrl {
-            return false
-        }
-        if lhs.cloudApiKey != rhs.cloudApiKey {
+        if lhs.memoDb != rhs.memoDb {
             return false
         }
         return true
@@ -1033,9 +1252,8 @@ extension SdkMemoryConfig: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(backend)
-        hasher.combine(localDbPath)
-        hasher.combine(cloudBaseUrl)
-        hasher.combine(cloudApiKey)
+        hasher.combine(memoBin)
+        hasher.combine(memoDb)
     }
 }
 
@@ -1043,22 +1261,20 @@ extension SdkMemoryConfig: Equatable, Hashable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSdkMemoryConfig: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkMemoryConfig {
+public struct FfiConverterTypeMemoryConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MemoryConfig {
         return
-            try SdkMemoryConfig(
-                backend: FfiConverterString.read(from: &buf), 
-                localDbPath: FfiConverterString.read(from: &buf), 
-                cloudBaseUrl: FfiConverterString.read(from: &buf), 
-                cloudApiKey: FfiConverterString.read(from: &buf)
+            try MemoryConfig(
+                backend: FfiConverterOptionString.read(from: &buf), 
+                memoBin: FfiConverterOptionString.read(from: &buf), 
+                memoDb: FfiConverterOptionString.read(from: &buf)
         )
     }
 
-    public static func write(_ value: SdkMemoryConfig, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.backend, into: &buf)
-        FfiConverterString.write(value.localDbPath, into: &buf)
-        FfiConverterString.write(value.cloudBaseUrl, into: &buf)
-        FfiConverterString.write(value.cloudApiKey, into: &buf)
+    public static func write(_ value: MemoryConfig, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.backend, into: &buf)
+        FfiConverterOptionString.write(value.memoBin, into: &buf)
+        FfiConverterOptionString.write(value.memoDb, into: &buf)
     }
 }
 
@@ -1066,23 +1282,478 @@ public struct FfiConverterTypeSdkMemoryConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkMemoryConfig_lift(_ buf: RustBuffer) throws -> SdkMemoryConfig {
-    return try FfiConverterTypeSdkMemoryConfig.lift(buf)
+public func FfiConverterTypeMemoryConfig_lift(_ buf: RustBuffer) throws -> MemoryConfig {
+    return try FfiConverterTypeMemoryConfig.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSdkMemoryConfig_lower(_ value: SdkMemoryConfig) -> RustBuffer {
-    return FfiConverterTypeSdkMemoryConfig.lower(value)
+public func FfiConverterTypeMemoryConfig_lower(_ value: MemoryConfig) -> RustBuffer {
+    return FfiConverterTypeMemoryConfig.lower(value)
 }
 
 
-public enum SdkError {
+/**
+ * Result of a completed run.
+ */
+public struct RunResult {
+    /**
+     * The assistant's final reply.
+     */
+    public var finalOutput: String
+    /**
+     * Server-side session id (reuse it to continue the conversation).
+     */
+    public var sessionId: String
+    /**
+     * Server-side turn id, when the server reported one.
+     */
+    public var turnId: String?
+    /**
+     * Accumulated token usage, when the server reported it.
+     */
+    public var usage: TokenUsage?
+    /**
+     * Conversation mirror as a JSON array of `{role, content}`.
+     */
+    public var historyJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The assistant's final reply.
+         */finalOutput: String, 
+        /**
+         * Server-side session id (reuse it to continue the conversation).
+         */sessionId: String, 
+        /**
+         * Server-side turn id, when the server reported one.
+         */turnId: String?, 
+        /**
+         * Accumulated token usage, when the server reported it.
+         */usage: TokenUsage?, 
+        /**
+         * Conversation mirror as a JSON array of `{role, content}`.
+         */historyJson: String) {
+        self.finalOutput = finalOutput
+        self.sessionId = sessionId
+        self.turnId = turnId
+        self.usage = usage
+        self.historyJson = historyJson
+    }
+}
+
+
+
+extension RunResult: Equatable, Hashable {
+    public static func ==(lhs: RunResult, rhs: RunResult) -> Bool {
+        if lhs.finalOutput != rhs.finalOutput {
+            return false
+        }
+        if lhs.sessionId != rhs.sessionId {
+            return false
+        }
+        if lhs.turnId != rhs.turnId {
+            return false
+        }
+        if lhs.usage != rhs.usage {
+            return false
+        }
+        if lhs.historyJson != rhs.historyJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(finalOutput)
+        hasher.combine(sessionId)
+        hasher.combine(turnId)
+        hasher.combine(usage)
+        hasher.combine(historyJson)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunResult {
+        return
+            try RunResult(
+                finalOutput: FfiConverterString.read(from: &buf), 
+                sessionId: FfiConverterString.read(from: &buf), 
+                turnId: FfiConverterOptionString.read(from: &buf), 
+                usage: FfiConverterOptionTypeTokenUsage.read(from: &buf), 
+                historyJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.finalOutput, into: &buf)
+        FfiConverterString.write(value.sessionId, into: &buf)
+        FfiConverterOptionString.write(value.turnId, into: &buf)
+        FfiConverterOptionTypeTokenUsage.write(value.usage, into: &buf)
+        FfiConverterString.write(value.historyJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunResult_lift(_ buf: RustBuffer) throws -> RunResult {
+    return try FfiConverterTypeRunResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunResult_lower(_ value: RunResult) -> RustBuffer {
+    return FfiConverterTypeRunResult.lower(value)
+}
+
+
+/**
+ * One decoded streaming event (`agent.*` frame).
+ *
+ * `kind` is the frame type; the remaining fields are populated per kind and
+ * `raw_json` always carries the untouched frame for anything not modelled here.
+ */
+public struct StreamEvent {
+    /**
+     * e.g. `agent.turn.output_text.delta`.
+     */
+    public var kind: String
+    public var turnId: String?
+    /**
+     * `recall` / `harness` / `step` / `model` / `tool_exec` / `loop_guard`.
+     */
+    public var phase: String?
+    public var label: String?
+    /**
+     * Text increment for `agent.turn.output_text.delta`.
+     */
+    public var delta: String?
+    /**
+     * Full text for `agent.turn.output_text.done`.
+     */
+    public var text: String?
+    /**
+     * `item` object (JSON) for `agent.turn.item.added` / `.done`.
+     */
+    public var itemJson: String?
+    public var tool: String?
+    /**
+     * `allow` / `deny` / `unavailable`.
+     */
+    public var decision: String?
+    public var reason: String?
+    /**
+     * Error message for `agent.turn.failed`.
+     */
+    public var error: String?
+    /**
+     * Final output for `agent.turn.completed`.
+     */
+    public var output: String?
+    /**
+     * The untouched frame as JSON.
+     */
+    public var rawJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * e.g. `agent.turn.output_text.delta`.
+         */kind: String, turnId: String?, 
+        /**
+         * `recall` / `harness` / `step` / `model` / `tool_exec` / `loop_guard`.
+         */phase: String?, label: String?, 
+        /**
+         * Text increment for `agent.turn.output_text.delta`.
+         */delta: String?, 
+        /**
+         * Full text for `agent.turn.output_text.done`.
+         */text: String?, 
+        /**
+         * `item` object (JSON) for `agent.turn.item.added` / `.done`.
+         */itemJson: String?, tool: String?, 
+        /**
+         * `allow` / `deny` / `unavailable`.
+         */decision: String?, reason: String?, 
+        /**
+         * Error message for `agent.turn.failed`.
+         */error: String?, 
+        /**
+         * Final output for `agent.turn.completed`.
+         */output: String?, 
+        /**
+         * The untouched frame as JSON.
+         */rawJson: String) {
+        self.kind = kind
+        self.turnId = turnId
+        self.phase = phase
+        self.label = label
+        self.delta = delta
+        self.text = text
+        self.itemJson = itemJson
+        self.tool = tool
+        self.decision = decision
+        self.reason = reason
+        self.error = error
+        self.output = output
+        self.rawJson = rawJson
+    }
+}
+
+
+
+extension StreamEvent: Equatable, Hashable {
+    public static func ==(lhs: StreamEvent, rhs: StreamEvent) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.turnId != rhs.turnId {
+            return false
+        }
+        if lhs.phase != rhs.phase {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.delta != rhs.delta {
+            return false
+        }
+        if lhs.text != rhs.text {
+            return false
+        }
+        if lhs.itemJson != rhs.itemJson {
+            return false
+        }
+        if lhs.tool != rhs.tool {
+            return false
+        }
+        if lhs.decision != rhs.decision {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.error != rhs.error {
+            return false
+        }
+        if lhs.output != rhs.output {
+            return false
+        }
+        if lhs.rawJson != rhs.rawJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(turnId)
+        hasher.combine(phase)
+        hasher.combine(label)
+        hasher.combine(delta)
+        hasher.combine(text)
+        hasher.combine(itemJson)
+        hasher.combine(tool)
+        hasher.combine(decision)
+        hasher.combine(reason)
+        hasher.combine(error)
+        hasher.combine(output)
+        hasher.combine(rawJson)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamEvent {
+        return
+            try StreamEvent(
+                kind: FfiConverterString.read(from: &buf), 
+                turnId: FfiConverterOptionString.read(from: &buf), 
+                phase: FfiConverterOptionString.read(from: &buf), 
+                label: FfiConverterOptionString.read(from: &buf), 
+                delta: FfiConverterOptionString.read(from: &buf), 
+                text: FfiConverterOptionString.read(from: &buf), 
+                itemJson: FfiConverterOptionString.read(from: &buf), 
+                tool: FfiConverterOptionString.read(from: &buf), 
+                decision: FfiConverterOptionString.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf), 
+                output: FfiConverterOptionString.read(from: &buf), 
+                rawJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StreamEvent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.turnId, into: &buf)
+        FfiConverterOptionString.write(value.phase, into: &buf)
+        FfiConverterOptionString.write(value.label, into: &buf)
+        FfiConverterOptionString.write(value.delta, into: &buf)
+        FfiConverterOptionString.write(value.text, into: &buf)
+        FfiConverterOptionString.write(value.itemJson, into: &buf)
+        FfiConverterOptionString.write(value.tool, into: &buf)
+        FfiConverterOptionString.write(value.decision, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+        FfiConverterOptionString.write(value.output, into: &buf)
+        FfiConverterString.write(value.rawJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamEvent_lift(_ buf: RustBuffer) throws -> StreamEvent {
+    return try FfiConverterTypeStreamEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamEvent_lower(_ value: StreamEvent) -> RustBuffer {
+    return FfiConverterTypeStreamEvent.lower(value)
+}
+
+
+/**
+ * Token accounting reported for a run.
+ */
+public struct TokenUsage {
+    public var inputTokens: UInt32
+    public var outputTokens: UInt32
+    public var totalTokens: UInt32
+    /**
+     * Model the provider reported (may differ from the requested one).
+     */
+    public var model: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(inputTokens: UInt32, outputTokens: UInt32, totalTokens: UInt32, 
+        /**
+         * Model the provider reported (may differ from the requested one).
+         */model: String?) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.totalTokens = totalTokens
+        self.model = model
+    }
+}
+
+
+
+extension TokenUsage: Equatable, Hashable {
+    public static func ==(lhs: TokenUsage, rhs: TokenUsage) -> Bool {
+        if lhs.inputTokens != rhs.inputTokens {
+            return false
+        }
+        if lhs.outputTokens != rhs.outputTokens {
+            return false
+        }
+        if lhs.totalTokens != rhs.totalTokens {
+            return false
+        }
+        if lhs.model != rhs.model {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(inputTokens)
+        hasher.combine(outputTokens)
+        hasher.combine(totalTokens)
+        hasher.combine(model)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTokenUsage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TokenUsage {
+        return
+            try TokenUsage(
+                inputTokens: FfiConverterUInt32.read(from: &buf), 
+                outputTokens: FfiConverterUInt32.read(from: &buf), 
+                totalTokens: FfiConverterUInt32.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TokenUsage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.inputTokens, into: &buf)
+        FfiConverterUInt32.write(value.outputTokens, into: &buf)
+        FfiConverterUInt32.write(value.totalTokens, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTokenUsage_lift(_ buf: RustBuffer) throws -> TokenUsage {
+    return try FfiConverterTypeTokenUsage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTokenUsage_lower(_ value: TokenUsage) -> RustBuffer {
+    return FfiConverterTypeTokenUsage.lower(value)
+}
+
+
+/**
+ * Typed error surfaced to Swift/Kotlin. Every transport failure is normalised so
+ * callers branch on the variant instead of matching message strings.
+ */
+public enum AriaError {
 
     
     
-    case Core(String
+    /**
+     * Bad configuration (missing name, unknown backend, unparseable URL, …).
+     */
+    case Config(message: String
+    )
+    /**
+     * The server rejected the API key (`401` / `403`).
+     */
+    case Auth(message: String
+    )
+    /**
+     * The request never reached the server (DNS, TLS, timeout, refused, …).
+     */
+    case Network(message: String
+    )
+    /**
+     * The server answered with a non-2xx status.
+     */
+    case Api(status: UInt16, message: String
+    )
+    /**
+     * Anything else (malformed body, CLI failure, …).
+     */
+    case Unknown(message: String
     )
 }
 
@@ -1090,176 +1761,67 @@ public enum SdkError {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSdkError: FfiConverterRustBuffer {
-    typealias SwiftType = SdkError
+public struct FfiConverterTypeAriaError: FfiConverterRustBuffer {
+    typealias SwiftType = AriaError
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkError {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AriaError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
         
 
         
-        case 1: return .Core(
-            try FfiConverterString.read(from: &buf)
+        case 1: return .Config(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 2: return .Auth(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 3: return .Network(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 4: return .Api(
+            status: try FfiConverterUInt16.read(from: &buf), 
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 5: return .Unknown(
+            message: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
-    public static func write(_ value: SdkError, into buf: inout [UInt8]) {
+    public static func write(_ value: AriaError, into buf: inout [UInt8]) {
         switch value {
 
         
 
         
         
-        case let .Core(v1):
+        case let .Config(message):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(v1, into: &buf)
-            
-        }
-    }
-}
-
-
-extension SdkError: Equatable, Hashable {}
-
-extension SdkError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
-}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/**
- * A single streaming event delivered to [`SdkAgentListener`] during
- * [`SdkAgent::run_stream`]. Mirrors the core [`AgentEvent`] so native apps can
- * render the agentic turn (phases, tool calls, streamed tokens, completion).
- */
-
-public enum SdkStreamEvent {
-    
-    /**
-     * A phase boundary (`recall` / `model` / `tool_exec` / `loop_guard`).
-     */
-    case step(phase: String, label: String?
-    )
-    /**
-     * A streamed model text delta.
-     */
-    case token(text: String
-    )
-    /**
-     * A tool invocation and its executed result (content only).
-     */
-    case toolCall(id: String, name: String, arguments: String, result: String?
-    )
-    /**
-     * An approval decision for a tool call (`allow` / `deny` / `unavailable`).
-     */
-    case approval(id: String, tool: String, decision: String, reason: String?
-    )
-    /**
-     * Token accounting for one model call.
-     */
-    case usage(inputTokens: UInt64, outputTokens: UInt64, model: String
-    )
-    /**
-     * Terminal event carrying the full final reply.
-     */
-    case done(text: String
-    )
-    /**
-     * A stream error; the run terminates after this event.
-     */
-    case error(message: String
-    )
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeSdkStreamEvent: FfiConverterRustBuffer {
-    typealias SwiftType = SdkStreamEvent
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkStreamEvent {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        
-        case 1: return .step(phase: try FfiConverterString.read(from: &buf), label: try FfiConverterOptionString.read(from: &buf)
-        )
-        
-        case 2: return .token(text: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 3: return .toolCall(id: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf), arguments: try FfiConverterString.read(from: &buf), result: try FfiConverterOptionString.read(from: &buf)
-        )
-        
-        case 4: return .approval(id: try FfiConverterString.read(from: &buf), tool: try FfiConverterString.read(from: &buf), decision: try FfiConverterString.read(from: &buf), reason: try FfiConverterOptionString.read(from: &buf)
-        )
-        
-        case 5: return .usage(inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), model: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 6: return .done(text: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 7: return .error(message: try FfiConverterString.read(from: &buf)
-        )
-        
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: SdkStreamEvent, into buf: inout [UInt8]) {
-        switch value {
-        
-        
-        case let .step(phase,label):
-            writeInt(&buf, Int32(1))
-            FfiConverterString.write(phase, into: &buf)
-            FfiConverterOptionString.write(label, into: &buf)
+            FfiConverterString.write(message, into: &buf)
             
         
-        case let .token(text):
+        case let .Auth(message):
             writeInt(&buf, Int32(2))
-            FfiConverterString.write(text, into: &buf)
+            FfiConverterString.write(message, into: &buf)
             
         
-        case let .toolCall(id,name,arguments,result):
+        case let .Network(message):
             writeInt(&buf, Int32(3))
-            FfiConverterString.write(id, into: &buf)
-            FfiConverterString.write(name, into: &buf)
-            FfiConverterString.write(arguments, into: &buf)
-            FfiConverterOptionString.write(result, into: &buf)
+            FfiConverterString.write(message, into: &buf)
             
         
-        case let .approval(id,tool,decision,reason):
+        case let .Api(status,message):
             writeInt(&buf, Int32(4))
-            FfiConverterString.write(id, into: &buf)
-            FfiConverterString.write(tool, into: &buf)
-            FfiConverterString.write(decision, into: &buf)
-            FfiConverterOptionString.write(reason, into: &buf)
+            FfiConverterUInt16.write(status, into: &buf)
+            FfiConverterString.write(message, into: &buf)
             
         
-        case let .usage(inputTokens,outputTokens,model):
+        case let .Unknown(message):
             writeInt(&buf, Int32(5))
-            FfiConverterUInt64.write(inputTokens, into: &buf)
-            FfiConverterUInt64.write(outputTokens, into: &buf)
-            FfiConverterString.write(model, into: &buf)
-            
-        
-        case let .done(text):
-            writeInt(&buf, Int32(6))
-            FfiConverterString.write(text, into: &buf)
-            
-        
-        case let .error(message):
-            writeInt(&buf, Int32(7))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -1267,35 +1829,26 @@ public struct FfiConverterTypeSdkStreamEvent: FfiConverterRustBuffer {
 }
 
 
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSdkStreamEvent_lift(_ buf: RustBuffer) throws -> SdkStreamEvent {
-    return try FfiConverterTypeSdkStreamEvent.lift(buf)
+extension AriaError: Equatable, Hashable {}
+
+extension AriaError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
 }
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSdkStreamEvent_lower(_ value: SdkStreamEvent) -> RustBuffer {
-    return FfiConverterTypeSdkStreamEvent.lower(value)
-}
-
-
-
-extension SdkStreamEvent: Equatable, Hashable {}
-
-
 
 
 
 
 /**
- * Receives streaming events from [`SdkAgent::run_stream`].
+ * Streaming callback implemented on the Swift/Kotlin side.
  */
-public protocol SdkAgentListener : AnyObject {
+public protocol StreamListener : AnyObject {
     
-    func onEvent(event: SdkStreamEvent) 
+    /**
+     * Called once per SSE frame, in wire order.
+     */
+    func onEvent(event: StreamEvent) 
     
 }
 
@@ -1308,11 +1861,11 @@ private let UNIFFI_CALLBACK_ERROR: Int32 = 1
 private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
-fileprivate struct UniffiCallbackInterfaceSdkAgentListener {
+fileprivate struct UniffiCallbackInterfaceStreamListener {
 
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceSdkAgentListener = UniffiVTableCallbackInterfaceSdkAgentListener(
+    static var vtable: UniffiVTableCallbackInterfaceStreamListener = UniffiVTableCallbackInterfaceStreamListener(
         onEvent: { (
             uniffiHandle: UInt64,
             event: RustBuffer,
@@ -1321,11 +1874,11 @@ fileprivate struct UniffiCallbackInterfaceSdkAgentListener {
         ) in
             let makeCall = {
                 () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceSdkAgentListener.handleMap.get(handle: uniffiHandle) else {
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceStreamListener.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return uniffiObj.onEvent(
-                     event: try FfiConverterTypeSdkStreamEvent.lift(event)
+                     event: try FfiConverterTypeStreamEvent.lift(event)
                 )
             }
 
@@ -1338,31 +1891,31 @@ fileprivate struct UniffiCallbackInterfaceSdkAgentListener {
             )
         },
         uniffiFree: { (uniffiHandle: UInt64) -> () in
-            let result = try? FfiConverterCallbackInterfaceSdkAgentListener.handleMap.remove(handle: uniffiHandle)
+            let result = try? FfiConverterCallbackInterfaceStreamListener.handleMap.remove(handle: uniffiHandle)
             if result == nil {
-                print("Uniffi callback interface SdkAgentListener: handle missing in uniffiFree")
+                print("Uniffi callback interface StreamListener: handle missing in uniffiFree")
             }
         }
     )
 }
 
-private func uniffiCallbackInitSdkAgentListener() {
-    uniffi_aria_agent_ffi_fn_init_callback_vtable_sdkagentlistener(&UniffiCallbackInterfaceSdkAgentListener.vtable)
+private func uniffiCallbackInitStreamListener() {
+    uniffi_aria_agent_ffi_fn_init_callback_vtable_streamlistener(&UniffiCallbackInterfaceStreamListener.vtable)
 }
 
 // FfiConverter protocol for callback interfaces
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterCallbackInterfaceSdkAgentListener {
-    fileprivate static var handleMap = UniffiHandleMap<SdkAgentListener>()
+fileprivate struct FfiConverterCallbackInterfaceStreamListener {
+    fileprivate static var handleMap = UniffiHandleMap<StreamListener>()
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-extension FfiConverterCallbackInterfaceSdkAgentListener : FfiConverter {
-    typealias SwiftType = SdkAgentListener
+extension FfiConverterCallbackInterfaceStreamListener : FfiConverter {
+    typealias SwiftType = StreamListener
     typealias FfiType = UInt64
 
 #if swift(>=5.8)
@@ -1398,6 +1951,30 @@ extension FfiConverterCallbackInterfaceSdkAgentListener : FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1418,55 +1995,101 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         }
     }
 }
-/**
- * Minimal quickstart entry — `Agent(name, model)`, no session required.
- *
- * The sandbox defaults to Docker and the memory backend to **local**
- * (aria memo). Streaming is via [`SdkAgent::run_stream`].
- */
-public func createAgent(agentName: String, model: String)throws  -> SdkAgent {
-    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_func_create_agent(
-        FfiConverterString.lower(agentName),
-        FfiConverterString.lower(model),$0
-    )
-})
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSession: FfiConverterRustBuffer {
+    typealias SwiftType = Session?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSession.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSession.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
 }
-/**
- * Minimal tenant-scoped quickstart entry: the tenant id selects a separate
- * aria memo database (local backend). Empty `tenant_id` behaves like
- * [`create_agent`].
- */
-public func createAgentForTenant(tenantId: String, agentName: String, model: String)throws  -> SdkAgent {
-    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant(
-        FfiConverterString.lower(tenantId),
-        FfiConverterString.lower(agentName),
-        FfiConverterString.lower(model),$0
-    )
-})
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeClientOptions: FfiConverterRustBuffer {
+    typealias SwiftType = ClientOptions?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeClientOptions.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeClientOptions.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
 }
-/**
- * Advanced tenant-scoped entry accepting a full [`SdkAgentConfig`].
- */
-public func createAgentForTenantWith(tenantId: String, config: SdkAgentConfig)throws  -> SdkAgent {
-    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_func_create_agent_for_tenant_with(
-        FfiConverterString.lower(tenantId),
-        FfiConverterTypeSdkAgentConfig.lower(config),$0
-    )
-})
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMemoryConfig: FfiConverterRustBuffer {
+    typealias SwiftType = MemoryConfig?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMemoryConfig.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMemoryConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
 }
-/**
- * Advanced entry accepting a full [`SdkAgentConfig`] (instructions, custom
- * sandbox, memory backend, …).
- */
-public func createAgentWith(config: SdkAgentConfig)throws  -> SdkAgent {
-    return try  FfiConverterTypeSdkAgent.lift(try rustCallWithError(FfiConverterTypeSdkError.lift) {
-    uniffi_aria_agent_ffi_fn_func_create_agent_with(
-        FfiConverterTypeSdkAgentConfig.lower(config),$0
-    )
-})
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTokenUsage: FfiConverterRustBuffer {
+    typealias SwiftType = TokenUsage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTokenUsage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTokenUsage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
 }
 
 private enum InitializationResult {
@@ -1484,47 +2107,59 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent() != 7131) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_create_session() != 42681) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant() != 41014) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_id() != 64714) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent_for_tenant_with() != 21778) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_model() != 9045) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_func_create_agent_with() != 4189) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_name() != 63890) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_memory_backend() != 43728) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_run() != 22267) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run() != 3471) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_run_streamed() != 29547) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_run_stream() != 38484) {
+    if (uniffi_aria_agent_ffi_checksum_method_ariaagent_session() != 13572) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session() != 57377) {
+    if (uniffi_aria_agent_ffi_checksum_method_session_history_json() != 34945) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagent_session_id() != 6609) {
+    if (uniffi_aria_agent_ffi_checksum_method_session_id() != 27291) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memorize() != 5103) {
+    if (uniffi_aria_agent_ffi_checksum_method_session_items_json() != 56341) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_memory_backend() != 60477) {
+    if (uniffi_aria_agent_ffi_checksum_method_session_memorize() != 58482) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdksession_recall() != 29904) {
+    if (uniffi_aria_agent_ffi_checksum_method_session_memory_backend() != 24047) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aria_agent_ffi_checksum_method_sdkagentlistener_on_event() != 35179) {
+    if (uniffi_aria_agent_ffi_checksum_method_session_recall() != 15671) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_session_title_json() != 26916) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_session_turns_json() != 32062) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_constructor_ariaagent_new() != 30406) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aria_agent_ffi_checksum_method_streamlistener_on_event() != 41112) {
         return InitializationResult.apiChecksumMismatch
     }
 
-    uniffiCallbackInitSdkAgentListener()
+    uniffiCallbackInitStreamListener()
     return InitializationResult.ok
 }()
 

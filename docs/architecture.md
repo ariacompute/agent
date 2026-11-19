@@ -101,8 +101,12 @@ default; the removed `codex` value is a hard configuration error (ADR-0018).
 
 ## FFI & SDKs
 
-`ariacompute-agent` exposes a small stable surface (`SdkAgent`, `SdkSession`,
-`SdkAgentConfig`, `SdkStreamEvent`, `create_agent*`). Generate bindings with
-`just ffi`; generated Swift/Kotlin sources are committed and never hand-edited
-(ADR-0002/ADR-0008). `sdk/js` and `sdk/python` speak the HTTP API and decode the
-same frames, including `agent.turn.approval.*` and `agent.turn.usage`.
+All five SDKs are **cloud API clients** (ADR-0020). `ariacompute-agent`
+(`libaria-agent_ffi`) exposes the JS/Python vocabulary through UniFFI —
+`AriaAgent`, `Session`, `run`, `runStreamed`, `memorize`, `recall`,
+`StreamListener`, `AriaError` — and is a thin HTTP client with no embedded loop,
+sandbox or provider key. Generate bindings with `just ffi`; generated
+Swift/Kotlin sources are committed and never hand-edited (ADR-0002/ADR-0008).
+Every SDK decodes the same frames, including `agent.turn.approval.*` and
+`agent.turn.usage`; `local` memory is the aria memo copy (CLI on
+Rust/Swift/Kotlin and JS, SQLite on Python).

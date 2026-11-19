@@ -300,20 +300,11 @@ dependencies = [
 name = "ariacompute-agent"
 version = "0.1.0"
 dependencies = [
- "aria-agent-browser",
- "aria-agent-core",
- "aria-agent-dsh",
- "aria-agent-memo",
- "aria-agent-sandbox",
- "aria-agent-tools",
- "async-trait",
- "futures",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tokio",
  "uniffi",
  "wiremock",
 ]
@@ -2517,6 +2508,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from .transport import get_json, post_json, resolve_client
-from .types import ClientOptions
+from .types import AriaError, AriaErrorKind, ClientOptions
 
 
 class MemoryBackend(str, Enum):
@@ -39,7 +39,22 @@ class MemoryBackend(str, Enum):
         for member in cls:
             if member.value == raw:
                 return member
-        raise ValueError(f"unknown memory backend: {value}")
+        # Same typed error as the Rust/Swift/Kotlin client: local misuse is `config`.
+        raise AriaError(
+            f"unknown memory backend: {value} (expected cloud|local|both)",
+            AriaErrorKind.CONFIG,
+        )
+
+
+def encode_local(key: str, value: str) -> str:
+    """Value convention shared by every SDK: a keyed local memory is `key: value`."""
+    return f"{key}: {value}"
+
+
+def decode_local(key: str, content: str) -> str:
+    """Strip the `key: ` prefix written by :func:`encode_local`; other shapes pass through."""
+    prefix = f"{key}: "
+    return content[len(prefix):] if content.startswith(prefix) else content
 
 
 class MemoryStore(Protocol):
@@ -107,7 +122,12 @@ class LocalMemoryStore:
             conn.executescript(ARIA_MEMO_SCHEMA)
 
     def put(self, key: str, value: str) -> None:
-        """Write ``key`` as a long-term aria memo (``metadata.key`` holds the key)."""
+        """Write ``key`` as a long-term aria memo (``metadata.key`` holds the key).
+
+        The stored content uses the cross-SDK `key: value` convention, so a row
+        written here is also recallable through the ``aria-memo`` CLI (and by the
+        JS / Rust clients).
+        """
         now = _now_sec()
         metadata = json.dumps({"key": key})
         with self._connect() as conn:
@@ -119,22 +139,36 @@ class LocalMemoryStore:
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  content = excluded.content, metadata = excluded.metadata, "
                 "  updated_at = excluded.updated_at, deleted = 0",
-                (f"key:{key}", MEMO_TYPE_LONG_TERM, value, b"", metadata, 0.8, now, now),
+                (
+                    f"key:{key}",
+                    MEMO_TYPE_LONG_TERM,
+                    encode_local(key, value),
+                    b"",
+                    metadata,
+                    0.8,
+                    now,
+                    now,
+                ),
             )
 
     def get(self, key: str) -> Optional[str]:
+        prefix = f"{key}: "
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT content, metadata FROM memories WHERE deleted = 0",
             ).fetchall()
+        prefixed: Optional[str] = None
         for content, metadata in rows:
             try:
                 parsed = json.loads(metadata or "{}")
             except json.JSONDecodeError:
                 parsed = {}
             if parsed.get("key") == key:
-                return content
-        return None
+                return decode_local(key, content or "")
+            # Rows written by the aria-memo CLI carry the key in the content only.
+            if prefixed is None and isinstance(content, str) and content.startswith(prefix):
+                prefixed = content
+        return decode_local(key, prefixed) if prefixed is not None else None
 
 
 # --- cloud -------------------------------------------------------------------

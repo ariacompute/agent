@@ -145,7 +145,9 @@ export async function runStreamed(
 
   async function consume(): Promise<void> {
     let turns = 0;
+    let seen = 0;
     for await (const frame of frames) {
+      seen += 1;
       buffered.push(frame);
       turnId = (frame.turn_id as string) ?? turnId;
       if (frame.type === "agent.turn.created") {
@@ -176,6 +178,11 @@ export async function runStreamed(
         default:
           break;
       }
+    }
+    if (seen === 0) {
+      // Same contract as Rust / Swift / Kotlin: no frames is an error, never an
+      // empty answer.
+      throw new AriaError("the stream ended without any event", "unknown");
     }
   }
 

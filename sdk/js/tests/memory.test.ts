@@ -69,10 +69,10 @@ describe("local backend (aria-memo CLI)", () => {
     expect(await store.get("user_name")).toBe("Ada");
   });
 
-  test("get tolerates entries written without the prefix", async () => {
+  test("an unrelated hit is a miss, not a fabricated value", async () => {
     const { run } = fakeExec(() => JSON.stringify([{ id: "1", content: "Ada" }]));
     const store = new LocalMemoryStore({ exec: run });
-    expect(await store.get("user_name")).toBe("Ada");
+    expect(await store.get("user_name")).toBeNull();
   });
 
   test("get returns null when aria memo has nothing", async () => {
