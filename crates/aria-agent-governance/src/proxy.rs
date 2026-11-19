@@ -20,6 +20,7 @@ use agent_core::seams::{
     SeamResult, SubstitutionReport,
 };
 use serde_json::json;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -469,15 +470,34 @@ async fn connect(host: &str, port: u16) -> SeamResult<TcpStream> {
     connect_with_timeout(host, port, CONNECT_TIMEOUT).await
 }
 
+/// The real dial, kept as a function so tests can inject a future that never
+/// resolves instead of relying on kernel backlog timing.
+async fn tcp_connect(host: String, port: u16) -> std::io::Result<TcpStream> {
+    TcpStream::connect((host.as_str(), port)).await
+}
+
 /// One dial with an explicit deadline. Keeping the timeout at a single call
-/// site makes the timeout branch testable with a short deadline against a
-/// saturated loopback backlog instead of waiting for the production 10s.
-async fn connect_with_timeout(host: &str, port: u16, timeout: Duration) -> SeamResult<TcpStream> {
-    match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
+/// site, with the dial itself injectable, makes the timeout branch testable
+/// without a saturated loopback backlog (whose accept queue is kernel-dependent).
+async fn connect_with<F, Fut>(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    dial: F,
+) -> SeamResult<TcpStream>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<TcpStream>>,
+{
+    match tokio::time::timeout(timeout, dial(host.to_string(), port)).await {
         Ok(Ok(stream)) => Ok(stream),
         Ok(Err(e)) => Err(SeamError::Io(format!("connect {host}:{port}: {e}"))),
         Err(_) => Err(SeamError::Io(timeout_message(host, port))),
     }
+}
+
+async fn connect_with_timeout(host: &str, port: u16, timeout: Duration) -> SeamResult<TcpStream> {
+    connect_with(host, port, timeout, tcp_connect).await
 }
 
 /// Message for a dial that ran out of time: the address, never the payload.
@@ -1124,26 +1144,16 @@ mod tests {
         let _ = server.await;
     }
 
-    #[cfg(unix)]
+    /// A dial that never resolves: the deadline is the only way out, so the
+    /// timeout branch is deterministic on every kernel (a saturated accept
+    /// queue may still accept another SYN).
+    async fn pending_dial(_host: String, _port: u16) -> std::io::Result<TcpStream> {
+        std::future::pending().await
+    }
+
     #[tokio::test]
     async fn a_dial_that_outlives_the_deadline_is_reported() {
-        // A loopback listener with a zero backlog: its accept queue holds one
-        // completed connection, and the next SYN is dropped instead of refused.
-        // That makes the dial wait for the deadline without a firewall or a
-        // remote blackhole.
-        let socket = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        )
-        .unwrap();
-        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        socket.bind(&bind.into()).unwrap();
-        socket.listen(0).unwrap();
-        let listener = std::net::TcpListener::from(socket);
-        let port = listener.local_addr().unwrap().port();
-        let _filling = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let err = connect_with_timeout("127.0.0.1", port, Duration::from_millis(80))
+        let err = connect_with("127.0.0.1", 1, Duration::from_millis(20), pending_dial)
             .await
             .unwrap_err();
         assert!(matches!(err, SeamError::Io(_)), "{err:?}");

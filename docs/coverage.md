@@ -91,8 +91,9 @@ all reproducible hermetically:
 
 * socket `EIO` — `SO_LINGER = 0` on a loopback peer delivers RST, so the proxy's
   read, write and relay failures are exercised;
-* dial timeout — a zero-backlog loopback listener with a saturated accept queue
-  drops the next SYN, so `connect_with_timeout` reaches its deadline in ~80ms;
+* dial timeout — the `connect_with` seam accepts the dial future, so a test
+  injects one that never resolves and the deadline is reached deterministically
+  on every kernel;
 * listener failure — the internal `ProxyListener` seam supplies a listener
   whose `local_addr` and `accept` fail;
 * atomic replace — pointing the store file at a directory makes the rename fail
