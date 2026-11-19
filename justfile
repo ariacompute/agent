@@ -66,3 +66,12 @@ lint:
 migrate:
     sqlx database create
     sqlx migrate run
+
+# Egress proxy image (network enforcement sidecar, ADR-0024).
+# The build context is the repo root because the crate is a workspace member.
+egress-proxy-image:
+    docker build -f crates/aria-agent-egress-proxy/Dockerfile -t {{egress-proxy-image-name | default("aria-egress-proxy:local")}} .
+
+# Build the proxy binary only (fast local check, no image).
+egress-proxy-build:
+    cargo build --release -p aria-agent-egress-proxy

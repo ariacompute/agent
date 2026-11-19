@@ -10,7 +10,7 @@
 //! `{query}` / `{limit}` that returns a JSON array of `{title,url,snippet}`).
 
 use crate::{arg_str, arg_usize, family_handler, Family};
-use agent_core::seams::{SeamError, WebSeam};
+use agent_core::seams::{EgressDecision, EgressSeam, SeamError, WebSeam};
 use agent_core::{Tool, ToolCall};
 use serde_json::json;
 use std::sync::Arc;
@@ -20,11 +20,59 @@ pub use http_web::HttpWeb;
 
 pub struct WebToolHandler {
     web: Arc<dyn WebSeam>,
+    /// When present, every fetch is decided **before** any request is made.
+    egress: Option<Arc<dyn EgressSeam>>,
 }
 
 impl WebToolHandler {
     pub fn new(web: Arc<dyn WebSeam>) -> Self {
-        Self { web }
+        Self { web, egress: None }
+    }
+
+    /// Gate fetches through the egress seam (deny-by-default policies refuse
+    /// everything that was not named).
+    pub fn with_egress(mut self, egress: Arc<dyn EgressSeam>) -> Self {
+        self.egress = Some(egress);
+        self
+    }
+
+    /// Decide one URL. A denial is fed back to the model with the policy revision
+    /// so the fix ("add the host to the allowlist") is obvious.
+    async fn gate(&self, url: &str) -> Result<(), SeamError> {
+        let Some(egress) = &self.egress else {
+            return Ok(());
+        };
+        let host =
+            host_of(url).ok_or_else(|| SeamError::Invalid(format!("no host in URL: {url}")))?;
+        let policy = egress.policy().await?;
+        match policy.decide(&host) {
+            EgressDecision::Allow => Ok(()),
+            EgressDecision::Deny { reason } => Err(SeamError::Denied(reason)),
+        }
+    }
+}
+
+/// Extract the host from an `http(s)` URL without pulling in a URL crate.
+pub fn host_of(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    // Drop userinfo, then port; keep IPv6 literals as-is.
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split_once(']')?.0
+    } else {
+        authority.split(':').next()?
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
     }
 }
 
@@ -83,6 +131,7 @@ impl Family for WebToolHandler {
                         "refusing to fetch a non-public URL: {url}"
                     )));
                 }
+                self.gate(&url).await?;
                 self.web.fetch(&url).await
             }
             other => Err(SeamError::Invalid(format!("unknown web tool: {other}"))),
@@ -405,6 +454,86 @@ mod tests {
         async fn fetch(&self, _url: &str) -> Result<String, SeamError> {
             Ok(String::new())
         }
+    }
+
+    #[test]
+    fn hosts_are_extracted_without_a_url_crate() {
+        assert_eq!(
+            host_of("https://api.example.com/v1?q=1").as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(
+            host_of("http://user@A.Example.com:8080/x").as_deref(),
+            Some("a.example.com")
+        );
+        assert_eq!(host_of("http://[::1]:80/x").as_deref(), Some("::1"));
+        assert_eq!(host_of("nonsense"), None);
+        assert_eq!(host_of("https://"), None);
+    }
+
+    struct FixedPolicy(agent_core::seams::EgressPolicy);
+
+    #[async_trait]
+    impl agent_core::seams::EgressSeam for FixedPolicy {
+        async fn policy(&self) -> Result<agent_core::seams::EgressPolicy, SeamError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn policy(
+        mode: agent_core::seams::EgressMode,
+        allow: &[&str],
+    ) -> agent_core::seams::EgressPolicy {
+        agent_core::seams::EgressPolicy::new(
+            3,
+            mode,
+            allow
+                .iter()
+                .map(|h| agent_core::seams::HostPattern::parse(h).unwrap())
+                .collect(),
+            Vec::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn egress_denials_happen_before_the_provider_is_called() {
+        let handler = WebToolHandler::new(Arc::new(Fixed)).with_egress(Arc::new(FixedPolicy(
+            policy(agent_core::seams::EgressMode::DenyAll, &[]),
+        )));
+        let denied = run(
+            &handler,
+            "web_fetch",
+            json!({"url": "https://example.com/x"}),
+        )
+        .await;
+        assert!(denied.is_error);
+        assert!(denied.content.contains("denied"), "{}", denied.content);
+        assert!(
+            denied.content.contains("deny-by-default"),
+            "{}",
+            denied.content
+        );
+
+        let allowed = WebToolHandler::new(Arc::new(Fixed)).with_egress(Arc::new(FixedPolicy(
+            policy(agent_core::seams::EgressMode::Allowlist, &["example.com"]),
+        )));
+        let ok = run(
+            &allowed,
+            "web_fetch",
+            json!({"url": "https://example.com/x"}),
+        )
+        .await;
+        assert!(!ok.is_error, "{}", ok.content);
+        assert!(ok.content.contains("body of"));
+
+        // A host outside the allowlist is refused.
+        let other = run(&allowed, "web_fetch", json!({"url": "https://other.com/x"})).await;
+        assert!(other.is_error);
+        assert!(
+            other.content.contains("not on the egress allowlist"),
+            "{}",
+            other.content
+        );
     }
 
     #[test]

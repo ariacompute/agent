@@ -693,6 +693,56 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     ] {
         pool.execute(stmt).await?;
     }
+    // --- governance (ADR-0020..0022): one row set, all principal-scoped ---
+    for stmt in [
+        "CREATE TABLE IF NOT EXISTS egress_policies (\
+            principal_id TEXT PRIMARY KEY, \
+            revision BIGINT NOT NULL DEFAULT 1, \
+            mode TEXT NOT NULL DEFAULT 'deny_all', \
+            allowed TEXT NOT NULL DEFAULT '[]', \
+            denied TEXT NOT NULL DEFAULT '[]', \
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        // Credentials are NOT in Postgres: the encrypted store is a deployment-
+        // local file (`AGENT_CREDENTIALS_DIR`), because the master key is local
+        // and shipping ciphertext to a shared database would move the blast
+        // radius without adding a boundary (ADR-0023).
+        "CREATE TABLE IF NOT EXISTS audit_events (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            ts_ms BIGINT NOT NULL, \
+            session_id TEXT, \
+            turn_id TEXT, \
+            kind TEXT NOT NULL, \
+            target TEXT NOT NULL, \
+            decision BOOLEAN, \
+            policy_revision BIGINT, \
+            metadata TEXT NOT NULL DEFAULT '{}')",
+        "CREATE INDEX IF NOT EXISTS idx_audit_principal_ts ON audit_events (principal_id, ts_ms DESC)",
+        "CREATE TABLE IF NOT EXISTS usage_events (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            sandbox_id TEXT NOT NULL, \
+            state TEXT NOT NULL, \
+            started_at_ms BIGINT NOT NULL, \
+            ended_at_ms BIGINT NOT NULL, \
+            vcpu_millis BIGINT NOT NULL DEFAULT 0, \
+            memory_mib_millis BIGINT NOT NULL DEFAULT 0, \
+            disk_mib_millis BIGINT NOT NULL DEFAULT 0, \
+            input_tokens BIGINT, \
+            output_tokens BIGINT, \
+            recorded_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS idx_usage_principal_time ON usage_events (principal_id, recorded_at)",
+        "CREATE TABLE IF NOT EXISTS sandbox_checkpoints (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            sandbox_id TEXT NOT NULL, \
+            image TEXT NOT NULL, \
+            created_at_ms BIGINT NOT NULL, \
+            state TEXT NOT NULL DEFAULT 'ready')",
+        "CREATE INDEX IF NOT EXISTS idx_checkpoints_principal ON sandbox_checkpoints (principal_id, created_at_ms DESC)",
+    ] {
+        pool.execute(stmt).await?;
+    }
     // Seed the default playground agent. Both statements are idempotent: the
     // UPDATE renames the legacy seed (`playground-demo`) in place and is
     // skipped once `agent-demo` exists; the INSERT re-creates a missing one.

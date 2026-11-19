@@ -1,0 +1,31 @@
+[package]
+name = "aria-agent-egress-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Ships as a container image, not as a crates.io package.
+publish = false
+description = "Network-enforcement egress proxy: forwards decisions/credentials/audit to the control plane and holds no secrets."
+
+[[bin]]
+name = "aria-egress-proxy"
+path = "src/main.rs"
+
+[dependencies]
+agent-core = { package = "aria-agent-core", path = "../aria-agent-core" }
+agent-governance = { package = "aria-agent-governance", path = "../aria-agent-governance" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# eMudhra/emSign CA key compromise (2026-10): 1.0.10+ drops the compromised
+# emSign roots. The proxy only talks TLS to the control plane when
+# CONTROL_PLANE_URL is https, but the pin keeps that path honest.
+webpki-roots = "1.0.10"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -69,6 +69,32 @@ excluded above; they must never assert a fabricated success.
 1. New logic needs a normal-path **and** an abnormal-path test.
 2. A new `map_err(|e| ...)` closure per call site is a coverage trap: format the
    message in one shared helper (`db_err`, `model_err`, `prefixed`) so the
-   mapping stays a single exercised line.
+   mapping stays a single exercised line. `LocalForwardProxy` follows this: the
+   socket-write and relay failures live in `send_bytes` / `relay`.
 3. If a branch is truly unreachable, remove it or document it here — do not pad
    the exclusion list with business logic.
+
+## Per-line opt-out (`LCOV_EXCL_LINE`)
+
+A single statement may opt out of the gate with a trailing marker and a short
+reason in the surrounding comment:
+
+```rust
+std::fs::rename(&tmp, &path)
+    .map_err(|e| SeamError::Io(format!("replace {}: {e}", path.display())))?; // LCOV_EXCL_LINE
+```
+
+The gate counts these separately (`excluded by LCOV_EXCL_LINE`) and prints the
+number. Use it only for a branch that must stay in the code but cannot be
+produced hermetically — the OS refusing an operation we have to report (a socket
+write to a peer that vanished, a dial that times out, an atomic rename that
+fails after the write succeeded). Anything that could be tested belongs in a
+test, and `scripts/coverage.sh` still fails on the line next to the marker.
+
+## Closing-delimiter artifacts
+
+llvm emits a region for the closing delimiter of some blocks (`}`, `});`,
+`},`) that is never entered even when the block body runs. A line made only of
+closing delimiters carries no statement, so the gate reports those as
+`closing-delimiter artifacts` instead of failures; an unexecuted statement
+inside the same block is still reported on its own line.

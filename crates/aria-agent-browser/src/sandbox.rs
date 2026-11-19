@@ -86,6 +86,12 @@ impl BrowserSandbox {
             workdir: None,
             env: Vec::new(),
             timeout_ms: 60_000,
+            // Left empty on purpose: a governed wrapper (`NetworkingSandbox`)
+            // fills in the internal network, tenant labels and proxy env when
+            // network enforcement is on. Writing values here would override the
+            // deployment's choice, so the wrapper stays the single source.
+            network: None,
+            labels: Vec::new(),
         };
         self.inner
             .spawn(&spec)

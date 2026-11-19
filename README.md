@@ -48,6 +48,7 @@ by default, with pluggable sandboxes.
 **Trust & governance**
 
 - [🔏 Trust store security](#-trust-store-security)
+- [🛡️ Governed execution](#-governed-execution)
 - [📚 Documentation](#-documentation)
 - [📝 License](#-license)
 - [🤝 Engineering conventions](#-engineering-conventions)
@@ -68,6 +69,7 @@ where tools execute:
 - 📱 **On-device store** — `aria-agent-memo` (aria memo / SQLite) keeps a local-first context copy that is interchangeable with the cloud backend behind one `ContextStore` trait.
 - 🌐 **Five-language SDKs** — all of them (JS / Python / Rust / Swift / Kotlin) are thin clients over the cloud API; nothing is embedded, so a mobile app only needs network access plus an API key.
 - 🧭 **Pluggable sandbox** — every tool container is capped by `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` and reaches the daemon through `DOCKER_HOST` / `ARIA_DOCKER_SOCKET`.
+- 🛡️ **Governed execution** — every outbound call crosses one boundary that decides, substitutes `${credential}` and records; audit, metering, idle suspension, output projection and checkpoints hang off the same seams, and `AGENT_EGRESS_ENFORCEMENT=network` removes the sandbox's default route instead of trusting `HTTP_PROXY` (`aria-agent-governance`).
 
 <div align="right">
 
@@ -127,6 +129,8 @@ of truth for both persistence and SSE streaming.
 | **aria-agent-dsh** | The `agent_loop` seam's DeepSeek Harness provider: stdio JSON-RPC transport, per-session runtime pool, approval/question bridge, notification → `AgentEvent` mapping. |
 | **aria-agent-plugin** | Plugin registry: manifests, seam keys/roles, dependency topo-sort, cycle + core-uniqueness checks, frozen snapshot. |
 | **aria-agent-tools** | Built-in tool families: fs, shell, jobs, terminal (`pty`), skills, web (`web`), ask_user, plan, todo, memo. |
+| **aria-agent-governance** | Egress decision + `${credential}` substitution, JSONL audit sink, usage metering, tool-output projection, encrypted credential store, idle detection, quota guard and checkpoints (ADR-0020 … 0024). |
+| **aria-agent-egress-proxy** | Secretless sidecar for `network` enforcement: speaks `/internal/egress/*` to the control plane, resolves the tenant from the peer IP, batches audit uploads. |
 | **aria-agent-orchestrator** | Sub-agents (in-process fork), agent teams (task DAG), scheduled jobs (single-flight ticker). |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): cloud API client — `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`. |
 | **aria-agent-cloud** | axum service: Postgres + pgvector (metadata **and** context), OpenAI beta Agents API. `/v1/agents`, `/v1/agents/sessions`, SSE `/v1/agents/sessions/{id}/events/stream`. |
@@ -1111,6 +1115,103 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 
 </div>
 
+## 🛡️ Governed execution
+
+Every outbound request crosses one boundary that decides, substitutes and records
+(ADR-0020). Defaults are closed and come from `AgentConfig` only, so a CLI and a
+cloud deployment cannot disagree about what the default is.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_EGRESS_MODE` | `deny_all` | `deny_all` \| `allowlist` \| `denylist` |
+| `AGENT_EGRESS_ALLOW` | *(empty)* | hosts reachable when mode is `allowlist` (`*.` = sub-domains) |
+| `AGENT_EGRESS_DENY` | *(empty)* | hosts always refused |
+| `AGENT_EGRESS_ENFORCEMENT` | `proxy` | `proxy` \| `network` \| `off` (needs `AGENT_ALLOW_UNENFORCED_EGRESS=1`) |
+| `AGENT_AUDIT_DIR` | `<workspace>/.aria/audit` | JSONL sink; `/v1/governance/audit/export` returns NDJSON |
+| `AGENT_AUDIT_RETENTION_DAYS` | `30` | `0` keeps forever |
+| `AGENT_METERING` | `on` | state-based usage ledger |
+| `AGENT_COMPRESSION` | `on` | rule-based projection of tool output for the model |
+| `AGENT_CREDENTIALS_DIR` | *(unset → disabled)* | encrypted-at-rest credential store |
+| `AGENT_CREDENTIAL_MASTER_KEY` | *(required if the store is on)* | passphrase for CHACHA20-POLY1305 |
+| `AGENT_IDLE_TIMEOUT_SECS` | `900` | `0` disables suspension; five signals must all be quiet |
+
+Credentials are written as the literal `${credential}`; the plaintext is only
+substituted at the boundary and never enters logs, events or audit records.
+
+### `AGENT_EGRESS_ENFORCEMENT=network`
+
+`proxy` (default) only sets `HTTP_PROXY`; a binary that ignores it still has a
+default route. `network` removes the route instead:
+
+```bash
+just egress-proxy-image                     # build the sidecar image
+export AGENT_EGRESS_ENFORCEMENT=network
+export EGRESS_PROXY_IMAGE=aria-egress-proxy:local
+export CONTROL_PLANE_URL=http://cloud:3000  # how the proxy reaches this service
+docker compose up
+```
+
+On boot the service creates the `aria-egress` network (`internal: true`), starts
+the proxy container on it **and** on the compose network, then runs every sandbox
+with `network_mode=aria-egress`. The proxy is not a compose service.
+
+| Variable | Meaning |
+|---|---|
+| `EGRESS_PROXY_IMAGE` | sidecar image; required for `network` |
+| `AGENT_EGRESS_NETWORK` | internal network name (default `aria-egress`) |
+| `AGENT_EGRESS_PROXY_URL` | address reachable from the sandbox (default `http://aria-egress-proxy:8080`) |
+| `CONTROL_PLANE_URL` | how the proxy reaches this service |
+| `EGRESS_PROXY_TOKEN` | shared secret; generated per boot when unset |
+
+If any step fails (no network, no image, proxy not running, not inside a
+container) the service **refuses to start** with the next action in the message.
+There is no fallback to `proxy` mode.
+
+Identity is the sandbox's source IP: containers are labelled `aria.tenant_id` /
+`aria.session_id` at creation, and the proxy asks `/internal/egress/whoami`. An
+unlabelled peer is refused, and a request naming a principal that does not own
+that IP is rejected — a compromised proxy cannot read another tenant's policy.
+The answer is cached for 10s (max 4096 peers): Docker recycles IPs, so a longer
+TTL would eventually attribute traffic to the wrong tenant.
+
+Coverage and limits:
+
+* Every sandbox backend is wrapped, including the browser backend's inner Docker
+  sandbox, so `shell`, `job_*`, the agent loop and `browser_*` all land on the
+  internal network. The wrapper is applied at the runtime's construction point
+  too, so an embedded `Agent` with `egress_network` set cannot skip it. `cube`
+  refuses a custom network and identity labels instead of silently keeping a
+  default route; it does forward the proxy environment (`-e`).
+* `term_*` is **not registered** under `network` enforcement: it drives a PTY in
+  the control-plane process, which no container network can cover. Use `proxy`
+  mode if an interactive host terminal is required.
+* A restored checkpoint joins the internal network with the authenticated
+  principal's tenant label; without `AGENT_EGRESS_NETWORK` the restore fails
+  rather than deriving a container on the default bridge. The restored sandbox
+  also gets the proxy environment, in `proxy` mode too, so it never goes direct.
+
+`GET /v1/governance/status` reports `enforcement: "network"` plus the proxy's
+container, network, image and boot-time health.
+
+Cloud endpoints (all `principal_id`-scoped): `GET|PUT|PATCH
+/v1/governance/egress-policy` (revision-guarded; stale writes get `409`), `GET
+/v1/governance/audit`, `GET /v1/governance/audit/export`, `GET
+/v1/governance/usage`, `GET /v1/governance/status`, credential metadata under
+`/v1/governance/credentials`, and checkpoints under `/v1/governance/checkpoints`
+(restore derives a new sandbox and passes the same quota gate as creation).
+
+Migration note: the four governance tables (`egress_policies`, `audit_events`,
+`usage_events`, `sandbox_checkpoints`) are created with `CREATE TABLE IF NOT
+EXISTS` in `ensure_schema`, so an existing database needs no manual step. An
+`allowlist` policy with no hosts boots fine but denies every request — use
+`deny_all` to say that on purpose.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
 ## 📚 Documentation
 
 Detailed design records live under [`docs/adr/`](./docs/adr), written in English:
@@ -1127,6 +1228,13 @@ Detailed design records live under [`docs/adr/`](./docs/adr), written in English
 | [Memory backend switch](./docs/adr/0011-memory-backend-switch.md) | `cloud` / `local` / `both` selection and merge |
 | [Browser sandbox](./docs/adr/0012-browser-sandbox.md) | Six-image `BrowserCatalog` and `BrowserSandbox` |
 | [Agent–memo integration](./docs/adr/0013-agent-memo-integration.md) | Memory graph, auto-compact, memo tool family |
+| [DeepSeek Harness runtime](./docs/adr/0019-dsh-runtime.md) | `dsh` as the default `agent_loop` provider |
+| [Governed egress](./docs/adr/0020-governed-egress-single-boundary.md) | One decide/substitute/audit boundary, deny-by-default |
+| [SDK cloud client](./docs/adr/0020-sdk-cloud-client.md) | Why the native SDK embeds no runtime |
+| [Audit schema & retention](./docs/adr/0021-audit-event-schema-and-retention.md) | Audit event fields, JSONL sink, retention |
+| [Checkpoints & metering](./docs/adr/0022-sandbox-checkpoint-and-metering.md) | Sandbox snapshots and state-based usage |
+| [Idle & rotation](./docs/adr/0023-idle-detection-and-credential-rotation.md) | Five-signal idle detection, credential rotation |
+| [Network enforcement](./docs/adr/0024-network-enforcement-sidecar.md) | Internal network + secretless egress proxy |
 
 <div align="right">
 
@@ -1184,6 +1292,6 @@ This project is [MIT](./LICENSE) licensed.
 [lastcommit-shield]: https://img.shields.io/github/last-commit/ariacompute/agent?style=flat-square&labelColor=black&color=555
 [sdks-shield]: https://img.shields.io/badge/SDKs-5_languages-555?style=flat-square&labelColor=black
 [tests-shield]: https://img.shields.io/badge/tests-cargo_test--workspace-555?style=flat-square&labelColor=black
-[docs-shield]: https://img.shields.io/badge/docs-12_ADRs-555?style=flat-square&labelColor=black
+[docs-shield]: https://img.shields.io/badge/docs-22_ADRs-555?style=flat-square&labelColor=black
 
 [back-to-top]: https://img.shields.io/badge/-BACK_TO_TOP-151515?style=flat-square

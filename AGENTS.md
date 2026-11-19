@@ -67,10 +67,17 @@ kept as an explicit `native` fallback (ADR-0019).
    `BrowserSandbox`, which reuses the same Docker/Kata container path and
    `SandboxResourceLimits`. See `docs/adr/0003-sandbox-providers.md`,
    `docs/adr/0003-sandbox-providers.md` and `docs/adr/0012-browser-sandbox.md`.
+   Egress enforcement is structural, not advice: with `egress_network` set,
+   `Agent::with_*` wraps the injected backend in `NetworkingSandbox`, which fills
+   `network`/`labels`/`env` only where the caller left them empty. Backends that
+   cannot honour them (cube) fail closed; `proxy_env` lives in
+   `aria-agent-sandbox` and is the single source of the proxy variable set
+   (ADR-0024).
 4. **Capability seams + plugin registry.** Every capability is a seam
    (`llm`, `sandbox`, `fs`, `shell`, `jobs`, `storage`, `sessionPersistence`,
    `sessionQuery`, `approvals`, `skills`, `web`, `userQuestions`, `subagents`,
-   `schedule`, `agent_loop`). Roles follow dsh's four kinds (`core` / `seam` /
+   `schedule`, `egress`, `credentials`, `audit`, `metering`, `agent_loop`).
+   Roles follow dsh's four kinds (`core` / `seam` /
    `bundle` / `service`); keys accept dsh's spellings as aliases, resolution order
    is registration order (precedence), and `service` keys reject providers.
    Providers register in `aria-agent-plugin`; assembly topo-sorts `requires`,
@@ -80,7 +87,31 @@ kept as an explicit `native` fallback (ADR-0019).
    approval → dispatch → post-process; **no approval provider means denied**, and
    the reason is fed back to the model. See ADR-0014/ADR-0016/ADR-0019.
 5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key, raw user content,
-   or embedding vectors.
+   or embedding vectors. Credentials travel as the literal `${credential}`
+   placeholder from the agent side; the plaintext only exists inside the egress
+   boundary (ADR-0020). Audit payloads are redacted by key whitelist before they
+   are written (ADR-0021).
+5b. **Governance defaults are closed, and there is exactly one source of them.**
+   Egress is deny-by-default; `allowlist` with no hosts fails boot. `AgentConfig`
+   (`egress_mode`, `egress_allow`, `egress_deny`, `egress_enforcement`,
+   `audit_sink`, `metering`, `compression`, `idle_timeout_secs`, ...) is the only
+   place defaults are defined — env vars (`AGENT_EGRESS_*`, ...) may override a
+   value but never introduce a different default, and the resolved values are
+   logged at startup. Policy mutations are revision-guarded: a stale write gets
+   `409 Conflict`, never a last-writer-wins overwrite. `SandboxLifecycle` and task
+   state are orthogonal — never report one as the other. Credential rotation has
+   no cache window. Idle detection uses five signals (HTTP, exec, processes,
+   connections, jobs), never inbound HTTP alone. See ADR-0020..0023.
+5c. **Egress enforcement modes are not interchangeable.** `proxy` sets
+   `HTTP_PROXY`; `network` removes the default route (Docker `internal` network +
+   `aria-agent-egress-proxy` sidecar, ADR-0024) and **fails boot** if the network,
+   the image or the running proxy is missing — never fall back to `proxy`. The
+   sidecar holds no secrets or policy: it calls `/internal/egress/*` with
+   `X-Aria-Proxy-Token`, and those routes exist only when enforcement is
+   `network`. Sandbox identity comes from the `aria.tenant_id` / `aria.session_id`
+   labels written at creation; an unknown peer is refused, and a principal that
+   does not own the calling peer IP is rejected. Publish the sidecar port nowhere
+   and do not route `/internal/egress/*` through nginx.
 6. **Tests.** `cargo test --workspace` must pass; JS SDK via `just sdk-js-test`
    (`bun test`), Python SDK via `just sdk-py-test`. Cross-crate behavior belongs
    in `tests/`. DB-backed tests are gated on `DATABASE_URL` (skip when unset,

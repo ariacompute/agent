@@ -8,10 +8,12 @@
 //! * [`memory`] — in-process implementation with identical semantics, used by
 //!   the unit/integration tests so the whole API is exercisable without a DB.
 
+pub mod governance;
 pub mod memory;
 pub mod pg;
 pub mod pg_orchestration;
 
+pub use governance::PgGovernanceStore;
 pub use memory::MemoryStore;
 pub use pg::{ensure_schema, PgStore};
 

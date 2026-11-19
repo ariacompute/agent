@@ -1,5 +1,86 @@
 # Release notes
 
+## Governed execution: one egress boundary, audit, metering and credentials
+
+Every outbound request now crosses a single boundary that decides, substitutes and
+records (ADR-0020). `AGENT_EGRESS_ENFORCEMENT=network` makes that boundary the
+*only* route out: sandboxes run on an `internal` Docker network whose sole
+reachable peer is a secretless proxy (ADR-0024).
+
+### Highlights
+
+- **Four new seams** — `egress`, `audit`, `metering` and `credentials`. Each has a
+  no-op default that refuses (`DenyAllEgress`, `NoAuditConfigured`,
+  `NoMeteringConfigured`, `NoCredentials`) instead of allowing, so missing wiring
+  fails closed.
+- **`aria-agent-governance`** — `EgressGateway` (decide → substitute
+  `${credential}` → audit → meter), `LocalForwardProxy` (HTTP/1.1 absolute-URI
+  forwarding plus blind `CONNECT`), `JsonlAuditSink` (UTC day files, retention
+  purge, NDJSON export), `MeteringLedger` + `QuotaGuardSandbox` (a refused
+  reservation rolls the container back), `GovernanceProjector` (projects tool
+  output for the model only; events keep the raw result), `FileCredentialStore`
+  (ChaCha20-Poly1305 at rest, rotation deadlines, header stubs) and idle detection
+  over five independent signals.
+- **`aria-agent-egress-proxy`** — a separate image that holds no secrets and
+  writes no disk. It implements the same seams over `/internal/egress/*`, so
+  decision, redaction and audit semantics are reused rather than reimplemented.
+  Identity is the peer IP, resolved from container labels (`aria.tenant_id` /
+  `aria.session_id`) and cached 10s / 4096 peers; an unknown peer is refused, and
+  a `principal_id` that does not own that IP is rejected — a compromised proxy
+  cannot cross tenants.
+- **Fail boot, never downgrade** — in `network` mode the service creates the
+  network, starts the proxy, attaches it to the control-plane network and probes
+  health before serving. Any failure exits with the next action ("run in a
+  container, or use `enforcement=proxy`").
+- **Structural coverage** — the wrapper is applied where the runtime is assembled
+  (`Agent::with_*`) and to the browser backend's inner Docker sandbox, so `shell`,
+  `job_*`, the loop and `browser_*` all land on the internal network. `term_*` is
+  unregistered (host PTY, no container network can cover it), `cube` refuses a
+  custom network and labels but forwards the proxy environment, and a restored
+  checkpoint joins the same network with the authenticated tenant label.
+- **Cloud surface** — `/v1/governance/*`: policy revisions (stale writes are
+  `409`), audit + NDJSON export, usage, status (enforcement mode + proxy health),
+  credential metadata (when a store is configured), and checkpoints with restore.
+  Four `principal_id`-scoped tables (`egress_policies`, `audit_events`,
+  `usage_events`, `sandbox_checkpoints`) are created with `CREATE TABLE IF NOT
+  EXISTS`, so an existing database needs no manual step; credentials stay in the
+  encrypted on-disk store.
+- **Observability** — the proxy is not a compose service, so `docker network ls`
+  shows the internal network and `docker ps` the sidecar; a denial reaches the
+  model as `egress is deny-by-default and x is not on the allowlist (policy rN)`
+  instead of a timeout.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AGENT_EGRESS_MODE` | `deny_all` | `deny_all` \| `allowlist` \| `denylist` |
+| `AGENT_EGRESS_ALLOW` / `AGENT_EGRESS_DENY` | *(empty)* | host patterns; `*.` matches sub-domains |
+| `AGENT_EGRESS_ENFORCEMENT` | `proxy` | `proxy` \| `network` \| `off` (needs `AGENT_ALLOW_UNENFORCED_EGRESS=1`) |
+| `AGENT_EGRESS_NETWORK` / `AGENT_EGRESS_PROXY_URL` | `aria-egress` / `http://aria-egress-proxy:8080` | internal network and the address reachable from a sandbox |
+| `EGRESS_PROXY_IMAGE` / `EGRESS_PROXY_TOKEN` | — / generated per boot | sidecar image (required for `network`) and the shared token |
+| `CONTROL_PLANE_URL` | *(required for `network`)* | how the proxy reaches this service |
+| `AGENT_AUDIT_DIR` / `AGENT_AUDIT_RETENTION_DAYS` | `<workspace>/.aria/audit` / `30` | JSONL sink; `0` keeps forever |
+| `AGENT_METERING` / `AGENT_COMPRESSION` | `on` / `on` | usage ledger / model-facing projection |
+| `AGENT_CREDENTIALS_DIR` / `AGENT_CREDENTIAL_MASTER_KEY` | *(unset → off)* / required when on | encrypted credential store |
+| `AGENT_IDLE_TIMEOUT_SECS` | `900` | `0` disables suspension |
+
+### Breaking changes
+
+- `ExecSpec` gained `network` and `labels`, so out-of-tree struct literals no
+  longer compile; build with `ExecSpec::command(..)` and set the new fields.
+- An `allowlist` policy with no hosts denies every request at call time (it boots
+  fine); `deny_all` is the explicit way to say that.
+- `network` enforcement refuses to start without `EGRESS_PROXY_IMAGE`,
+  `CONTROL_PLANE_URL` and a running proxy.
+
+### Validation
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+-- -D warnings`, `cargo test --locked --workspace` (941 passed) and
+`./scripts/coverage.sh` (99.95% lines, 25127/25140; the remainder is either a
+documented `// LCOV_EXCL_LINE` opt-out or a closing-delimiter artifact) all pass.
+
 ## Rust / Swift / Kotlin SDKs are cloud API clients
 
 The UniFFI surface no longer embeds the runtime: `ariacompute-agent` is now a

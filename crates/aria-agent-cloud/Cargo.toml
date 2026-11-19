@@ -44,6 +44,9 @@ async-trait = "0.1"
 # `agent-sandbox` is a direct dependency so we can select the Docker/Kata/Cube
 # backend via `from_provider`.
 aria-agent-sandbox.workspace = true
+# The single governed egress boundary (egress policy, credential substitution,
+# tool-output projection) — ADR-0020..0023.
+aria-agent-governance = { path = "../aria-agent-governance" }
 # Browser capability: provides `BrowserSandbox` (sandbox + engine) and
 # `BrowserToolHandler`, injected by `build_agent` when `sandbox_provider=Browser`.
 aria-agent-browser.workspace = true

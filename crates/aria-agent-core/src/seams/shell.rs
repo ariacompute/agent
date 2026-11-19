@@ -45,17 +45,51 @@ pub trait ShellSeam: Send + Sync {
 pub struct SandboxShell {
     sandbox: Arc<dyn Sandbox>,
     cwd: Option<String>,
+    /// Environment injected into every sandbox session (e.g. `HTTP_PROXY`, so
+    /// outbound traffic reaches the governed egress gateway).
+    env: Vec<(String, String)>,
+    network: Option<String>,
+    labels: Vec<(String, String)>,
 }
 
 impl SandboxShell {
     pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
-        Self { sandbox, cwd: None }
+        Self {
+            sandbox,
+            cwd: None,
+            env: Vec::new(),
+            network: None,
+            labels: Vec::new(),
+        }
     }
 
     /// Default working directory for every command (typically the policy root).
     pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
         self.cwd = Some(cwd.into());
         self
+    }
+
+    /// Environment every spawned session receives. Set from the governance stack
+    /// so a command that calls `curl` is subject to the same policy as `web_fetch`.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Attach the sandbox to the governed egress network (no default route).
+    pub fn with_network(mut self, network: Option<String>) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Identity labels the proxy reads to attribute a source IP to a tenant.
+    pub fn with_labels(mut self, labels: Vec<(String, String)>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    pub fn env(&self) -> &[(String, String)] {
+        &self.env
     }
 }
 
@@ -67,6 +101,9 @@ impl ShellSeam for SandboxShell {
         }
         let mut spec = ExecSpec::command(argv.to_vec());
         spec.workdir = cwd.map(|c| c.to_string()).or_else(|| self.cwd.clone());
+        spec.env = self.env.clone();
+        spec.network = self.network.clone();
+        spec.labels = self.labels.clone();
         let handle = self
             .sandbox
             .spawn(&spec)
@@ -93,6 +130,7 @@ mod tests {
     struct Recording {
         calls: AtomicUsize,
         last: std::sync::Mutex<Option<Vec<String>>>,
+        last_env: std::sync::Mutex<Option<Vec<(String, String)>>>,
         fail_exec: bool,
         fail_spawn: bool,
     }
@@ -100,6 +138,7 @@ mod tests {
     #[async_trait]
     impl Sandbox for Recording {
         async fn spawn(&self, _spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
+            *self.last_env.lock().unwrap() = Some(_spec.env.clone());
             if self.fail_spawn {
                 return Err(SandboxError::Spawn("boom".into()));
             }
@@ -186,5 +225,18 @@ mod tests {
         let shell = SandboxShell::new(sb.clone()).with_cwd("/tmp");
         shell.exec(&["ls".into()], None).await.unwrap();
         assert_eq!(sb.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn injected_env_reaches_the_exec_spec() {
+        let sb = Arc::new(Recording::default());
+        let env = vec![
+            ("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string()),
+            ("NO_PROXY".to_string(), "localhost".to_string()),
+        ];
+        let shell = SandboxShell::new(sb.clone()).with_env(env.clone());
+        assert_eq!(shell.env().len(), 2);
+        shell.exec(&["true".into()], None).await.unwrap();
+        assert_eq!(sb.last_env.lock().unwrap().clone(), Some(env));
     }
 }

@@ -48,6 +48,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 **信任与治理**
 
 - [🔏 信任库安全](#-信任库安全)
+- [🛡️ 受控执行](#-受控执行)
 - [📚 文档](#-文档)
 - [📝 许可证](#-许可证)
 - [🤝 工程约定](#-工程约定)
@@ -67,6 +68,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 - 📱 **端侧存储** —— `aria-agent-memo`（aria memo / SQLite）保存 local-first 的上下文副本，与云端后端通过同一个 `ContextStore` trait 互换。
 - 🌐 **五语言 SDK** —— JS / Python / Rust / Swift / Kotlin 全部是云端 API 的薄客户端；不内嵌运行时，移动端只需网络与一个 API Key。
 - 🧭 **可插拔 sandbox** —— 每个工具容器都受 `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` 限制，并经由 `DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 访问守护进程。
+- 🛡️ **受控执行** —— 每次出站调用都经过同一条边界：判定、替换 `${credential}`、留痕；审计、计量、空闲挂起、输出投影与检查点挂在同一组接缝上，`AGENT_EGRESS_ENFORCEMENT=network` 更是直接去掉 sandbox 的默认路由，而不是指望 `HTTP_PROXY` 被遵守（`aria-agent-governance`）。
 
 <div align="right">
 
@@ -121,6 +123,8 @@ just dsh-e2e    # 真实一轮（需 ARIA_DSH_E2E=1 + DSH_BIN + 供应商密钥�
 | **aria-agent-dsh** | `agent_loop` 接缝的 DeepSeek Harness 提供方：stdio JSON-RPC 传输、按会话复用的运行时池、审批/提问桥接、通知 → `AgentEvent` 映射。 |
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
+| **aria-agent-governance** | 出站判定与 `${credential}` 替换、JSONL 审计、用量计量、工具输出投影、加密凭据库、空闲检测、配额守卫与检查点（ADR-0020 … 0024）。 |
+| **aria-agent-egress-proxy** | `network` 强制模式下的无密钥 sidecar：经 `/internal/egress/*` 回控制面，用来源 IP 解析租户，批量上报审计。 |
 | **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：云端 API 客户端 —— `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`。 |
 | **aria-agent-cloud** | axum 服务：Postgres + pgvector（元数据**与**上下文），OpenAI beta Agents API。`/v1/agents`、`/v1/agents/sessions`、SSE `/v1/agents/sessions/{id}/events/stream`。 |
@@ -1047,6 +1051,89 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 
 </div>
 
+## 🛡️ 受控执行
+
+每个出站请求都经过同一条边界：判定、替换、记录（ADR-0020）。默认值一律收紧，且只来自
+`AgentConfig`，因此 CLI 与云端部署不会对「默认是什么」产生分歧。
+
+| 变量 | 默认值 | 含义 |
+|---|---|---|
+| `AGENT_EGRESS_MODE` | `deny_all` | `deny_all` \| `allowlist` \| `denylist` |
+| `AGENT_EGRESS_ALLOW` | *（空）* | 模式为 `allowlist` 时可访问的主机（`*.` 表示子域） |
+| `AGENT_EGRESS_DENY` | *（空）* | 始终拒绝的主机 |
+| `AGENT_EGRESS_ENFORCEMENT` | `proxy` | `proxy` \| `network` \| `off`（需 `AGENT_ALLOW_UNENFORCED_EGRESS=1`） |
+| `AGENT_AUDIT_DIR` | `<workspace>/.aria/audit` | JSONL sink；`/v1/governance/audit/export` 返回 NDJSON |
+| `AGENT_AUDIT_RETENTION_DAYS` | `30` | `0` 表示永久保留 |
+| `AGENT_METERING` | `on` | 按生命周期状态计量的用量账本 |
+| `AGENT_COMPRESSION` | `on` | 面向模型的规则化工具输出投影 |
+| `AGENT_CREDENTIALS_DIR` | *（未设置即关闭）* | 落盘加密的凭据库 |
+| `AGENT_CREDENTIAL_MASTER_KEY` | *（开启凭据库时必填）* | CHACHA20-POLY1305 的口令 |
+| `AGENT_IDLE_TIMEOUT_SECS` | `900` | `0` 关闭挂起；五个信号必须全部静默 |
+
+凭据在工具参数中以字面量 `${credential}` 书写；明文只在边界处替换，绝不进入日志、事件或审计记录。
+
+### `AGENT_EGRESS_ENFORCEMENT=network`
+
+`proxy`（默认）只是设置 `HTTP_PROXY`，无视它的二进制仍然有默认路由；`network` 则直接拿掉这条路由：
+
+```bash
+just egress-proxy-image                     # 构建 sidecar 镜像
+export AGENT_EGRESS_ENFORCEMENT=network
+export EGRESS_PROXY_IMAGE=aria-egress-proxy:local
+export CONTROL_PLANE_URL=http://cloud:3000  # 代理如何访问本服务
+docker compose up
+```
+
+启动时服务会创建 `aria-egress` 网络（`internal: true`），把代理容器同时接入该网络与 compose
+网络，之后每个 sandbox 都以 `network_mode=aria-egress` 运行。代理不是一个 compose 服务。
+
+| 变量 | 含义 |
+|---|---|
+| `EGRESS_PROXY_IMAGE` | sidecar 镜像；`network` 模式必填 |
+| `AGENT_EGRESS_NETWORK` | internal 网络名（默认 `aria-egress`） |
+| `AGENT_EGRESS_PROXY_URL` | sandbox 内可达的地址（默认 `http://aria-egress-proxy:8080`） |
+| `CONTROL_PLANE_URL` | 代理如何访问本服务 |
+| `EGRESS_PROXY_TOKEN` | 共享密钥；未设置时每次启动随机生成 |
+
+任何一步失败（没有网络、没有镜像、代理未运行、不在容器内）服务都会**拒绝启动**，并在消息中
+给出下一步动作；不会退回 `proxy` 模式。
+
+身份就是 sandbox 的来源 IP：容器创建时打上 `aria.tenant_id` / `aria.session_id` 标签，代理据此
+询问 `/internal/egress/whoami`。没有标签的来源一律拒绝；请求里声明的 principal 与来源 IP 不
+匹配同样会被拒绝——被攻陷的代理读不到别的租户的策略。结果缓存 10 秒（上限 4096）：Docker 会
+复用 IP，TTL 太长迟早把流量记到错误的租户头上。
+
+覆盖范围与边界：
+
+* 每个 sandbox 后端都会被包裹，包括浏览器后端内部的 Docker sandbox，因此 `shell`、`job_*`、
+  agent loop 与 `browser_*` 都落在 internal 网络上。包裹也发生在运行时构造点，所以设置了
+  `egress_network` 的嵌入式 `Agent` 同样绕不过去。`cube` 没有自定义网络与标签的能力，会显式
+  拒绝而不是留下默认路由；它的代理环境通过 `-e` 传入。
+* `network` 强制下 `term_*` **不注册**：它在控制面进程里驱动 PTY，任何容器网络都覆盖不到。
+  需要交互式宿主终端请使用 `proxy` 模式。
+* 恢复检查点同样接入 internal 网络并带上通过认证的 principal 的租户标签；缺少
+  `AGENT_EGRESS_NETWORK` 时恢复会失败，而不是悄悄在默认网桥上起容器。恢复出的 sandbox 在
+  `proxy` 模式下也会拿到代理环境，因此不会走直连。
+
+`GET /v1/governance/status` 会报告 `enforcement: "network"` 以及代理的容器、网络、镜像与启动时的健康状态。
+
+云端端点（全部按 `principal_id` 分片）：`GET|PUT|PATCH /v1/governance/egress-policy`（修订号
+守卫；过期写入返回 `409`）、`GET /v1/governance/audit`、`GET /v1/governance/audit/export`、
+`GET /v1/governance/usage`、`GET /v1/governance/status`、`/v1/governance/credentials` 下的凭据
+元数据，以及 `/v1/governance/checkpoints` 下的检查点（恢复会派生新 sandbox，并走与创建相同的
+配额闸门）。
+
+迁移说明：四张治理表（`egress_policies`、`audit_events`、`usage_events`、
+`sandbox_checkpoints`）在 `ensure_schema` 中以 `CREATE TABLE IF NOT EXISTS` 建立，已有
+数据库无需手工操作。`allowlist` 模式却没给主机清单可以正常启动，但会拒绝所有请求——想明确
+表达「全拒绝」请用 `deny_all`。
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
 ## 📚 文档
 
 详细设计记录位于 [`docs/adr/`](./docs/adr)，以英文撰写：
@@ -1063,6 +1150,13 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 | [记忆后端切换](./docs/adr/0011-memory-backend-switch.md) | `cloud` / `local` / `both` 选择与合并 |
 | [浏览器 sandbox](./docs/adr/0012-browser-sandbox.md) | 六镜像 `BrowserCatalog` 与 `BrowserSandbox` |
 | [Agent–memo 集成](./docs/adr/0013-agent-memo-integration.md) | 记忆图、自动压缩、memo 工具族 |
+| [DeepSeek Harness 运行时](./docs/adr/0019-dsh-runtime.md) | `dsh` 作为默认 `agent_loop` 提供方 |
+| [受控出站](./docs/adr/0020-governed-egress-single-boundary.md) | 单一判定/替换/审计边界，默认拒绝 |
+| [SDK 云端客户端](./docs/adr/0020-sdk-cloud-client.md) | 原生 SDK 为何不内嵌运行时 |
+| [审计结构与保留](./docs/adr/0021-audit-event-schema-and-retention.md) | 审计事件字段、JSONL sink、保留期 |
+| [检查点与计量](./docs/adr/0022-sandbox-checkpoint-and-metering.md) | sandbox 快照与按状态计量 |
+| [空闲与轮换](./docs/adr/0023-idle-detection-and-credential-rotation.md) | 五信号空闲检测、凭据轮换 |
+| [网络强制](./docs/adr/0024-network-enforcement-sidecar.md) | internal 网络 + 无密钥出站代理 |
 
 <div align="right">
 
@@ -1120,6 +1214,6 @@ This project is [MIT](./LICENSE) licensed.
 [lastcommit-shield]: https://img.shields.io/github/last-commit/ariacompute/agent?style=flat-square&labelColor=black&color=555
 [sdks-shield]: https://img.shields.io/badge/SDKs-5_languages-555?style=flat-square&labelColor=black
 [tests-shield]: https://img.shields.io/badge/tests-cargo_test--workspace-555?style=flat-square&labelColor=black
-[docs-shield]: https://img.shields.io/badge/docs-12_ADRs-555?style=flat-square&labelColor=black
+[docs-shield]: https://img.shields.io/badge/docs-22_ADRs-555?style=flat-square&labelColor=black
 
 [back-to-top]: https://img.shields.io/badge/-BACK_TO_TOP-151515?style=flat-square

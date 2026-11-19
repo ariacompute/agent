@@ -148,6 +148,7 @@ dependencies = [
  "aria-agent-browser",
  "aria-agent-core",
  "aria-agent-dsh",
+ "aria-agent-governance",
  "aria-agent-orchestrator",
  "aria-agent-plugin",
  "aria-agent-sandbox",
@@ -217,12 +218,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "aria-agent-egress-proxy"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-governance",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots",
+ "wiremock",
+]
+
+[[package]]
 name = "aria-agent-ffigen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
  "uniffi_bindgen",
+]
+
+[[package]]
+name = "aria-agent-governance"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "aria-agent-sandbox",
+ "async-trait",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -69,6 +69,15 @@ impl StdioTransport {
         for (k, v) in env {
             cmd.env(k, v);
         }
+        // Governance: the harness makes outbound calls too. Forward the proxy
+        // variables explicitly (they are part of the allow-list, not an
+        // inheritance leak) so an external harness cannot silently bypass the
+        // egress gateway that governs the native loop (ADR-0020).
+        for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+            if let Ok(value) = std::env::var(var) {
+                cmd.env(var, value);
+            }
+        }
         let mut child = cmd.spawn().map_err(|e| {
             CoreError::Config(format!(
                 "cannot start DeepSeek Harness `{bin}`: {e} \

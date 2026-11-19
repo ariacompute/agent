@@ -40,6 +40,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
             AppError::Forbidden(e) => (StatusCode::FORBIDDEN, e),
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            AppError::Conflict(e) => (StatusCode::CONFLICT, e),
         };
         error_response(status, msg)
     }
@@ -74,6 +75,7 @@ mod tests {
             (AppError::BadRequest("bad".into()), StatusCode::BAD_REQUEST),
             (AppError::Forbidden("no".into()), StatusCode::FORBIDDEN),
             (AppError::NotFound, StatusCode::NOT_FOUND),
+            (AppError::Conflict("stale".into()), StatusCode::CONFLICT),
             (
                 AppError::Core(CoreError::Config("boom".into())),
                 StatusCode::INTERNAL_SERVER_ERROR,

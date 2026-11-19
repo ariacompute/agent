@@ -23,6 +23,8 @@ pub mod auth;
 pub mod cli_config;
 pub mod context;
 pub mod event_envelope;
+pub mod governance;
+pub mod internal_egress;
 pub mod store;
 pub mod types;
 pub mod upgrade;
@@ -52,10 +54,32 @@ pub enum AppError {
     BadRequest(String),
     Forbidden(String),
     NotFound,
+    /// The caller's revision is stale (optimistic concurrency).
+    Conflict(String),
+}
+
+/// Result alias used by the API layer.
+pub type AppResult<T> = Result<T, AppError>;
+
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
+        AppError::Db(e)
+    }
 }
 
 impl From<agent_sandbox::SandboxError> for AppError {
     fn from(e: agent_sandbox::SandboxError) -> Self {
         AppError::Core(CoreError::Config(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn database_errors_keep_their_source() {
+        let err: AppError = sqlx::Error::RowNotFound.into();
+        assert!(matches!(err, AppError::Db(_)));
     }
 }

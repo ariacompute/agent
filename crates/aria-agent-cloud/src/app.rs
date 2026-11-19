@@ -141,6 +141,27 @@ pub async fn build_agent_with_config(
     build_agent_inner(state, cfg, principal, true).await
 }
 
+/// Put a backend on the governed network when enforcement is on.
+///
+/// The decorator only fills fields the caller left empty, so an explicit
+/// `network` from a caller still wins (and `CliSandbox` refuses it loudly).
+fn governed(
+    sandbox: Arc<dyn Sandbox>,
+    network: &Option<String>,
+    labels: &[(String, String)],
+    env: &[(String, String)],
+) -> Arc<dyn Sandbox> {
+    match network {
+        Some(name) => Arc::new(agent_sandbox::NetworkingSandbox::new(
+            sandbox,
+            name,
+            labels.to_vec(),
+            env.to_vec(),
+        )),
+        None => sandbox,
+    }
+}
+
 /// The real constructor: `allow_subagents = false` builds a **child** agent.
 ///
 /// Children never spawn children, so delegation depth is exactly one and the
@@ -171,21 +192,80 @@ pub(crate) async fn build_agent_inner(
             cfg.sandbox_provider
         )))
     })?;
+    // Governance is resolved once per agent: egress decisions, credential
+    // substitution and model-facing projection all come from the same stack, so
+    // the audit trail cannot have a gap between "policy" and "what left".
+    let governance = agent_governance::GovernanceStack::from_resolved(
+        agent_governance::GovernanceConfig::from_agent_config(&cfg).map_err(AppError::Core)?,
+        tenant,
+    )
+    .map_err(|e| AppError::BadRequest(format!("governance: {e}")))?;
+    let projector = governance.projector();
+
+    // Network enforcement: every sandbox joins an internal network (no default
+    // route), carries the labels the proxy reads, and gets the proxy URL that is
+    // reachable from *inside* the container. All three come from one config.
+    let network = Some(cfg.egress_network.clone()).filter(|n| !n.trim().is_empty());
+    let sandbox_env = if cfg.egress_proxy_url.trim().is_empty() {
+        Vec::new()
+    } else {
+        governance.sandbox_proxy_env(cfg.egress_proxy_url.trim())
+    };
+    let labels: Vec<(String, String)> = if network.is_some() {
+        vec![
+            ("aria.tenant_id".to_string(), tenant.to_string()),
+            ("aria.session_id".to_string(), cfg.session.clone()),
+        ]
+    } else {
+        Vec::new()
+    };
     let (sandbox, mut handlers): (Arc<dyn Sandbox>, Vec<Arc<dyn agent_core::ToolHandler>>) =
         match provider {
-            SandboxProvider::Docker => ((state.make_sandbox)(), Vec::new()),
+            SandboxProvider::Docker => (
+                governed((state.make_sandbox)(), &network, &labels, &sandbox_env),
+                Vec::new(),
+            ),
             SandboxProvider::Browser => {
+                // The browser backend spawns its own container from a
+                // `Box<dyn Sandbox>`; wrap that inner backend too, or
+                // `spawn_browser` would keep the default bridge one level down.
+                let backend: Box<dyn Sandbox> = match &network {
+                    Some(net) => Box::new(agent_sandbox::NetworkingSandbox::new(
+                        Arc::new(agent_sandbox::DockerSandbox::new()),
+                        net,
+                        labels.clone(),
+                        sandbox_env.clone(),
+                    )),
+                    None => Box::new(agent_sandbox::DockerSandbox::new()),
+                };
                 let browser = Arc::new(BrowserSandbox::with_catalog(
-                    Box::new(agent_sandbox::DockerSandbox::new()),
+                    backend,
                     BrowserCatalog::builtin(),
                     BrowserCatalog::default_kind(),
                 ));
                 let handler: Arc<dyn agent_core::ToolHandler> =
                     Arc::new(BrowserToolHandler::new(browser.clone()));
-                // Shell fallback keeps using the default Docker sandbox.
-                (Arc::new(agent_sandbox::DockerSandbox::new()), vec![handler])
+                // Shell fallback keeps using the default Docker sandbox, on the
+                // same governed network (a separate instance from the browser's).
+                (
+                    governed(
+                        Arc::new(agent_sandbox::DockerSandbox::new()),
+                        &network,
+                        &labels,
+                        &sandbox_env,
+                    ),
+                    vec![handler],
+                )
             }
-            other => (Arc::from(agent_sandbox::from_provider(other)?), Vec::new()),
+            other => (
+                governed(
+                    Arc::from(agent_sandbox::from_provider(other)?),
+                    &network,
+                    &labels,
+                    &sandbox_env,
+                ),
+                Vec::new(),
+            ),
         };
     // Built-in tool families: every family talks to a capability seam, and the
     // fs/shell/jobs families are rooted at the single policy root. Families whose
@@ -194,7 +274,9 @@ pub(crate) async fn build_agent_inner(
     let policy = agent_core::build_policy(&cfg)
         .map_err(AppError::Core)?
         .expect("policy on success");
-    let set = aria_agent_tools::ToolSet::local(policy, sandbox.clone(), context.clone());
+    let set = aria_agent_tools::ToolSet::local(policy, sandbox.clone(), context.clone())
+        .with_egress(governance.egress())
+        .with_sandbox_transport(network, labels, sandbox_env);
     handlers.extend(set.handlers());
     let mut tools = set.tools();
     tools.extend(agent_browser::browser_tools());
@@ -240,6 +322,7 @@ pub(crate) async fn build_agent_inner(
         // JSONL artifact: the cloud keeps its audit trail in Postgres.
         .map(|agent| {
             agent
+                .with_projector(projector)
                 .with_tools(tools)
                 .with_session_log(Arc::new(TitleProjection {
                     store: state.titles.clone(),
@@ -362,7 +445,20 @@ fn harness_from_value(value: Option<String>) -> String {
         .unwrap_or_else(|| "native".to_string())
 }
 
+/// Deployment default for one run.
+///
+/// Egress enforcement is deployment policy, so it is read from the environment
+/// here — the single construction point for cloud runs. Boot (`internal_egress`)
+/// publishes `AGENT_EGRESS_NETWORK` / `AGENT_EGRESS_PROXY_URL` only after the
+/// internal network and proxy are up; if either is missing the run fails
+/// validation instead of silently keeping the default route (ADR-0024).
 pub fn agent_config(name: &str, instructions: &str, session: &str) -> AgentConfig {
+    let (enforcement, network, proxy_url, allow_unenforced) = egress_defaults(
+        std::env::var("AGENT_EGRESS_ENFORCEMENT").ok(),
+        std::env::var("AGENT_EGRESS_NETWORK").ok(),
+        std::env::var("AGENT_EGRESS_PROXY_URL").ok(),
+        std::env::var("AGENT_ALLOW_UNENFORCED_EGRESS").ok(),
+    );
     AgentConfig {
         session: session.to_string(),
         agent_name: name.to_string(),
@@ -380,7 +476,60 @@ pub fn agent_config(name: &str, instructions: &str, session: &str) -> AgentConfi
         // channel, so tool calls are pre-approved by the deployment preset. With
         // an interactive channel a broker is injected instead (ADR-0016).
         approval_mode: "auto".into(),
+        egress_enforcement: enforcement,
+        egress_network: network,
+        egress_proxy_url: proxy_url,
+        allow_unenforced_egress: allow_unenforced,
         ..AgentConfig::default()
+    }
+}
+
+/// Pure half of the egress defaults: trimmed non-empty values, with `proxy` as
+/// the enforcement default (the historical behaviour).
+fn egress_defaults(
+    enforcement: Option<String>,
+    network: Option<String>,
+    proxy_url: Option<String>,
+    allow_unenforced: Option<String>,
+) -> (String, String, String, bool) {
+    let value = |raw: Option<String>| raw.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    (
+        value(enforcement).unwrap_or_else(|| "proxy".to_string()),
+        value(network).unwrap_or_default(),
+        value(proxy_url).unwrap_or_default(),
+        matches!(
+            value(allow_unenforced)
+                .map(|v| v.to_ascii_lowercase())
+                .as_deref(),
+            Some("1") | Some("true")
+        ),
+    )
+}
+
+/// `"off"` disables a feature; anything else (including unset) enables it.
+fn flag_from(value: Option<String>, default: bool) -> bool {
+    match value {
+        Some(raw) => !raw.trim().eq_ignore_ascii_case("off"),
+        None => default,
+    }
+}
+
+/// Attach the credential store when the deployment configured one.
+fn attach_credentials(
+    gov: crate::governance::GovernanceState,
+    credentials: Option<Arc<dyn agent_core::seams::CredentialsSeam>>,
+) -> crate::governance::GovernanceState {
+    match credentials {
+        Some(credentials) => gov.with_credentials(credentials),
+        None => gov,
+    }
+}
+
+/// The proxy's internal surface only exists under network enforcement.
+fn internal_routes(state: Option<crate::internal_egress::InternalEgressState>) -> Router {
+    match state {
+        Some(state) => crate::internal_egress::router(state),
+        None => Router::new(),
     }
 }
 
@@ -533,7 +682,22 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state.clone())
         // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
         // `from_fn_with_state` threads `AppState` into the middleware closure.
-        .layer(from_fn_with_state(state, require_auth))
+        .layer(from_fn_with_state(state.clone(), require_auth))
+        // Governance surface: egress policy revisions, audit list/export, usage,
+        // credential metadata, checkpoints. It has its own state type, so it is
+        // merged after the agent router is finalised and gets the same auth gate.
+        .merge({
+            let gov = crate::governance::GovernanceState::from_global(
+                std::env::var("AGENT_EGRESS_ENFORCEMENT").unwrap_or_else(|_| "proxy".to_string()),
+                flag_from(std::env::var("AGENT_COMPRESSION").ok(), true),
+                flag_from(std::env::var("AGENT_METERING").ok(), true),
+            );
+            let gov = attach_credentials(gov, crate::governance::credentials_from_env());
+            crate::governance::router(gov).layer(from_fn_with_state(state.clone(), require_auth))
+        })
+        // Internal surface for the network-enforcement proxy: token-authenticated
+        // (not tenant-authenticated), and only mounted when enforcement=network.
+        .merge(internal_routes(crate::internal_egress::state_from_env()))
         // Liveness probe for container orchestration. Registered *after* the
         // auth layer on purpose: `layer` only wraps the routes added before it,
         // so `/healthz` answers 200 without credentials (see `healthz`).
@@ -596,11 +760,202 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_governance_failure_refuses_to_build_an_agent() {
+        let state = harness().state;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = crate::app::agent_config("agent", "", "session-gov");
+        cfg.credentials_dir = dir.path().join("creds").to_string_lossy().to_string();
+        // A credential store without a master key must fail the build, not fall
+        // back to an ungoverned agent.
+        cfg.credential_master_key_env = "GOV_TEST_ABSENT_MASTER_KEY".into();
+        std::env::remove_var("GOV_TEST_ABSENT_MASTER_KEY");
+        let err = crate::app::build_agent_inner(&state, cfg, &principal(), false)
+            .await
+            .err()
+            .expect("governance must fail closed");
+        let debug = format!("{err:?}");
+        assert!(debug.contains("BadRequest"), "{debug}");
+        assert!(debug.contains("governance"), "{debug}");
+    }
+
     #[test]
     fn agent_tools_include_the_shell_and_browser_families() {
         let tools = agent_tools();
         assert!(tools.iter().any(|t| t.name == "shell"));
         assert!(tools.iter().any(|t| t.name.starts_with("browser_")));
+    }
+
+    #[test]
+    fn egress_defaults_trim_and_default_to_proxy() {
+        assert_eq!(
+            egress_defaults(None, None, None, None),
+            ("proxy".into(), String::new(), String::new(), false)
+        );
+        assert_eq!(
+            egress_defaults(
+                Some(" network ".into()),
+                Some(" aria-egress ".into()),
+                Some(" http://aria-egress-proxy:8080 ".into()),
+                Some("TRUE".into()),
+            ),
+            (
+                "network".into(),
+                "aria-egress".into(),
+                "http://aria-egress-proxy:8080".into(),
+                true
+            )
+        );
+        // Blank values mean "unset" — never an empty network name.
+        let blank = egress_defaults(
+            Some("  ".into()),
+            Some("".into()),
+            Some("   ".into()),
+            Some("0".into()),
+        );
+        assert_eq!(blank, ("proxy".into(), String::new(), String::new(), false));
+    }
+
+    /// Records the spec the backend was asked to spawn.
+    #[derive(Default)]
+    struct CaptureSandbox {
+        last: std::sync::Mutex<Option<agent_sandbox::ExecSpec>>,
+    }
+
+    #[async_trait]
+    impl Sandbox for CaptureSandbox {
+        async fn spawn(
+            &self,
+            spec: &agent_sandbox::ExecSpec,
+        ) -> Result<agent_sandbox::SandboxHandle, agent_sandbox::SandboxError> {
+            *self.last.lock().unwrap() = Some(spec.clone());
+            Ok(agent_sandbox::SandboxHandle { id: "sbx".into() })
+        }
+        async fn exec(
+            &self,
+            _handle: &agent_sandbox::SandboxHandle,
+            _cmd: &[String],
+        ) -> Result<agent_sandbox::ExecOutput, agent_sandbox::SandboxError> {
+            Err(agent_sandbox::SandboxError::Exec("not used".into()))
+        }
+        async fn destroy(
+            &self,
+            _handle: agent_sandbox::SandboxHandle,
+        ) -> Result<(), agent_sandbox::SandboxError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn deployment_flags_default_on_and_off_means_off() {
+        assert!(flag_from(None, true));
+        assert!(!flag_from(None, false));
+        assert!(flag_from(Some("on".into()), false));
+        assert!(!flag_from(Some(" off ".into()), true));
+        assert!(!flag_from(Some("OFF".into()), true));
+    }
+
+    #[tokio::test]
+    async fn credentials_and_internal_routes_are_wired_only_when_present() {
+        let gov = attach_credentials(
+            crate::governance::GovernanceState::new(Arc::new(
+                crate::governance::MemoryGovernanceStore::new(),
+            )),
+            None,
+        );
+        assert!(gov.credentials.is_none());
+
+        let internal = crate::internal_egress::InternalEgressState {
+            token: "t".into(),
+            store: crate::governance::global_store(),
+            credentials: None,
+            peers: Arc::new(crate::internal_egress::DockerPeerLookup::new(
+                Arc::new(agent_sandbox::DockerSandbox::new()),
+                "aria-egress",
+            )),
+        };
+        let gov = attach_credentials(
+            crate::governance::GovernanceState::new(Arc::new(
+                crate::governance::MemoryGovernanceStore::new(),
+            )),
+            Some(Arc::new(agent_core::seams::NoCredentials)),
+        );
+        assert!(gov.credentials.is_some());
+        // Both arms of the internal-router switch build a router.
+        let _ = internal_routes(None);
+        let _ = internal_routes(Some(internal));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_governance_block_fails_the_build() {
+        let h = harness();
+        let mut cfg = agent_config("a", "", "s");
+        cfg.egress_enforcement = "trust".into();
+        match crate::app::build_agent_with_config(&h.state, cfg, &principal()).await {
+            Err(err) => assert!(matches!(err, AppError::Core(_)), "{err:?}"),
+            Ok(_) => panic!("an invalid governance block must fail the build"),
+        }
+    }
+
+    #[tokio::test]
+    async fn network_enforcement_wraps_every_backend_under_a_real_config() {
+        let h = harness();
+        let mut cfg = agent_config("a", "", "s");
+        cfg.egress_enforcement = "network".into();
+        cfg.egress_network = "aria-egress".into();
+        cfg.egress_proxy_url = "http://aria-egress-proxy:8080".into();
+        assert!(
+            crate::app::build_agent_with_config(&h.state, cfg.clone(), &principal())
+                .await
+                .is_ok()
+        );
+
+        // The browser provider wraps its own inner Docker backend, not just the
+        // shell fallback.
+        cfg.sandbox_provider = "browser".into();
+        assert!(
+            crate::app::build_agent_with_config(&h.state, cfg, &principal())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_backends_get_the_network_labels_and_proxy_env() {
+        let capture = Arc::new(CaptureSandbox::default());
+        let spec = agent_sandbox::ExecSpec::command(vec!["true".into()]);
+        let labels = vec![("aria.tenant_id".to_string(), "tenant".to_string())];
+        let env = vec![(
+            "HTTP_PROXY".to_string(),
+            "http://aria-egress-proxy:8080".to_string(),
+        )];
+
+        let wrapped = governed(
+            capture.clone(),
+            &Some("aria-egress".to_string()),
+            &labels,
+            &env,
+        );
+        wrapped.spawn(&spec).await.unwrap();
+        let seen = capture.last.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.network.as_deref(), Some("aria-egress"));
+        assert_eq!(seen.labels, labels);
+        assert_eq!(seen.env, env);
+
+        // Proxy mode passes the backend through untouched.
+        let plain = governed(capture.clone(), &None, &labels, &env);
+        plain.spawn(&spec).await.unwrap();
+        let seen = capture.last.lock().unwrap().clone().unwrap();
+        assert!(seen.network.is_none());
+        assert!(seen.labels.is_empty());
+        assert!(seen.env.is_empty());
+
+        let handle = agent_sandbox::SandboxHandle { id: "sbx".into() };
+        assert!(matches!(
+            plain.exec(&handle, &["true".to_string()]).await,
+            Err(agent_sandbox::SandboxError::Exec(_))
+        ));
+        plain.destroy(handle).await.unwrap();
     }
 
     #[tokio::test]

@@ -99,6 +99,20 @@ services:
       # Studio). `OPENAI_API_KEY`/`OPENAI_BASE_URL` are used by the native loop.
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Governed egress (ADR-0020/0024). `network` is the enforced mode: on boot
+      # this service creates the `aria-egress` internal network and starts the
+      # proxy container itself (so the proxy is NOT a compose service), then runs
+      # every sandbox on that network. The proxy image must exist locally:
+      #   just egress-proxy-image
+      # `proxy` (default) only injects proxy env with no network isolation.
+      AGENT_EGRESS_ENFORCEMENT: ${AGENT_EGRESS_ENFORCEMENT:-proxy}
+      EGRESS_PROXY_IMAGE: ${EGRESS_PROXY_IMAGE:-aria-egress-proxy:local}
+      AGENT_EGRESS_NETWORK: ${AGENT_EGRESS_NETWORK:-aria-egress}
+      # Address the proxy container uses to reach this service (the proxy is
+      # attached to this compose network, so the service name resolves).
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://cloud:3000}
+      # Generated per boot when empty; never written to disk.
+      EGRESS_PROXY_TOKEN: ${EGRESS_PROXY_TOKEN:-}
     # Host Docker socket so the Docker sandbox can run tool containers. Safe only
     # when you trust the composed service. To disable sandboxing, comment this
     # line out (and the `DOCKER_GID` build arg is then unused).

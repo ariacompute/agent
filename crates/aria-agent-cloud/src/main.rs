@@ -319,6 +319,28 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     // One Postgres store implements the metadata, team and schedule seams; each
     // table is `principal_id`-scoped, so no extra wiring is needed here.
+    // Governance state lives in Postgres too: policy revisions, audit events,
+    // usage intervals and checkpoint records must survive a restart and stay
+    // `principal_id`-scoped (ADR-0021/0022).
+    aria_agent_cloud::governance::install_store(Arc::new(
+        aria_agent_cloud::store::PgGovernanceStore::new(pool.clone()),
+    ));
+    // Network enforcement is brought up before anything can run: an internal
+    // network, the proxy container, and the token shared with it. Any failure is
+    // fatal (ADR-0024) — starting without it would be a silent bypass.
+    match aria_agent_cloud::internal_egress::bootstrap().await {
+        Ok(Some(info)) => {
+            aria_agent_cloud::governance::install_proxy_info(info);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(format!(
+                "AGENT_EGRESS_ENFORCEMENT=network is not usable: {e}. \
+                 Fix the Docker network/proxy or set AGENT_EGRESS_ENFORCEMENT=proxy"
+            )
+            .into());
+        }
+    }
     let pg = Arc::new(PgStore::new(pool));
     let teams: Arc<dyn aria_agent_orchestrator::teams::TeamStore> = pg.clone();
     let schedule: Arc<dyn agent_core::seams::ScheduleSeam> = pg.clone();

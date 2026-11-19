@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/aria-agent-plugin",
+    "crates/aria-agent-governance",
+    "crates/aria-agent-egress-proxy",
     "crates/aria-agent-memo",
     "crates/aria-agent-sandbox",
     "crates/aria-agent-core",

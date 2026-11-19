@@ -273,20 +273,33 @@ mod openai_impl {
             // agent sandbox). The gateway is OpenAI-compatible. Its base URL MUST
             // include the `/v1` prefix because async-openai appends the resource
             // path to it (final URL = base + "/chat/completions").
-            let base = trimmed_env("GATEWAY_BASE_URL")
-                .or_else(|| trimmed_env("OPENAI_BASE_URL"))
-                .map(|b| b.trim_end_matches('/').to_string());
-            let api_key = trimmed_env("GATEWAY_API_KEY")
-                .or_else(|| trimmed_env("OPENAI_API_KEY"))
-                .unwrap_or_default();
-            let model = trimmed_env("GATEWAY_MODEL")
-                .or_else(|| trimmed_env("OPENAI_MODEL"))
-                .unwrap_or_else(|| model.to_string());
+            Self::from_values(
+                model,
+                trimmed_env("GATEWAY_MODEL").or_else(|| trimmed_env("OPENAI_MODEL")),
+                trimmed_env("GATEWAY_BASE_URL").or_else(|| trimmed_env("OPENAI_BASE_URL")),
+                trimmed_env("GATEWAY_API_KEY")
+                    .or_else(|| trimmed_env("OPENAI_API_KEY"))
+                    .unwrap_or_default(),
+            )
+        }
 
-            let mut config = OpenAIConfig::new().with_api_key(api_key);
-            if let Some(base) = base {
-                config = config.with_api_base(base);
-            }
+        /// Build from already-resolved values; the environment half lives in
+        /// [`Self::new`] so the fallbacks are testable without touching it.
+        fn from_values(
+            model: &str,
+            model_override: Option<String>,
+            base: Option<String>,
+            api_key: String,
+        ) -> Self {
+            let model = match model_override {
+                Some(model) => model,
+                None => model.to_string(),
+            };
+            let config = OpenAIConfig::new().with_api_key(api_key);
+            let config = match base.map(|b| b.trim_end_matches('/').to_string()) {
+                Some(base) => config.with_api_base(base),
+                None => config,
+            };
             Self {
                 client: Client::with_config(config),
                 model,
@@ -608,6 +621,19 @@ mod openai_impl {
             use super::*;
             use wiremock::matchers::{method, path};
             use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            #[test]
+            fn model_and_base_url_are_resolved_from_values() {
+                let model = OpenAiModel::from_values(
+                    "fallback",
+                    Some("gpt-4o".into()),
+                    Some("http://gateway/v1/".into()),
+                    "k".into(),
+                );
+                assert_eq!(model.model, "gpt-4o");
+                let model = OpenAiModel::from_values("fallback", None, None, "k".into());
+                assert_eq!(model.model, "fallback");
+            }
 
             static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -945,6 +971,63 @@ pub struct AgentConfig {
     /// Cap for a single tool result before truncation/spill.
     #[serde(default = "default_tool_max_bytes")]
     pub tool_result_max_bytes: usize,
+
+    // ---- governance (ADR-0020..0023) -------------------------------------
+    // These are the **single source of defaults**: CLI flags, environment
+    // variables and cloud presets all derive from these values, so two entry
+    // points can never disagree about what the default is.
+    /// Egress mode: `deny_all` (default) | `allowlist` | `denylist`.
+    #[serde(default = "default_egress_mode")]
+    pub egress_mode: String,
+    /// Hosts the agent may reach (host names, `*.` wildcard for sub-domains).
+    #[serde(default)]
+    pub egress_allow: Vec<String>,
+    /// Hosts that are always refused, even if allowed.
+    #[serde(default)]
+    pub egress_deny: Vec<String>,
+    /// How enforcement is carried out: `proxy` (default) | `network` | `off`.
+    #[serde(default = "default_egress_enforcement")]
+    pub egress_enforcement: String,
+    /// Required acknowledgement for `egress_enforcement = "off"`.
+    #[serde(default)]
+    pub allow_unenforced_egress: bool,
+    /// Docker network sandboxes join under `egress_enforcement = "network"`
+    /// (`""` → unset, which is a boot error for that mode).
+    #[serde(default)]
+    pub egress_network: String,
+    /// Proxy URL reachable *from inside the sandbox* (`""` → loopback default).
+    #[serde(default)]
+    pub egress_proxy_url: String,
+    /// Audit sink: `jsonl` (default) | `none`.
+    #[serde(default = "default_audit_sink")]
+    pub audit_sink: String,
+    /// Directory for the JSONL audit log (`""` → `<workspace>/.aria/audit`).
+    #[serde(default)]
+    pub audit_dir: String,
+    /// Retention for audit files, in days (0 = keep forever).
+    #[serde(default = "default_audit_retention_days")]
+    pub audit_retention_days: u64,
+    /// Metering: `on` (default) | `off`.
+    #[serde(default = "default_metering")]
+    pub metering: String,
+    /// Tool-output compression: `on` (default) | `off`.
+    #[serde(default = "default_compression")]
+    pub compression: String,
+    /// Idle timeout before a sandbox may be suspended (0 = disabled).
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    /// Idle scan period.
+    #[serde(default = "default_idle_scan")]
+    pub idle_scan_secs: u64,
+    /// Directory holding the encrypted credential store (`""` → disabled).
+    #[serde(default)]
+    pub credentials_dir: String,
+    /// Environment variable holding the AEAD master key (never the key itself).
+    #[serde(default = "default_master_key_env")]
+    pub credential_master_key_env: String,
+    /// Automatic rotation period for secrets, in seconds (0 = disabled).
+    #[serde(default)]
+    pub credential_rotate_secs: u64,
 }
 
 fn workspace_root_unavailable(e: std::io::Error) -> CoreError {
@@ -971,6 +1054,131 @@ fn default_tool_max_bytes() -> usize {
     seams::tools::DEFAULT_MAX_RESULT_BYTES
 }
 
+fn default_egress_mode() -> String {
+    "deny_all".to_string()
+}
+
+fn default_egress_enforcement() -> String {
+    "proxy".to_string()
+}
+
+fn default_audit_sink() -> String {
+    "jsonl".to_string()
+}
+
+fn default_audit_retention_days() -> u64 {
+    30
+}
+
+fn default_metering() -> String {
+    "on".to_string()
+}
+
+fn default_compression() -> String {
+    "on".to_string()
+}
+
+fn default_idle_timeout() -> u64 {
+    900
+}
+
+fn default_idle_scan() -> u64 {
+    60
+}
+
+fn default_master_key_env() -> String {
+    "AGENT_CREDENTIAL_MASTER_KEY".to_string()
+}
+
+impl AgentConfig {
+    /// Validate the governance block. Every value is checked explicitly: an
+    /// unknown mode is a configuration error, never a silent fallback, and
+    /// `allowlist` without hosts is *not* treated as "deny everything".
+    pub fn validate_governance(&self) -> Result<(), CoreError> {
+        if seams::EgressMode::parse(&self.egress_mode).is_none() {
+            return Err(CoreError::Config(format!(
+                "unknown egress_mode: {} (expected deny_all|allowlist|denylist)",
+                self.egress_mode
+            )));
+        }
+        let policy = self.egress_policy()?;
+        policy
+            .validate()
+            .map_err(|e| CoreError::Config(format!("egress policy: {e}")))?;
+        match self.egress_enforcement.trim() {
+            "proxy" => {}
+            "network" => {
+                // Without a network name the sandbox keeps its default route and
+                // "network enforcement" would be a label with no effect.
+                if self.egress_network.trim().is_empty() {
+                    return Err(CoreError::Config(
+                        "egress_enforcement=network requires egress_network (AGENT_EGRESS_NETWORK)"
+                            .to_string(),
+                    ));
+                }
+                if self.egress_proxy_url.trim().is_empty() {
+                    return Err(CoreError::Config(
+                        "egress_enforcement=network requires egress_proxy_url                          (AGENT_EGRESS_PROXY_URL), e.g. http://aria-egress-proxy:8080"
+                            .to_string(),
+                    ));
+                }
+            }
+            "off" => {
+                if !self.allow_unenforced_egress {
+                    return Err(CoreError::Config(
+                        "egress_enforcement=off requires allow_unenforced_egress=true; \
+                         refusing to start with unenforced egress"
+                            .to_string(),
+                    ));
+                }
+            }
+            other => {
+                return Err(CoreError::Config(format!(
+                    "unknown egress_enforcement: {other} (expected proxy|network|off)"
+                )))
+            }
+        }
+        for (name, value, valid) in [
+            (
+                "audit_sink",
+                self.audit_sink.as_str(),
+                &["jsonl", "none"][..],
+            ),
+            ("metering", self.metering.as_str(), &["on", "off"][..]),
+            ("compression", self.compression.as_str(), &["on", "off"][..]),
+        ] {
+            if !valid.contains(&value.trim()) {
+                return Err(CoreError::Config(format!(
+                    "unknown {name}: {value} (expected {})",
+                    valid.join("|")
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the egress policy described by this config.
+    pub fn egress_policy(&self) -> Result<seams::EgressPolicy, CoreError> {
+        let mode = seams::EgressMode::parse(&self.egress_mode).ok_or_else(|| {
+            CoreError::Config(format!("unknown egress_mode: {}", self.egress_mode))
+        })?;
+        let parse_hosts = |raw: &[String]| -> Result<Vec<seams::HostPattern>, CoreError> {
+            raw.iter()
+                .map(|h| {
+                    seams::HostPattern::parse(h)
+                        .map_err(|e| CoreError::Config(format!("egress host `{h}`: {e}")))
+                })
+                .collect()
+        };
+        Ok(seams::EgressPolicy::new(
+            1,
+            mode,
+            parse_hosts(&self.egress_allow)?,
+            parse_hosts(&self.egress_deny)?,
+        ))
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -991,8 +1199,46 @@ impl Default for AgentConfig {
             session_log_dir: String::new(),
             context_limit: default_context_limit(),
             tool_result_max_bytes: default_tool_max_bytes(),
+            egress_mode: default_egress_mode(),
+            egress_allow: Vec::new(),
+            egress_deny: Vec::new(),
+            egress_enforcement: default_egress_enforcement(),
+            egress_network: String::new(),
+            egress_proxy_url: String::new(),
+            allow_unenforced_egress: false,
+            audit_sink: default_audit_sink(),
+            audit_dir: String::new(),
+            audit_retention_days: default_audit_retention_days(),
+            metering: default_metering(),
+            compression: default_compression(),
+            idle_timeout_secs: default_idle_timeout(),
+            idle_scan_secs: default_idle_scan(),
+            credentials_dir: String::new(),
+            credential_master_key_env: default_master_key_env(),
+            credential_rotate_secs: 0,
         }
     }
+}
+
+/// Wrap a backend so every spawn lands on the configured egress network.
+///
+/// The decorator only fills what the caller left empty, so a backend that already
+/// carries network/labels (the cloud control plane sets them at build time) keeps
+/// them, and a deployment without `egress_network` gets the backend untouched.
+fn governed_sandbox(config: &AgentConfig, sandbox: Arc<dyn Sandbox>) -> Arc<dyn Sandbox> {
+    let network = config.egress_network.trim();
+    if network.is_empty() {
+        return sandbox;
+    }
+    // Validation rejects `network` without a proxy URL, so this is never empty.
+    let env = agent_sandbox::proxy_env(config.egress_proxy_url.trim());
+    let labels = vec![(
+        agent_sandbox::egress_net::SESSION_LABEL.to_string(),
+        config.session.clone(),
+    )];
+    Arc::new(agent_sandbox::NetworkingSandbox::new(
+        sandbox, network, labels, env,
+    ))
 }
 
 /// Resolve the deployment policy from [`AgentConfig`] (fail-closed on bad input).
@@ -1137,6 +1383,14 @@ impl Agent {
         handlers: Vec<Arc<dyn ToolHandler>>,
         agent_loop: Arc<dyn seams::AgentLoop>,
     ) -> Result<Self, CoreError> {
+        // Governance values are validated before anything is built, so a
+        // deployment that asked for an impossible policy fails at construction
+        // instead of at the first outbound request.
+        config.validate_governance()?;
+        // Enforcement is structural, not something the loop can forget: when the
+        // config names a network, every spawn from this agent — the loop's own
+        // shell calls included — carries it, whatever backend was injected.
+        let sandbox = governed_sandbox(&config, sandbox);
         // `build_policy` returns `Some` on every successful path; the `Option`
         // is kept for callers that probe without committing to an agent.
         let policy = build_policy(&config)?.expect("policy on success");
@@ -1185,6 +1439,16 @@ impl Agent {
     /// only post-construction seam swap and it must happen before the first turn.
     pub fn with_agent_loop(mut self, agent_loop: Arc<dyn seams::AgentLoop>) -> Self {
         self.agent_loop = agent_loop;
+        self
+    }
+
+    /// Install the model-facing tool-output projection (compression).
+    ///
+    /// The projection is resolved once at assembly, like every other seam. It
+    /// only changes what the model reads — `AgentEvent::ToolCall` keeps the real
+    /// result.
+    pub fn with_projector(self, projector: Arc<dyn seams::ToolOutputProjector>) -> Self {
+        self.pipeline.set_projector(projector);
         self
     }
 
@@ -2322,6 +2586,70 @@ pub(crate) mod tests {
         let streamed = model.seen();
         assert!(streamed.len() > seen.len());
         assert!(streamed.last().unwrap().context.contains("zzz trivia"));
+    }
+}
+
+#[cfg(test)]
+mod governance_validation_tests {
+    use super::*;
+
+    #[test]
+    fn network_mode_requires_a_network_and_a_proxy_url() {
+        let mut cfg = AgentConfig {
+            egress_enforcement: "network".into(),
+            ..AgentConfig::default()
+        };
+        let err = cfg.validate_governance().unwrap_err().to_string();
+        assert!(err.contains("egress_network"), "{err}");
+
+        cfg.egress_network = "aria-egress".into();
+        let err = cfg.validate_governance().unwrap_err().to_string();
+        assert!(err.contains("egress_proxy_url"), "{err}");
+
+        cfg.egress_proxy_url = "http://aria-egress-proxy:8080".into();
+        cfg.validate_governance().unwrap();
+    }
+
+    #[test]
+    fn unknown_modes_and_hosts_are_configuration_errors() {
+        let mut cfg = AgentConfig {
+            egress_mode: "sometimes".into(),
+            ..AgentConfig::default()
+        };
+        assert!(cfg.validate_governance().is_err());
+
+        cfg.egress_mode = "allowlist".into();
+        cfg.egress_allow = vec!["a*b.com".into()];
+        let err = cfg.validate_governance().unwrap_err().to_string();
+        assert!(err.contains("egress host"), "{err}");
+    }
+
+    #[test]
+    fn egress_policy_rejects_unknown_modes_and_bad_hosts() {
+        let mut cfg = AgentConfig {
+            egress_mode: "sometimes".into(),
+            ..AgentConfig::default()
+        };
+        let err = cfg.egress_policy().unwrap_err().to_string();
+        assert!(err.contains("unknown egress_mode"), "{err}");
+
+        cfg.egress_mode = "allowlist".into();
+        cfg.egress_allow = vec!["a*b.com".into()];
+        let err = cfg.egress_policy().unwrap_err().to_string();
+        assert!(err.contains("egress host `a*b.com`"), "{err}");
+
+        cfg.egress_allow = vec!["api.openai.com".into()];
+        assert!(cfg.egress_policy().is_ok());
+    }
+
+    #[test]
+    fn unknown_sinks_are_configuration_errors() {
+        let cfg = AgentConfig {
+            audit_sink: "syslog".into(),
+            ..AgentConfig::default()
+        };
+        let err = cfg.validate_governance().unwrap_err().to_string();
+        assert!(err.contains("unknown audit_sink"), "{err}");
     }
 }
 

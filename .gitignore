@@ -17,3 +17,6 @@ benches/results/
 bindings/kotlin/agent-sdk/.gradle/
 bindings/kotlin/agent-sdk/build/
 bindings/kotlin/agent-sdk/src/main/jniLibs/
+
+# governance audit output (local JSONL sink)
+.aria/

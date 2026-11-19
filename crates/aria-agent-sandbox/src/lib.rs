@@ -14,12 +14,23 @@
 //! Providers implement the `sandbox` capability seam (ADR-0014) so tool families
 //! never depend on a concrete backend.
 
+pub mod checkpoint;
+pub mod egress_net;
+pub mod lifecycle;
+
+pub use egress_net::{proxy_env, EgressConfig, EgressNetwork, NetworkingSandbox, PeerIdentity};
+
+pub use checkpoint::{checkpoint_repo, CheckpointRef};
+pub use lifecycle::{SandboxCapabilities, SandboxLifecycle};
+
 use async_trait::async_trait;
 use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::image::CommitContainerOptions;
 use bollard::{Docker, API_DEFAULT_VERSION};
+use checkpoint::checkpoint_image;
 use serde::{Deserialize, Serialize};
 use std::env;
 use thiserror::Error;
@@ -62,6 +73,7 @@ impl SandboxResourceLimits {
 pub fn build_host_config(
     res: &SandboxResourceLimits,
     runtime: Option<&str>,
+    network: Option<&str>,
 ) -> bollard::service::HostConfig {
     bollard::service::HostConfig {
         nano_cpus: Some((res.cpus * 1e9).round() as i64),
@@ -69,6 +81,10 @@ pub fn build_host_config(
         memory_swap: Some(-1),
         pids_limit: Some(res.pids_limit),
         runtime: runtime.map(|s| s.to_string()),
+        // `network_mode` replaces the default bridge: a container placed on an
+        // `internal` network has no route out, which is what makes the egress
+        // proxy the only way to reach the internet (ADR-0024).
+        network_mode: network.map(|n| n.to_string()),
         ..Default::default()
     }
 }
@@ -149,6 +165,13 @@ pub struct ExecSpec {
     pub env: Vec<(String, String)>,
     /// Wall-clock timeout in milliseconds.
     pub timeout_ms: u64,
+    /// Docker network to attach to. `Some(internal_network)` removes the default
+    /// route, so the only reachable peer is the egress proxy (ADR-0024).
+    pub network: Option<String>,
+    /// Container labels. `aria.tenant_id` / `aria.session_id` are how the proxy
+    /// resolves a source IP to a tenant; they are written by the control plane
+    /// and never by the sandbox user.
+    pub labels: Vec<(String, String)>,
 }
 
 impl ExecSpec {
@@ -159,6 +182,8 @@ impl ExecSpec {
             workdir: None,
             env: Vec::new(),
             timeout_ms: 60_000,
+            network: None,
+            labels: Vec::new(),
         }
     }
 }
@@ -185,6 +210,9 @@ pub enum SandboxError {
     Exec(String),
     #[error("sandbox not configured: {0}")]
     NotConfigured(String),
+    /// The backend does not offer this lifecycle operation (never a silent no-op).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -202,6 +230,66 @@ pub trait Sandbox: Send + Sync {
     ) -> Result<ExecOutput, SandboxError>;
     /// Tear down a sandbox session.
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError>;
+
+    // ---- optional lifecycle (ADR-0022) ---------------------------------
+    // Defaults fail closed: a backend that cannot pause says so, rather than
+    // pretending the call worked.
+
+    /// Which optional operations this backend really supports.
+    fn capabilities(&self) -> SandboxCapabilities {
+        SandboxCapabilities::none()
+    }
+
+    /// Current lifecycle state. Deliberately *not* the task state.
+    async fn status(&self, _handle: &SandboxHandle) -> Result<SandboxLifecycle, SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot report lifecycle state".into(),
+        ))
+    }
+
+    /// Freeze in place (memory retained, vCPU stops billing).
+    async fn pause(&self, _handle: &SandboxHandle) -> Result<(), SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot pause".into(),
+        ))
+    }
+
+    /// Resume from `paused` or `suspended`.
+    async fn resume(&self, _handle: &SandboxHandle) -> Result<(), SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot resume".into(),
+        ))
+    }
+
+    /// Stop with the filesystem retained (only disk keeps billing).
+    async fn suspend(&self, _handle: &SandboxHandle) -> Result<(), SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot suspend".into(),
+        ))
+    }
+
+    /// Capture filesystem + process state as an image.
+    async fn checkpoint(&self, _handle: &SandboxHandle) -> Result<CheckpointRef, SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot create checkpoints".into(),
+        ))
+    }
+
+    /// Derive a **new** sandbox from a checkpoint.
+    ///
+    /// Callers that enforce quotas must wrap the backend (see
+    /// `agent_governance::sandbox::QuotaGuardSandbox`) so this path and `spawn`
+    /// share one gate.
+    async fn restore(
+        &self,
+        checkpoint: &CheckpointRef,
+        _spec: &ExecSpec,
+    ) -> Result<SandboxHandle, SandboxError> {
+        checkpoint.validate()?;
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot restore checkpoints".into(),
+        ))
+    }
 }
 
 /// Which sandbox backend to use.
@@ -273,6 +361,23 @@ impl CliSandbox {
             .unwrap_or_else(|| self.default_image.clone())
     }
 
+    /// Everything `cube run` is called with, in order.
+    ///
+    /// The environment goes in as `-e KEY=VALUE`: without it the sandbox would
+    /// ignore the proxy wiring the control plane computed, and every tool inside
+    /// would quietly bypass the egress proxy.
+    fn run_arguments(&self, spec: &ExecSpec) -> Vec<String> {
+        let mut args = self.run_args.clone();
+        for (name, value) in &spec.env {
+            args.push("-e".to_string());
+            args.push(format!("{name}={value}"));
+        }
+        args.push(self.image_of(spec));
+        args.push("sleep".to_string());
+        args.push("3600".to_string());
+        args
+    }
+
     /// CLI args inserted before the image (introspection aid for tests).
     #[cfg(test)]
     fn run_args(&self) -> &[String] {
@@ -283,10 +388,26 @@ impl CliSandbox {
 #[async_trait]
 impl Sandbox for CliSandbox {
     async fn spawn(&self, spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
-        let image = self.image_of(spec);
+        // The Cube CLI has no network flag. Pretending to attach the sandbox to
+        // the internal egress network would silently leave it with a default
+        // route — a bypass. Refuse instead.
+        if spec.network.is_some() {
+            return Err(SandboxError::Unsupported(
+                "the cube backend cannot enforce a custom network; \
+                 use docker/kata for AGENT_EGRESS_ENFORCEMENT=network"
+                    .into(),
+            ));
+        }
+        // Same reasoning for identity: the CLI has no label flag, and dropping
+        // them would make the proxy unable to map this container to a tenant.
+        if !spec.labels.is_empty() {
+            return Err(SandboxError::Unsupported(
+                "the cube backend cannot apply sandbox identity labels".into(),
+            ));
+        }
         // Create a long-lived session container; real commands run via `exec`.
         let mut cmd = tokio::process::Command::new(&self.runner);
-        cmd.args(&self.run_args).arg(&image).args(["sleep", "3600"]);
+        cmd.args(self.run_arguments(spec));
         let out = cmd
             .output()
             .await
@@ -531,7 +652,12 @@ impl Sandbox for DockerSandbox {
                     tty: Some(false),
                     env: Some(env_to_docker(&spec.env)),
                     working_dir: spec.workdir.clone(),
-                    host_config: Some(build_host_config(&self.resources, self.runtime.as_deref())),
+                    labels: labels_to_docker(&spec.labels),
+                    host_config: Some(build_host_config(
+                        &self.resources,
+                        self.runtime.as_deref(),
+                        spec.network.as_deref(),
+                    )),
                     ..Default::default()
                 },
             )
@@ -619,11 +745,164 @@ impl Sandbox for DockerSandbox {
             .map_err(|e| SandboxError::Exec(e.to_string()))?;
         Ok(())
     }
+
+    fn capabilities(&self) -> SandboxCapabilities {
+        SandboxCapabilities::docker()
+    }
+
+    async fn status(&self, handle: &SandboxHandle) -> Result<SandboxLifecycle, SandboxError> {
+        let docker = self.client().await?;
+        let info = docker
+            .inspect_container(&handle.id, None)
+            .await
+            .map_err(|e| SandboxError::Exec(format!("inspect {}: {e}", handle.id)))?;
+        let state = info.state.unwrap_or_default();
+        let running = state.running.unwrap_or(false);
+        let paused = state.paused.unwrap_or(false);
+        let status = state
+            .status
+            .as_ref()
+            .map(|s| s.to_string().to_ascii_lowercase())
+            .unwrap_or_default();
+        Ok(if paused {
+            SandboxLifecycle::Paused
+        } else if running {
+            SandboxLifecycle::Running
+        } else {
+            match status.as_str() {
+                "created" => SandboxLifecycle::Creating,
+                "exited" | "stopped" => SandboxLifecycle::Suspended,
+                "removing" | "dead" => SandboxLifecycle::Destroyed,
+                "" => SandboxLifecycle::Failed,
+                _ => SandboxLifecycle::Suspended,
+            }
+        })
+    }
+
+    async fn pause(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        let docker = self.client().await?;
+        let current = self.status(handle).await?;
+        current.transition_to(SandboxLifecycle::Paused)?;
+        docker
+            .pause_container(&handle.id)
+            .await
+            .map_err(|e| SandboxError::Exec(format!("pause {}: {e}", handle.id)))
+    }
+
+    async fn resume(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        let docker = self.client().await?;
+        let current = self.status(handle).await?;
+        if current == SandboxLifecycle::Running {
+            return Ok(());
+        }
+        current.transition_to(SandboxLifecycle::Running)?;
+        match current {
+            SandboxLifecycle::Paused => docker
+                .unpause_container(&handle.id)
+                .await
+                .map_err(|e| SandboxError::Exec(format!("unpause {}: {e}", handle.id))),
+            // A suspended container keeps its filesystem but not its processes:
+            // starting it again is the documented resume path.
+            _ => docker
+                .start_container(&handle.id, None::<StartContainerOptions<String>>)
+                .await
+                .map_err(|e| SandboxError::Exec(format!("start {}: {e}", handle.id))),
+        }
+    }
+
+    async fn suspend(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        let docker = self.client().await?;
+        let current = self.status(handle).await?;
+        if current == SandboxLifecycle::Suspended {
+            return Ok(());
+        }
+        current.transition_to(SandboxLifecycle::Suspended)?;
+        docker
+            .stop_container(&handle.id, None)
+            .await
+            .map_err(|e| SandboxError::Exec(format!("stop {}: {e}", handle.id)))
+    }
+
+    async fn checkpoint(&self, handle: &SandboxHandle) -> Result<CheckpointRef, SandboxError> {
+        let docker = self.client().await?;
+        let repo = checkpoint_repo(&handle.id);
+        let response = docker
+            .commit_container(
+                CommitContainerOptions {
+                    container: handle.id.clone(),
+                    repo: repo.clone(),
+                    tag: "latest".to_string(),
+                    comment: "aria-agent checkpoint".to_string(),
+                    author: "aria-agent".to_string(),
+                    // Pause while committing so the filesystem is consistent.
+                    pause: true,
+                    changes: None,
+                },
+                Config::<String>::default(),
+            )
+            .await
+            .map_err(|e| SandboxError::Exec(format!("commit {}: {e}", handle.id)))?;
+        let image = checkpoint_image(response.id.as_deref(), &repo);
+        Ok(CheckpointRef::new(
+            image,
+            handle.id.clone(),
+            lifecycle::now_ms(),
+        ))
+    }
+
+    async fn restore(
+        &self,
+        checkpoint: &CheckpointRef,
+        spec: &ExecSpec,
+    ) -> Result<SandboxHandle, SandboxError> {
+        checkpoint.validate()?;
+        let docker = self.client().await?;
+        let name = format!("aria-sandbox-{}", uuid::Uuid::new_v4());
+        docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: &name,
+                    platform: None,
+                }),
+                Config {
+                    image: Some(checkpoint.image.clone()),
+                    cmd: Some(vec!["sleep".to_string(), "3600".to_string()]),
+                    tty: Some(false),
+                    env: Some(env_to_docker(&spec.env)),
+                    working_dir: spec.workdir.clone(),
+                    labels: labels_to_docker(&spec.labels),
+                    host_config: Some(build_host_config(
+                        &self.resources,
+                        self.runtime.as_deref(),
+                        spec.network.as_deref(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| SandboxError::Exec(format!("restore {}: {e}", checkpoint.id)))?;
+        docker
+            .start_container(&name, None::<StartContainerOptions<String>>)
+            .await
+            .map_err(|e| SandboxError::Exec(format!("start restored {name}: {e}")))?;
+        Ok(SandboxHandle { id: name })
+    }
 }
 
 /// Convert `(KEY, VALUE)` pairs into Docker's `KEY=VALUE` env strings.
 fn env_to_docker(env: &[(String, String)]) -> Vec<String> {
     env.iter().map(|(k, v)| format!("{k}={v}")).collect()
+}
+
+/// Container labels tell the egress proxy which tenant a source IP belongs to.
+fn labels_to_docker(
+    labels: &[(String, String)],
+) -> Option<std::collections::HashMap<String, String>> {
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.iter().cloned().collect())
+    }
 }
 
 /// Kata sandbox — Docker Engine API with the `kata` runtime.
@@ -663,6 +942,31 @@ impl Sandbox for KataSandbox {
     }
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError> {
         self.inner.destroy(handle).await
+    }
+    fn capabilities(&self) -> SandboxCapabilities {
+        self.inner.capabilities()
+    }
+    async fn status(&self, handle: &SandboxHandle) -> Result<SandboxLifecycle, SandboxError> {
+        self.inner.status(handle).await
+    }
+    async fn pause(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        self.inner.pause(handle).await
+    }
+    async fn resume(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        self.inner.resume(handle).await
+    }
+    async fn suspend(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        self.inner.suspend(handle).await
+    }
+    async fn checkpoint(&self, handle: &SandboxHandle) -> Result<CheckpointRef, SandboxError> {
+        self.inner.checkpoint(handle).await
+    }
+    async fn restore(
+        &self,
+        checkpoint: &CheckpointRef,
+        spec: &ExecSpec,
+    ) -> Result<SandboxHandle, SandboxError> {
+        self.inner.restore(checkpoint, spec).await
     }
 }
 
@@ -978,6 +1282,26 @@ mod tests {
         assert_eq!(cube.run_args(), &expected[..]);
     }
 
+    #[test]
+    fn cube_run_forwards_the_proxy_environment() {
+        // The CLI has no network flag, but it does take `-e`: dropping the env
+        // would leave every tool inside the sandbox bypassing the proxy.
+        let cube = CubeSandbox::new();
+        let mut spec = ExecSpec::command(vec!["true".into()]);
+        spec.env = vec![(
+            "HTTP_PROXY".to_string(),
+            "http://aria-egress-proxy:8080".to_string(),
+        )];
+        let args = cube.inner.run_arguments(&spec);
+        assert!(
+            args.windows(2).any(
+                |pair| pair[0] == "-e" && pair[1] == "HTTP_PROXY=http://aria-egress-proxy:8080"
+            ),
+            "{args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("3600"));
+    }
+
     #[tokio::test]
     async fn kata_spawn_surfaces_error_without_daemon() {
         // Kata shares the bollard path with Docker: spawn/exec/destroy must
@@ -1115,6 +1439,22 @@ mod tests {
             .is_err());
         // destroy logs-and-continues.
         let _ = cube.destroy(SandboxHandle { id: "x".into() }).await;
+
+        // Lifecycle calls are delegated too; without a daemon/-cli they fail,
+        // which is exactly what proves the forwarding ran.
+        let lifecycle_spec = ExecSpec::command(vec!["true".into()]);
+        for sandbox in [&kata as &dyn Sandbox, &cube as &dyn Sandbox] {
+            let handle = SandboxHandle { id: "x".into() };
+            assert!(sandbox.status(&handle).await.is_err());
+            let _ = sandbox.pause(&handle).await;
+            let _ = sandbox.resume(&handle).await;
+            let _ = sandbox.suspend(&handle).await;
+            let _ = sandbox.checkpoint(&handle).await;
+            let _ = sandbox
+                .restore(&CheckpointRef::new("img", "s", 1), &lifecycle_spec)
+                .await;
+            let _ = sandbox.capabilities();
+        }
     }
 
     static SOCKET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1232,6 +1572,11 @@ mod tests {
         CreateExec,
         StartExec,
         InspectExec,
+        InspectContainer,
+        PauseContainer,
+        UnpauseContainer,
+        StopContainer,
+        CommitContainer,
         RemoveContainer,
         Other,
     }
@@ -1252,6 +1597,21 @@ mod tests {
         }
         if path.contains("/exec/") && path.ends_with("/json") {
             return Route::InspectExec;
+        }
+        if path.contains("/containers/") && path.ends_with("/json") {
+            return Route::InspectContainer;
+        }
+        if path.contains("/containers/") && path.ends_with("/pause") {
+            return Route::PauseContainer;
+        }
+        if path.contains("/containers/") && path.ends_with("/unpause") {
+            return Route::UnpauseContainer;
+        }
+        if path.contains("/containers/") && path.ends_with("/stop") {
+            return Route::StopContainer;
+        }
+        if path.ends_with("/commit") {
+            return Route::CommitContainer;
         }
         if path.contains("/containers/") && path.ends_with("/start") {
             return Route::StartContainer;
@@ -1284,7 +1644,35 @@ mod tests {
             Self::start_with(Route::Other, true)
         }
 
+        /// Serve normally, answering each `inspect` with the next state.
+        fn start_with_states(states: &[&'static str]) -> Self {
+            let queue = std::sync::Arc::new(std::sync::Mutex::new(
+                states.iter().map(|s| s.to_string()).collect(),
+            ));
+            Self::spawn(Route::Other, false, queue)
+        }
+
+        /// Answer `inspect` from `states`, and `fail` with `500`.
+        fn start_failing_with_states(fail: Route, states: &[&'static str]) -> Self {
+            let queue = std::sync::Arc::new(std::sync::Mutex::new(
+                states.iter().map(|s| s.to_string()).collect(),
+            ));
+            Self::spawn(fail, false, queue)
+        }
+
         fn start_with(fail: Route, truncate: bool) -> Self {
+            Self::spawn(
+                fail,
+                truncate,
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            )
+        }
+
+        fn spawn(
+            fail: Route,
+            truncate: bool,
+            states: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+        ) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
             let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1292,7 +1680,7 @@ mod tests {
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { continue };
-                    serve(&mut stream, &seen, fail, truncate);
+                    serve(&mut stream, &seen, fail, truncate, &states);
                 }
             });
             Self { endpoint, requests }
@@ -1316,6 +1704,7 @@ mod tests {
         seen: &std::sync::Mutex<Vec<String>>,
         fail: Route,
         truncate: bool,
+        states: &std::sync::Mutex<std::collections::VecDeque<String>>,
     ) {
         use std::io::{Read, Write};
         let mut buf = Vec::new();
@@ -1368,12 +1757,26 @@ mod tests {
             Route::CreateContainer => {
                 json(stream, "201 Created", r#"{"Id":"cid-1","Warnings":[]}"#)
             }
-            Route::StartContainer | Route::RemoveContainer => {
-                let _ = stream.write_all(
-                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            Route::StartContainer
+            | Route::RemoveContainer
+            | Route::PauseContainer
+            | Route::UnpauseContainer
+            | Route::StopContainer => no_content(stream),
+            Route::InspectContainer => {
+                let state = states
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| "{}".to_string());
+                json(
+                    stream,
+                    "200 OK",
+                    &format!(r#"{{"Id":"cid-1","State":{state}}}"#),
                 );
-                let _ = stream.flush();
             }
+            // bollard models the commit response as `{"ID": ...}`; without it the
+            // backend falls back to the `repo:tag` it just asked Docker for.
+            Route::CommitContainer => json(stream, "201 Created", r#"{"ID":"sha256:committed"}"#),
             Route::CreateExec => json(stream, "201 Created", r#"{"Id":"exec-1"}"#),
             Route::InspectExec => json(stream, "200 OK", r#"{"ID":"exec-1","ExitCode":0}"#),
             Route::StartExec => {
@@ -1406,6 +1809,14 @@ mod tests {
         }
     }
 
+    fn no_content(stream: &mut std::net::TcpStream) {
+        use std::io::Write;
+        let _ = stream.write_all(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let _ = stream.flush();
+    }
+
     fn json(stream: &mut std::net::TcpStream, status: &str, body: &str) {
         use std::io::Write;
         let out = format!(
@@ -1431,6 +1842,52 @@ mod tests {
         spec.env = vec![("ARIA".into(), "1".into())];
         spec.workdir = Some("/work".into());
         spec
+    }
+
+    #[test]
+    fn host_config_carries_the_egress_network() {
+        let res = SandboxResourceLimits {
+            cpus: 1.0,
+            memory_bytes: 512 * 1024 * 1024,
+            pids_limit: 128,
+        };
+        assert_eq!(build_host_config(&res, None, None).network_mode, None);
+        assert_eq!(
+            build_host_config(&res, None, Some("aria-egress")).network_mode,
+            Some("aria-egress".to_string())
+        );
+    }
+
+    #[test]
+    fn labels_are_only_sent_when_present() {
+        assert!(labels_to_docker(&[]).is_none());
+        let labels = labels_to_docker(&[("aria.tenant_id".into(), "tenant-a".into())]).unwrap();
+        assert_eq!(
+            labels.get("aria.tenant_id").map(String::as_str),
+            Some("tenant-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cube_backend_refuses_a_custom_network() {
+        let cube = CliSandbox::new(SandboxProvider::Cube, "docker", Vec::new(), "alpine:latest");
+        let mut spec = ExecSpec::command(vec!["true".into()]);
+        spec.network = Some("aria-egress".into());
+        assert!(matches!(
+            cube.spawn(&spec).await,
+            Err(SandboxError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_cube_backend_refuses_identity_labels() {
+        let cube = CliSandbox::new(SandboxProvider::Cube, "docker", Vec::new(), "alpine:latest");
+        let mut spec = ExecSpec::command(vec!["true".into()]);
+        spec.labels = vec![("aria.tenant_id".into(), "tenant-a".into())];
+        assert!(matches!(
+            cube.spawn(&spec).await,
+            Err(SandboxError::Unsupported(_))
+        ));
     }
 
     #[tokio::test]
@@ -1475,6 +1932,72 @@ mod tests {
                 .any(|l| l.starts_with("DELETE ") && l.contains("/containers/")),
             "remove: {seen:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn docker_lifecycle_maps_state_and_drives_transitions() {
+        let stub = EngineStub::start_with_states(&[
+            // status: one per branch
+            r#"{"Running":false,"Paused":false}"#,
+            r#"{"Running":false,"Paused":false,"Status":"created"}"#,
+            r#"{"Running":true,"Paused":false}"#,
+            r#"{"Running":false,"Paused":true}"#,
+            r#"{"Running":false,"Paused":false,"Status":"exited"}"#,
+            r#"{"Running":false,"Paused":false,"Status":"dead"}"#,
+            r#"{"Running":false,"Paused":false,"Status":"restarting"}"#,
+            // transitions
+            r#"{"Running":true}"#,
+            r#"{"Running":false,"Paused":true}"#,
+            r#"{"Running":false,"Paused":false,"Status":"exited"}"#,
+            r#"{"Running":true}"#,
+        ]);
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle { id: "cid-1".into() };
+        for expected in [
+            SandboxLifecycle::Failed,
+            SandboxLifecycle::Creating,
+            SandboxLifecycle::Running,
+            SandboxLifecycle::Paused,
+            SandboxLifecycle::Suspended,
+            SandboxLifecycle::Destroyed,
+            SandboxLifecycle::Suspended,
+        ] {
+            assert_eq!(sandbox.status(&handle).await.unwrap(), expected);
+        }
+        let capabilities = sandbox.capabilities();
+        assert!(capabilities.pause && capabilities.suspend);
+        assert!(capabilities.checkpoint && capabilities.restore);
+
+        sandbox.pause(&handle).await.unwrap();
+        sandbox.resume(&handle).await.unwrap();
+        sandbox.resume(&handle).await.unwrap();
+        sandbox.suspend(&handle).await.unwrap();
+
+        // The queue is empty now, so inspect answers `{}` — an unknown state is
+        // Failed, and Failed cannot be paused/resumed/stopped.
+        assert!(sandbox.pause(&handle).await.is_err());
+        assert!(sandbox.resume(&handle).await.is_err());
+        assert!(sandbox.suspend(&handle).await.is_err());
+
+        let checkpoint = sandbox.checkpoint(&handle).await.unwrap();
+        assert_eq!(checkpoint.image, "sha256:committed");
+        assert_eq!(checkpoint.source, "cid-1");
+        assert!(checkpoint.validate().is_ok());
+
+        let restored = sandbox.restore(&checkpoint, &stub_spec()).await.unwrap();
+        assert!(restored.id.starts_with("aria-sandbox-"));
+        assert!(sandbox
+            .restore(&CheckpointRef::new("  ", "s", 1), &stub_spec())
+            .await
+            .is_err());
+
+        let seen = stub.requests();
+        for needle in ["/pause", "/unpause", "/stop", "/commit", "/json"] {
+            assert!(
+                seen.iter().any(|l| l.contains(needle)),
+                "missing {needle}: {seen:?}"
+            );
+        }
     }
 
     fn connect_stub(endpoint: &str) -> std::net::TcpStream {
@@ -1526,6 +2049,44 @@ mod tests {
         sock.read_to_string(&mut out).unwrap();
         assert!(out.starts_with("HTTP/1.1 201"), "{out}");
         assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn docker_lifecycle_operations_surface_engine_errors() {
+        let handle = SandboxHandle { id: "cid-1".into() };
+        let pause =
+            EngineStub::start_failing_with_states(Route::PauseContainer, &[r#"{"Running":true}"#]);
+        let err = pause.sandbox().pause(&handle).await.unwrap_err();
+        assert!(err.to_string().contains("pause"), "{err}");
+
+        let unpause = EngineStub::start_failing_with_states(
+            Route::UnpauseContainer,
+            &[r#"{"Running":false,"Paused":true}"#],
+        );
+        let err = unpause.sandbox().resume(&handle).await.unwrap_err();
+        assert!(err.to_string().contains("unpause"), "{err}");
+
+        let start = EngineStub::start_failing_with_states(
+            Route::StartContainer,
+            &[r#"{"Running":false,"Paused":false,"Status":"exited"}"#],
+        );
+        let err = start.sandbox().resume(&handle).await.unwrap_err();
+        assert!(err.to_string().contains("start"), "{err}");
+
+        let stop =
+            EngineStub::start_failing_with_states(Route::StopContainer, &[r#"{"Running":true}"#]);
+        let err = stop.sandbox().suspend(&handle).await.unwrap_err();
+        assert!(err.to_string().contains("stop"), "{err}");
+
+        // Restore: the container is created but cannot be started.
+        let restore = EngineStub::start_failing(Route::StartContainer);
+        let checkpoint = CheckpointRef::new("aria-ckpt-cid-1:latest", "cid-1", 1);
+        let err = restore
+            .sandbox()
+            .restore(&checkpoint, &stub_spec())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("start restored"), "{err}");
     }
 
     #[tokio::test]

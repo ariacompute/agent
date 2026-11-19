@@ -24,10 +24,63 @@ pub struct SpillRef {
     pub bytes: usize,
 }
 
+/// What a projection did, so the saving is auditable rather than asserted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectionRecord {
+    /// Stable strategy name (`json_array`, `logs`, `search_results`, `git_diff`,
+    /// `passthrough`).
+    pub strategy: String,
+    pub raw_bytes: usize,
+    pub projected_bytes: usize,
+    /// Heuristic only — never billable (see `seams::metering::EstimatedTokens`).
+    pub estimated_tokens_saved: u64,
+}
+
+/// The model-facing projection of one tool result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Projection {
+    pub content: String,
+    pub record: Option<ProjectionRecord>,
+}
+
+impl Projection {
+    pub fn identity(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            record: None,
+        }
+    }
+}
+
+/// Segment 5b: produce the **model-facing copy** of a tool result.
+///
+/// Implementations must never mutate the real result: the agent loop keeps
+/// `ToolOutcome::result` for events/audit and writes `model_content` into the
+/// prompt. That split is what makes compression safe.
+pub trait ToolOutputProjector: Send + Sync {
+    fn project(&self, tool: &str, is_error: bool, raw: &str) -> Projection;
+}
+
+/// Identity projector: the model sees exactly what the tool returned.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoProjection;
+
+impl ToolOutputProjector for NoProjection {
+    fn project(&self, _tool: &str, _is_error: bool, raw: &str) -> Projection {
+        Projection::identity(raw)
+    }
+}
+
 /// Result of the post-execute segment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutcome {
+    /// Observed result: what the tool actually produced (after the byte cap).
+    /// This is what events and audit records carry.
     pub result: ToolResult,
+    /// Model-facing copy (possibly compressed). Only this goes into the prompt.
+    pub model_content: String,
+    /// Present when a projection actually changed something.
+    pub projection: Option<ProjectionRecord>,
     /// Present when an approval was actually consulted.
     pub approval: Option<ApprovalDecision>,
     /// Present when the result exceeded the cap and was externalised.
@@ -114,6 +167,7 @@ pub struct ToolExecutionPipeline {
     approvals: Arc<dyn ApprovalBroker>,
     approvals_configured: bool,
     post: PostExecPolicy,
+    projector: std::sync::RwLock<Arc<dyn ToolOutputProjector>>,
 }
 
 impl ToolExecutionPipeline {
@@ -124,6 +178,22 @@ impl ToolExecutionPipeline {
             approvals: Arc::new(DenyAll),
             approvals_configured: false,
             post: PostExecPolicy::default(),
+            projector: std::sync::RwLock::new(Arc::new(NoProjection)),
+        }
+    }
+
+    /// Install the model-facing projection (tool-output compression).
+    pub fn with_projector(self, projector: Arc<dyn ToolOutputProjector>) -> Self {
+        self.set_projector(projector);
+        self
+    }
+
+    /// Swap the projection after assembly. Seams are resolved once per *turn*,
+    /// not per tool call; this is the assembly-time injection point used by the
+    /// governance stack.
+    pub fn set_projector(&self, projector: Arc<dyn ToolOutputProjector>) {
+        if let Ok(mut slot) = self.projector.write() {
+            *slot = projector;
         }
     }
 
@@ -206,16 +276,38 @@ impl ToolExecutionPipeline {
         }
     }
 
-    /// Segment 5: cap the result and externalise the overflow.
+    /// Segment 5: cap the result, externalise the overflow, and build the
+    /// model-facing projection.
     pub fn post_execute(
         &self,
         call_id: &str,
         result: ToolResult,
         approval: Option<ApprovalDecision>,
     ) -> ToolOutcome {
+        self.post_execute_tool("", call_id, result, approval)
+    }
+
+    /// Same as [`Self::post_execute`], with the tool name available to the
+    /// projector (some strategies key off the tool family).
+    pub fn post_execute_tool(
+        &self,
+        tool: &str,
+        call_id: &str,
+        result: ToolResult,
+        approval: Option<ApprovalDecision>,
+    ) -> ToolOutcome {
         let (content, spill) = self.post.apply(call_id, result.content);
+        let result = ToolResult { content, ..result };
+        let projection = match self.projector.read() {
+            Ok(projector) => projector.project(tool, result.is_error, &result.content),
+            // A poisoned lock means a projector panicked; fall back to the raw
+            // result rather than failing the tool call.
+            Err(_) => Projection::identity(result.content.clone()),
+        };
         ToolOutcome {
-            result: ToolResult { content, ..result },
+            model_content: projection.content,
+            projection: projection.record,
+            result,
             approval,
             spill,
         }
@@ -303,6 +395,55 @@ mod tests {
 
     fn policy(preset: PermissionPreset) -> Arc<SandboxPolicy> {
         Arc::new(SandboxPolicy::new(std::env::temp_dir(), preset).unwrap())
+    }
+
+    struct UpperProjector;
+
+    impl ToolOutputProjector for UpperProjector {
+        fn project(&self, _tool: &str, _is_error: bool, raw: &str) -> Projection {
+            Projection {
+                content: raw.to_uppercase(),
+                record: Some(crate::seams::ProjectionRecord {
+                    strategy: "upper".into(),
+                    raw_bytes: raw.len(),
+                    projected_bytes: raw.len(),
+                    estimated_tokens_saved: 0,
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn a_projector_can_be_installed_and_a_poisoned_lock_falls_back_to_raw() {
+        let pipeline =
+            ToolExecutionPipeline::new(Vec::new()).with_projector(Arc::new(UpperProjector));
+        let result = ToolResult {
+            call_id: "c1".into(),
+            content: "hello".into(),
+            is_error: false,
+        };
+        let outcome = pipeline.post_execute_tool("fs_read", "c1", result, None);
+        assert_eq!(outcome.model_content, "HELLO");
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = pipeline.projector.write().unwrap();
+            panic!("poison the projector slot");
+        }));
+        assert!(poisoned.is_err());
+        // Swapping a projector after a panic is a no-op, not another panic.
+        pipeline.set_projector(Arc::new(UpperProjector));
+        let outcome = pipeline.post_execute_tool(
+            "fs_read",
+            "c1",
+            ToolResult {
+                call_id: "c1".into(),
+                content: "hello".into(),
+                is_error: false,
+            },
+            None,
+        );
+        assert_eq!(outcome.model_content, "hello");
+        assert!(outcome.projection.is_none());
     }
 
     #[tokio::test]

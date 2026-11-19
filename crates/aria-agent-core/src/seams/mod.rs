@@ -10,9 +10,13 @@
 
 pub mod agent_loop;
 pub mod approvals;
+pub mod audit;
+pub mod credentials;
+pub mod egress;
 pub mod fs;
 pub mod jobs;
 pub mod llm;
+pub mod metering;
 pub mod policy;
 pub mod questions;
 pub mod schedule;
@@ -28,9 +32,22 @@ use thiserror::Error;
 
 pub use agent_loop::{AgentLoop, LoopContext};
 pub use approvals::{ApprovalBroker, ApprovalDecision, ApprovalRequest, AutoAllow, DenyAll};
+pub use audit::{now_ms, AuditEvent, AuditKind, AuditSink, NoAudit, NoAuditConfigured};
+pub use credentials::{
+    CredentialsSeam, NoCredentials, SecretMeta, SecretStub, SecretValue, SubstitutionReport,
+    CREDENTIAL_PLACEHOLDER,
+};
+pub use egress::{
+    DenyAllEgress, EgressDecision, EgressMode, EgressPolicy, EgressSeam, HostPattern,
+    MAX_HOST_PATTERN_LEN,
+};
 pub use fs::{FileStat, FsSeam, LocalFs};
 pub use jobs::{JobId, JobRecord, JobState, JobsSeam, LocalJobs};
 pub use llm::TokenUsage;
+pub use metering::{
+    BilledTokens, EstimatedTokens, MeterState, MeteringSeam, NoMetering, NoMeteringConfigured,
+    ResourceRequest, ResourceUsage, UsageRecord, UsageSummary,
+};
 pub use policy::{PermissionPreset, PolicyError, SandboxPolicy};
 pub use questions::{NoQuestions, UserQuestions};
 pub use schedule::{ScheduleEntry, ScheduleSeam};
@@ -41,7 +58,10 @@ pub use subagents::{
     child_session, is_child_session, parent_session, NoSubagents, SubagentHandle, SubagentRequest,
     Subagents, CHILD_SESSION_SEP,
 };
-pub use tools::{Authz, PostExecPolicy, SpillRef, ToolExecutionPipeline, ToolOutcome};
+pub use tools::{
+    Authz, NoProjection, PostExecPolicy, Projection, ProjectionRecord, SpillRef,
+    ToolExecutionPipeline, ToolOutcome, ToolOutputProjector,
+};
 pub use web::{is_public_url, NoWeb, WebResult, WebSeam};
 
 /// Failure of a capability provider.

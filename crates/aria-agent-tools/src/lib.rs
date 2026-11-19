@@ -19,8 +19,8 @@ pub mod todo;
 pub mod web;
 
 use agent_core::seams::{
-    FilesystemSkills, FsSeam, JobsSeam, LocalFs, LocalJobs, SandboxPolicy, SandboxShell, ShellSeam,
-    SkillsSeam, UserQuestions, WebSeam,
+    EgressSeam, FilesystemSkills, FsSeam, JobsSeam, LocalFs, LocalJobs, SandboxPolicy,
+    SandboxShell, ShellSeam, SkillsSeam, UserQuestions, WebSeam,
 };
 use agent_core::{Tool, ToolCall, ToolHandler, ToolResult};
 use serde_json::Value;
@@ -53,6 +53,19 @@ pub struct ToolSet {
     pub store: Option<Arc<dyn agent_core::context::ContextStore>>,
     /// Whether the `term_*` family is registered.
     pub terminal: bool,
+    /// Outbound policy. `None` keeps the old behaviour for embedded callers;
+    /// deployments must set it (deny-by-default is the deployment default).
+    pub egress: Option<Arc<dyn EgressSeam>>,
+    /// Sandbox handle used to rebuild the shell when network enforcement is on.
+    pub sandbox: Option<Arc<dyn agent_sandbox::Sandbox>>,
+    /// Policy root, kept so the shell can be rebuilt with extra transport fields.
+    pub root: std::path::PathBuf,
+    /// Governed network (ADR-0024). `None` = default bridge.
+    pub sandbox_network: Option<String>,
+    /// Labels identifying this sandbox to the egress proxy.
+    pub sandbox_labels: Vec<(String, String)>,
+    /// Proxy environment handed to every command.
+    pub sandbox_env: Vec<(String, String)>,
 }
 
 impl ToolSet {
@@ -65,17 +78,78 @@ impl ToolSet {
     ) -> Self {
         let root = policy.root().to_path_buf();
         let shell: Arc<dyn ShellSeam> =
-            Arc::new(SandboxShell::new(sandbox).with_cwd(root.to_string_lossy()));
+            Arc::new(SandboxShell::new(sandbox.clone()).with_cwd(root.to_string_lossy()));
         Self {
             fs: Some(Arc::new(LocalFs::new(policy))),
             jobs: Some(Arc::new(LocalJobs::new(shell.clone()))),
             shell: Some(shell),
             skills: Some(Arc::new(FilesystemSkills::new([root.join(".aria/skills")]))),
+            sandbox: Some(sandbox),
+            root,
             web: None,
             questions: None,
             store: Some(store),
             terminal: cfg!(feature = "pty"),
+            egress: None,
+            sandbox_network: None,
+            sandbox_labels: Vec::new(),
+            sandbox_env: Vec::new(),
         }
+    }
+
+    /// Put every shell session on the governed network, carry its identity
+    /// labels, and hand it the proxy environment.
+    ///
+    /// Rebuilds the shell so the transport fields apply to `jobs` as well: a
+    /// background job must not be a way out of the network.
+    pub fn with_sandbox_transport(
+        mut self,
+        network: Option<String>,
+        labels: Vec<(String, String)>,
+        env: Vec<(String, String)>,
+    ) -> Self {
+        self.sandbox_network = network;
+        self.sandbox_labels = labels;
+        self.sandbox_env = env;
+        // `term_*` drives a PTY on the *host process*, not in the sandbox, so the
+        // proxy cannot cover it. Under network enforcement the family is not
+        // registered at all: a host terminal would be an ungoverned way out
+        // (ADR-0024). The shell/jobs families are sandbox-backed and stay.
+        if self.sandbox_network.is_some() && self.terminal {
+            let reason = "term_* tools disabled: network enforcement cannot proxy host PTYs";
+            tracing::warn!("{reason}");
+            self.terminal = false;
+        }
+        let shell: Option<Arc<dyn ShellSeam>> = self
+            .sandbox
+            .clone()
+            .map(|sandbox| self.governed_shell(sandbox));
+        self.jobs = shell
+            .clone()
+            .map(|shell| Arc::new(LocalJobs::new(shell)) as Arc<dyn JobsSeam>);
+        self.shell = shell;
+        self
+    }
+
+    /// The shell seam every sandbox-backed family shares: same backend, same
+    /// working directory, same governed network and identity labels.
+    fn governed_shell(&self, sandbox: Arc<dyn agent_sandbox::Sandbox>) -> Arc<dyn ShellSeam> {
+        let mut shell = SandboxShell::new(sandbox).with_cwd(self.root.to_string_lossy());
+        if !self.sandbox_env.is_empty() {
+            shell = shell.with_env(self.sandbox_env.clone());
+        }
+        Arc::new(
+            shell
+                .with_network(self.sandbox_network.clone())
+                .with_labels(self.sandbox_labels.clone()),
+        )
+    }
+
+    /// Attach the outbound policy. `web_*` decisions then name the policy
+    /// revision, and a denial reaches the model as an actionable error.
+    pub fn with_egress(mut self, egress: Arc<dyn EgressSeam>) -> Self {
+        self.egress = Some(egress);
+        self
     }
 
     /// Enable the `web_*` family with the `reqwest` provider (`--features web`).
@@ -139,7 +213,11 @@ impl ToolSet {
             out.push(Arc::new(SkillsToolHandler::new(skills.clone())));
         }
         if let Some(web) = &self.web {
-            out.push(Arc::new(WebToolHandler::new(web.clone())));
+            let mut handler = WebToolHandler::new(web.clone());
+            if let Some(egress) = &self.egress {
+                handler = handler.with_egress(egress.clone());
+            }
+            out.push(Arc::new(handler));
         }
         if let Some(questions) = &self.questions {
             out.push(Arc::new(AskToolHandler::new(questions.clone())));
@@ -369,6 +447,48 @@ mod tests {
         let (built_tools, built_handlers) = builtin(&set);
         assert_eq!(built_tools.len(), tools.len());
         assert_eq!(built_handlers.len(), 10);
+    }
+
+    #[test]
+    fn web_and_egress_are_wired_together() {
+        let mut set = ToolSet::local(
+            Arc::new(agent_core::seams::SandboxPolicy::default()),
+            Arc::new(NoopSandbox),
+            agent_core::in_memory_context(),
+        );
+        set.web = Some(Arc::new(NoWeb));
+        let set = set.with_egress(Arc::new(agent_core::seams::DenyAllEgress));
+        let handlers = set.handlers();
+        assert!(handlers.iter().any(|h| h.handles("web_fetch")));
+    }
+
+    #[test]
+    fn network_enforcement_drops_the_host_terminal_family() {
+        let build = || {
+            let mut set = ToolSet::local(
+                Arc::new(agent_core::seams::SandboxPolicy::default()),
+                Arc::new(NoopSandbox),
+                agent_core::in_memory_context(),
+            );
+            // The `pty` feature may be off; force the flag so the assertion is
+            // about the enforcement rule, not the build profile.
+            set.terminal = true;
+            set
+        };
+        let governed = build().with_sandbox_transport(
+            Some("aria-egress".into()),
+            vec![("aria.tenant_id".into(), "tenant".into())],
+            vec![("HTTP_PROXY".into(), "http://aria-egress-proxy:8080".into())],
+        );
+        assert!(!governed.terminal, "host PTYs cannot be proxied");
+        let names: Vec<String> = governed.tools().into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n.starts_with("term_")), "{names:?}");
+        // Sandbox-backed families stay: they *are* on the governed network.
+        assert!(names.iter().any(|n| n == "shell"));
+        assert!(names.iter().any(|n| n.starts_with("job_")));
+
+        let proxy_mode = build().with_sandbox_transport(None, Vec::new(), Vec::new());
+        assert!(proxy_mode.terminal, "proxy mode keeps the terminal");
     }
 
     #[tokio::test]

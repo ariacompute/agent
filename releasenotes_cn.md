@@ -1,5 +1,74 @@
 # 发布说明
 
+## 受控执行：单一出站边界、审计、计量与凭据
+
+每个出站请求现在都经过同一条边界：判定、替换、记录（ADR-0020）。开启
+`AGENT_EGRESS_ENFORCEMENT=network` 后，这条边界成为**唯一**出口：sandbox 运行在
+`internal` 的 Docker 网络上，唯一可达的对端是一个不持有任何密钥的代理（ADR-0024）。
+
+### 主要变更
+
+- **四个新接缝** —— `egress`、`audit`、`metering`、`credentials`。每个的默认实现都
+  是拒绝而非放行（`DenyAllEgress`、`NoAuditConfigured`、`NoMeteringConfigured`、
+  `NoCredentials`），因此漏装配就是 fail-closed。
+- **新增 `aria-agent-governance`** —— `EgressGateway`（判定 → 替换
+  `${credential}` → 审计 → 计量）、`LocalForwardProxy`（HTTP/1.1 absolute-URI
+  转发 + `CONNECT` 盲转发）、`JsonlAuditSink`（按 UTC 日分文件、保留期清理、NDJSON
+  导出）、`MeteringLedger` + `QuotaGuardSandbox`（预留被拒即回滚容器）、
+  `GovernanceProjector`（只为模型投影工具输出，事件里保留原始结果）、
+  `FileCredentialStore`（落盘 ChaCha20-Poly1305、轮换期限、header stub），以及基于
+  五个独立信号的空闲检测。
+- **新增 `aria-agent-egress-proxy`** —— 独立镜像，不持有密钥、不落盘。它通过
+  `/internal/egress/*` 实现同一组接缝，所以判定、脱敏与审计语义是复用而不是另写一套。
+  身份就是来源 IP：控制面按容器标签（`aria.tenant_id` / `aria.session_id`）解析，缓存
+  10 秒 / 4096 个；未知来源一律拒绝，声称的 `principal_id` 与来源 IP 不符同样拒绝 ——
+  被攻陷的代理也无法跨租户。
+- **启动即失败，绝不降级** —— `network` 模式下，服务先创建网络、启动代理、把代理接入
+  控制面网络并探测健康，任何一步失败都带着下一步动作退出。不会静默退回 `proxy` 模式。
+- **结构性覆盖** —— 包裹发生在运行时装配点（`Agent::with_*`），也覆盖浏览器后端内部的
+  Docker sandbox，因此 `shell`、`job_*`、agent loop 与 `browser_*` 都落在 internal
+  网络上。`term_*` 不注册（宿主 PTY，容器网络覆盖不到）；`cube` 拒绝自定义网络与标签，
+  但会转发代理环境变量；恢复的检查点同样接入该网络并带上通过认证的租户标签。
+- **云端接口** —— `/v1/governance/*`：策略修订（过期写入返回 `409`）、审计与 NDJSON
+  导出、用量、状态（强制模式 + 代理健康）、凭据元数据（配置了凭据库时），以及检查点与
+  恢复。四张按 `principal_id` 分片的表（`egress_policies`、`audit_events`、
+  `usage_events`、`sandbox_checkpoints`）以 `CREATE TABLE IF NOT EXISTS` 建立，已有
+  数据库无需手工迁移；凭据本身仍在加密的端侧存储中。
+- **可观测** —— 代理不是 compose 服务：`docker network ls` 能看到 internal 网络、
+  `docker ps` 能看到 sidecar；拒绝会以
+  `egress is deny-by-default and x is not on the allowlist (policy rN)` 的形式回到
+  模型，而不是超时。
+
+### 配置
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `AGENT_EGRESS_MODE` | `deny_all` | `deny_all` \| `allowlist` \| `denylist` |
+| `AGENT_EGRESS_ALLOW` / `AGENT_EGRESS_DENY` | *（空）* | 主机模式；`*.` 匹配子域 |
+| `AGENT_EGRESS_ENFORCEMENT` | `proxy` | `proxy` \| `network` \| `off`（需 `AGENT_ALLOW_UNENFORCED_EGRESS=1`） |
+| `AGENT_EGRESS_NETWORK` / `AGENT_EGRESS_PROXY_URL` | `aria-egress` / `http://aria-egress-proxy:8080` | internal 网络名与 sandbox 内可达的地址 |
+| `EGRESS_PROXY_IMAGE` / `EGRESS_PROXY_TOKEN` | — / 每次启动生成 | sidecar 镜像（`network` 必填）与共享令牌 |
+| `CONTROL_PLANE_URL` | *（`network` 必填）* | 代理如何访问本服务 |
+| `AGENT_AUDIT_DIR` / `AGENT_AUDIT_RETENTION_DAYS` | `<workspace>/.aria/audit` / `30` | JSONL sink；`0` 表示永久保留 |
+| `AGENT_METERING` / `AGENT_COMPRESSION` | `on` / `on` | 用量账本 / 面向模型的投影 |
+| `AGENT_CREDENTIALS_DIR` / `AGENT_CREDENTIAL_MASTER_KEY` | *（未设置即关闭）* / 开启时必填 | 加密凭据库 |
+| `AGENT_IDLE_TIMEOUT_SECS` | `900` | `0` 关闭挂起 |
+
+### 破坏性变更
+
+- `ExecSpec` 新增 `network` 与 `labels`，仓库外的结构体字面量不再编译；请改用
+  `ExecSpec::command(..)` 并设置新字段。
+- `allowlist` 模式却没给主机清单不会导致启动失败，而是在每次调用时拒绝所有请求；想明确
+  表达「全拒绝」请用 `deny_all`。
+- `network` 强制缺少 `EGRESS_PROXY_IMAGE`、`CONTROL_PLANE_URL` 或代理未运行时拒绝启动。
+
+### 验证
+
+`cargo fmt --all -- --check`、`cargo clippy --locked --workspace --all-targets
+-- -D warnings`、`cargo test --locked --workspace`（941 通过）与
+`./scripts/coverage.sh`（行覆盖 99.95%，25127/25140；剩余行要么是带说明的
+`// LCOV_EXCL_LINE` 例外，要么是闭合定界符假象）全部通过。
+
 ## Rust / Swift / Kotlin SDK 改为云端 API 客户端
 
 UniFFI 表面不再内嵌运行时：`ariacompute-agent` 现在是 beta Agents API 的薄 HTTP

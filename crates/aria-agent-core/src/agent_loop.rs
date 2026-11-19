@@ -379,7 +379,9 @@ impl Agent {
                         },
                     },
                 };
-                let outcome = self.pipeline.post_execute(&call.id, raw, approval.clone());
+                let outcome =
+                    self.pipeline
+                        .post_execute_tool(&call.name, &call.id, raw, approval.clone());
                 (outcome.result, approval)
             }
         }
@@ -670,7 +672,7 @@ async fn native_run(
                     }),
                 });
 
-                let (result, _approval) = match pipeline.authorize(call, &session).await {
+                let outcome = match pipeline.authorize(call, &session).await {
                     Authz::Denied { decision, reason } => {
                         yield Ok(AgentEvent::Approval {
                             id: call.id.clone(),
@@ -684,7 +686,9 @@ async fn native_run(
                             decision: decision.as_str().to_string(),
                             reason: Some(reason.clone()),
                         });
-                        (
+                        pipeline.post_execute_tool(
+                            &call.name,
+                            &call.id,
                             ToolExecutionPipeline::denied_result(call, &reason),
                             Some(decision),
                         )
@@ -717,20 +721,25 @@ async fn native_run(
                                 }
                             }
                         };
-                        let outcome = pipeline.post_execute(&call.id, raw, approval.clone());
-                        (outcome.result, approval)
+                        pipeline.post_execute_tool(&call.name, &call.id, raw, approval.clone())
                     }
                 };
+                let result = outcome.result;
+                let model_content = outcome.model_content;
+                let projection = outcome.projection;
 
+                // The model sees the projected copy; the event and the session
+                // record keep what the tool actually produced.
                 tool_log.push_str(&format!(
                     "\n\nTOOL_RESULT[{}]: {}",
-                    call.name, result.content
+                    call.name, model_content
                 ));
                 recorder.push(SessionEvent::ItemDone {
                     item_id: call.id.clone(),
                     result: json!({
                         "content": result.content,
                         "spill": result.content.len(),
+                        "projection": projection,
                     }),
                     is_error: result.is_error,
                 });

@@ -1,5 +1,38 @@
 # 发布说明 ✨
 
+## 🛡️ 受控执行：出站、审计、计量与凭据 🔐
+
+每个出站请求都经过同一条边界：判定 → 替换 `${credential}` → 审计（ADR-0020）。开启 `AGENT_EGRESS_ENFORCEMENT=network` 后，这条边界成为唯一出口：sandbox 在 `internal` 网络上运行，唯一可达的对端是不持任何密钥的代理（ADR-0024）。
+
+### 🚦 出站
+
+- 🧭 `egress` / `audit` / `metering` / `credentials` 四个新接缝，默认实现一律拒绝（漏装配即 fail-closed）。
+- 🧾 拒绝会带着策略修订号回到模型：`egress is deny-by-default and x is not on the allowlist (policy rN)` —— 不是超时。
+- 🏷️ 策略带修订号，云端过期写入返回 `409`。
+
+### 🐳 网络强制
+
+- 🕳️ sandbox 没有默认路由：无视 `HTTP_PROXY` 的结果是失败，不是泄露。
+- 🧊 代理镜像不含密钥、不落盘；身份 = 容器标签 + 来源 IP，缓存 10 秒 / 4096 个。
+- 🛑 网络、代理、控制面网络、健康探测任一失败即拒绝启动，绝不降级为 `proxy`。
+- 🧱 运行时装配点与浏览器后端内部 sandbox 都被包裹，`shell` / `job_*` / `browser_*` 落在同一网络；`term_*` 在强制模式下不注册。
+
+### 🔐 审计、计量与凭据
+
+- 📜 JSONL 审计按 UTC 日分文件、可设保留期、支持 NDJSON 导出。
+- 📊 用量按生命周期状态计量；预留被拒会回滚容器。
+- 🗝️ 凭据以 ChaCha20-Poly1305 落盘，支持轮换期限与 header stub；明文只在边界替换，不进日志、事件或审计。
+- 📉 工具输出只为模型投影，事件保留原始结果。
+- ⏱️ 五个信号全部静默才判定空闲（`AGENT_IDLE_TIMEOUT_SECS`，`0` 关闭）。
+
+### ⚠️ 破坏性变更
+
+- 🧷 `ExecSpec` 新增 `network` / `labels`，仓库外的结构体字面量需改用 `ExecSpec::command(..)`。
+
+### ✅ 验证
+
+`cargo test --workspace`（941 ✅）、`fmt`、`clippy -D warnings` 与覆盖率闸门（99.95% 行覆盖）全部通过。
+
 ## ☁️ Rust / Swift / Kotlin SDK 改为云端 API 客户端 🚀
 
 UniFFI 表面不再内嵌运行时：`ariacompute-agent` 现在是 beta Agents API 的薄 HTTP 客户端，词汇与 JS/Python SDK 一致。设备二进制里没有循环、sandbox、工具族，也不需要模型密钥（ADR-0020）。

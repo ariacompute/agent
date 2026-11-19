@@ -1,0 +1,25 @@
+[package]
+name = "aria-agent-governance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single governed egress boundary: policy, credential substitution and tool-output projection for aria-agent."
+
+[lib]
+name = "agent_governance"
+
+[dependencies]
+agent-core = { package = "aria-agent-core", path = "../aria-agent-core" }
+agent-sandbox = { package = "aria-agent-sandbox", path = "../aria-agent-sandbox" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+# Already in the workspace lock (rustls uses it), so this adds no new download.
+ring = "0.17"
+
+[dev-dependencies]
+tempfile = "3"

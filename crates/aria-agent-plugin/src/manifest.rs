@@ -180,6 +180,12 @@ pub const DIRECTORY_PICKER: SeamKey = SeamKey("directory_picker");
 pub const WORKFLOW_ENGINE: SeamKey = SeamKey("workflow_engine");
 /// Language-server queries (`ctx.lsp`).
 pub const LSP: SeamKey = SeamKey("lsp");
+/// Outbound network policy (`ctx.egress`). Deny-by-default (ADR-0020).
+pub const EGRESS: SeamKey = SeamKey("egress");
+/// Audit sink for actions that actually happened (`ctx.audit`, ADR-0021).
+pub const AUDIT: SeamKey = SeamKey("audit");
+/// Resource usage accounting by lifecycle state (`ctx.metering`, ADR-0022).
+pub const METERING: SeamKey = SeamKey("metering");
 
 /// OpenTelemetry export (`ctx.otel`) — a **service**, not a swappable seam.
 pub const OTEL: SeamKey = SeamKey("otel");
@@ -236,6 +242,9 @@ pub const ALL: &[SeamKey] = &[
     DIRECTORY_PICKER,
     WORKFLOW_ENGINE,
     LSP,
+    EGRESS,
+    AUDIT,
+    METERING,
     OTEL,
     PRODUCT_TELEMETRY,
     DEEPSEEK_AUTH,
