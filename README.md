@@ -31,6 +31,7 @@ one `recall → model → memorize` runtime with pluggable sandboxes.
 
 - [🧰 Command line](#-command-line)
 - [🛳 Deployment](#-deployment)
+- [🔨 Development](#-development)
 
 **Architecture & SDK**
 
@@ -45,7 +46,6 @@ one `recall → model → memorize` runtime with pluggable sandboxes.
 **Trust & governance**
 
 - [🔏 Trust store security](#-trust-store-security)
-- [🔨 Development](#-development)
 - [📚 Documentation](#-documentation)
 - [📝 License](#-license)
 - [🤝 Engineering conventions](#-engineering-conventions)
@@ -390,6 +390,32 @@ warning, so the service always boots.
 | Volume | Backed by | Purpose |
 |--------|-----------|---------|
 | `pgdata` | Postgres (pgvector) | `agents` / `runs` metadata **and** `context_fragments` (context memory). |
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🔨 Development
+
+| Target | Effect |
+|---|---|
+| `cargo build --workspace` | build all crates |
+| `cargo test --workspace` | run the workspace test suite |
+| `just e2e` | run the real-socket HTTP E2E suite (optional DB/Docker cases skip when unavailable) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | lint with warnings as errors |
+| `just ffi` | regenerate the Swift / Kotlin bindings (needs the cdylib built) |
+| `cargo run -p aria-agent-cloud` | run the cloud API (needs Postgres + OpenAI key) |
+| `aria-agent serve` | start the cloud HTTP server (default subcommand) |
+| `aria-agent setup` / `upgrade` | configure Releases source / self-update the binary + cdylib |
+
+### E2E tests
+
+`just e2e` (`cargo test -p agent-tests --test e2e_http`) binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
+
+- `DATABASE_URL` — exercises the Postgres + pgvector stores through two independently built routers; skipped when unset or unreachable.
+- `ARIA_E2E_DOCKER=1` — executes a `shell` tool in a real container via the streaming route; requires a reachable daemon and a locally cached `alpine:latest` image, otherwise skipped.
 
 <div align="right">
 
@@ -1000,32 +1026,6 @@ root / intermediate SHA-256 fingerprints (exit `0` clean, `1` hit, `2` unreadabl
 ```bash
 scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 ```
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## 🔨 Development
-
-| Target | Effect |
-|---|---|
-| `cargo build --workspace` | build all crates |
-| `cargo test --workspace` | run the workspace test suite |
-| `just e2e` | run the real-socket HTTP E2E suite (optional DB/Docker cases skip when unavailable) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | lint with warnings as errors |
-| `just ffi` | regenerate the Swift / Kotlin bindings (needs the cdylib built) |
-| `cargo run -p aria-agent-cloud` | run the cloud API (needs Postgres + OpenAI key) |
-| `aria-agent serve` | start the cloud HTTP server (default subcommand) |
-| `aria-agent setup` / `upgrade` | configure Releases source / self-update the binary + cdylib |
-
-### E2E tests
-
-`just e2e` (`cargo test -p agent-tests --test e2e_http`) binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
-
-- `DATABASE_URL` — exercises the Postgres + pgvector stores through two independently built routers; skipped when unset or unreachable.
-- `ARIA_E2E_DOCKER=1` — executes a `shell` tool in a real container via the streaming route; requires a reachable daemon and a locally cached `alpine:latest` image, otherwise skipped.
 
 <div align="right">
 

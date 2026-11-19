@@ -31,6 +31,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 
 - [🧰 命令行](#-命令行)
 - [🛳 部署](#-部署)
+- [🔨 开发](#-开发)
 
 **架构与 SDK**
 
@@ -45,7 +46,6 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 **信任与治理**
 
 - [🔏 信任库安全](#-信任库安全)
-- [🔨 开发](#-开发)
 - [📚 文档](#-文档)
 - [📝 许可证](#-许可证)
 - [🤝 工程约定](#-工程约定)
@@ -362,6 +362,32 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | 卷 | 对应路径 | 用途 |
 |----|----------|------|
 | `pgdata` | Postgres（pgvector） | `agents` / `runs` 元数据 **与** `context_fragments`（上下文记忆）。 |
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🔨 开发
+
+| 目标 | 作用 |
+|---|---|
+| `cargo build --workspace` | 构建全部 crate |
+| `cargo test --workspace` | 运行 workspace 测试套件 |
+| `just e2e` | 运行真实 socket 的 HTTP E2E 套件（可选 DB/Docker 场景缺依赖时跳过） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 以警告即错误方式 lint |
+| `just ffi` | 重新生成 Swift / Kotlin 绑定（需先构建 cdylib） |
+| `cargo run -p aria-agent-cloud` | 运行云端 API（需 Postgres + OpenAI 密钥） |
+| `aria-agent serve` | 启动云端 HTTP 服务（默认子命令） |
+| `aria-agent setup` / `upgrade` | 配置 Releases 源 / 自更新二进制与 cdylib |
+
+### E2E 测试
+
+`just e2e`（即 `cargo test -p agent-tests --test e2e_http`）将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
+
+- `DATABASE_URL` —— 通过两个独立构建的 router 验证 Postgres + pgvector 存储；未设置或不可达时跳过。
+- `ARIA_E2E_DOCKER=1` —— 经流式路由在真实容器中执行 `shell` 工具；需 Docker 守护进程可达且本地已有 `alpine:latest` 镜像，否则跳过。
 
 <div align="right">
 
@@ -939,32 +965,6 @@ fun main() {
 ```bash
 scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 ```
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## 🔨 开发
-
-| 目标 | 作用 |
-|---|---|
-| `cargo build --workspace` | 构建全部 crate |
-| `cargo test --workspace` | 运行 workspace 测试套件 |
-| `just e2e` | 运行真实 socket 的 HTTP E2E 套件（可选 DB/Docker 场景缺依赖时跳过） |
-| `cargo clippy --workspace --all-targets -- -D warnings` | 以警告即错误方式 lint |
-| `just ffi` | 重新生成 Swift / Kotlin 绑定（需先构建 cdylib） |
-| `cargo run -p aria-agent-cloud` | 运行云端 API（需 Postgres + OpenAI 密钥） |
-| `aria-agent serve` | 启动云端 HTTP 服务（默认子命令） |
-| `aria-agent setup` / `upgrade` | 配置 Releases 源 / 自更新二进制与 cdylib |
-
-### E2E 测试
-
-`just e2e`（即 `cargo test -p agent-tests --test e2e_http`）将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
-
-- `DATABASE_URL` —— 通过两个独立构建的 router 验证 Postgres + pgvector 存储；未设置或不可达时跳过。
-- `ARIA_E2E_DOCKER=1` —— 经流式路由在真实容器中执行 `shell` 工具；需 Docker 守护进程可达且本地已有 `alpine:latest` 镜像，否则跳过。
 
 <div align="right">
 
