@@ -14,9 +14,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_core::context::{ContextStore, MemoryContextStore};
+use agent_core::seams::{now_ms, AuditEvent, AuditKind, MeterState, ResourceRequest};
 use agent_core::{ModelClient, ModelRequest, ModelResponse, ModelTurn, ToolCall};
-use agent_sandbox::{DockerSandbox, ExecOutput, ExecSpec, Sandbox, SandboxError, SandboxHandle};
+use agent_sandbox::{
+    CheckpointRef, DockerSandbox, ExecOutput, ExecSpec, Sandbox, SandboxError, SandboxHandle,
+};
 use aria_agent_cloud::context::{ensure_pgvector, PgContextStore};
+use aria_agent_cloud::governance::{global_store, usage_record};
 use aria_agent_cloud::store::PgStore;
 use aria_agent_cloud::{
     build_router, hash_key, ApiKeyStore, AppState, KeyCache, MakeModel, MakeSandbox, MemoryStore,
@@ -107,6 +111,22 @@ fn bootstrap_token() -> Option<String> {
     std::env::var("AGENT_CLOUD_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
+}
+
+/// Issue a scoped key resolved through the real auth middleware. Governance
+/// scope gates are only meaningful when the key travels over the socket.
+async fn issue_key(h: &MemoryHarness, token: &str, principal_id: &str, scopes: &[&str]) {
+    h.store
+        .insert_key(&NewApiKeyRow {
+            id: format!("key-{principal_id}"),
+            key_prefix: token.chars().take(8).collect(),
+            key_hash: hash_key(token),
+            principal_id: principal_id.to_string(),
+            label: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        })
+        .await
+        .expect("insert scoped key");
 }
 
 fn sse_frames(text: &str) -> Vec<Value> {
@@ -841,4 +861,421 @@ async fn docker_sandbox_executes_a_tool_from_the_stream_route() {
         frames.last().expect("frames")["type"],
         "agent.turn.completed"
     );
+}
+
+#[tokio::test]
+async fn governance_policy_revisions_and_scopes_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let tag = uuid::Uuid::new_v4();
+    let (rw, ro, wo, blind) = (
+        format!("gov-rw-{tag}"),
+        format!("gov-ro-{tag}"),
+        format!("gov-wo-{tag}"),
+        format!("gov-blind-{tag}"),
+    );
+    issue_key(&h, &rw, &format!("gov-a-{tag}"), &["read", "write"]).await;
+    issue_key(&h, &ro, &format!("gov-b-{tag}"), &["read"]).await;
+    issue_key(&h, &wo, &format!("gov-c-{tag}"), &["write"]).await;
+    issue_key(&h, &blind, &format!("gov-d-{tag}"), &[]).await;
+    let path = "/v1/governance/egress-policy";
+
+    let (status, policy) = h.api.send(Method::GET, path, Some(&rw), None).await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    assert_eq!(policy["mode"], "deny_all");
+    assert_eq!(policy["revision"], 1);
+
+    // Scope gates are enforced by the auth middleware before the handler runs.
+    for token in [&blind, &wo] {
+        let (status, _) = h.api.send(Method::GET, path, Some(token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, _) = h
+        .api
+        .send(
+            Method::PUT,
+            path,
+            Some(&ro),
+            Some(json!({"mode": "deny_all", "expected_revision": 1})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // A write-only key can mutate its own policy but cannot read it back.
+    let (status, written) = h
+        .api
+        .send(
+            Method::PUT,
+            path,
+            Some(&wo),
+            Some(json!({"mode": "deny_all", "expected_revision": 1})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(written["revision"], 2);
+
+    let (status, written) = h
+        .api
+        .send(
+            Method::PUT,
+            path,
+            Some(&rw),
+            Some(json!({
+                "mode": "allowlist",
+                "allowed": ["api.example.com"],
+                "expected_revision": 1,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(written["revision"], 2);
+    assert_eq!(written["allowed"][0], "api.example.com");
+
+    // A stale write loses with 409 and never overwrites the winner.
+    let (status, conflict) = h
+        .api
+        .send(
+            Method::PUT,
+            path,
+            Some(&rw),
+            Some(json!({"mode": "deny_all", "expected_revision": 1})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    let (_, unchanged) = h.api.send(Method::GET, path, Some(&rw), None).await;
+    assert_eq!(unchanged["revision"], 2);
+
+    // PATCH is revision guarded as well.
+    let (status, patched) = h
+        .api
+        .send(
+            Method::PATCH,
+            path,
+            Some(&rw),
+            Some(json!({
+                "expected_revision": 2,
+                "allow_add": ["*.pypi.org"],
+                "allow_remove": ["api.example.com"],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["revision"], 3);
+    assert_eq!(patched["allowed"], json!(["*.pypi.org"]));
+
+    // Malformed policies are client errors, never 500s.
+    for body in [
+        json!({"mode": "open", "expected_revision": 3}),
+        json!({"mode": "allowlist", "allowed": ["https://x"], "expected_revision": 3}),
+    ] {
+        let (status, _) = h.api.send(Method::PUT, path, Some(&rw), Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // Tenant isolation: the read-only principal still sees its own deny_all.
+    let (status, other) = h.api.send(Method::GET, path, Some(&ro), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other["revision"], 1);
+    assert_eq!(other["mode"], "deny_all");
+}
+
+#[tokio::test]
+async fn governance_audit_usage_and_status_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let tag = uuid::Uuid::new_v4();
+    let key = format!("gov-read-{tag}");
+    let pid = format!("gov-audit-{tag}");
+    let other_pid = format!("gov-other-{tag}");
+    issue_key(&h, &key, &pid, &["read"]).await;
+
+    let store = global_store();
+    store
+        .append_audit(AuditEvent::new(AuditKind::EgressDecision, &pid, "a.com").with_decision(true))
+        .await
+        .expect("append audit");
+    store
+        .append_audit(AuditEvent::new(AuditKind::ToolExecuted, &pid, "shell"))
+        .await
+        .expect("append audit");
+    store
+        .append_audit(AuditEvent::new(
+            AuditKind::EgressDecision,
+            &other_pid,
+            "b.com",
+        ))
+        .await
+        .expect("append other tenant audit");
+    let shape = ResourceRequest {
+        vcpus_x1000: 1000,
+        memory_mib: 1024,
+        disk_mib: 0,
+    };
+    store
+        .record_usage(usage_record(
+            &pid,
+            "sbx",
+            MeterState::Running,
+            shape,
+            0,
+            3_600_000,
+        ))
+        .await
+        .expect("record running usage");
+    store
+        .record_usage(usage_record(
+            &pid,
+            "sbx",
+            MeterState::Paused,
+            shape,
+            3_600_000,
+            7_200_000,
+        ))
+        .await
+        .expect("record paused usage");
+
+    let (status, audit) = h
+        .api
+        .send(Method::GET, "/v1/governance/audit", Some(&key), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{audit}");
+    let events = audit.as_array().expect("audit array");
+    assert_eq!(events.len(), 2, "other tenants do not leak: {audit}");
+    assert!(events.iter().all(|e| e["principal_id"] == json!(pid)));
+
+    let (status, filtered) = h
+        .api
+        .send(
+            Method::GET,
+            "/v1/governance/audit?kind=tool_executed",
+            Some(&key),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered.as_array().expect("filtered audit").len(), 1);
+    let (status, _) = h
+        .api
+        .send(
+            Method::GET,
+            "/v1/governance/audit?kind=nope",
+            Some(&key),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, ndjson) = h
+        .api
+        .call(Method::GET, "/v1/governance/audit/export", Some(&key), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ndjson}");
+    assert_eq!(ndjson.lines().count(), 2, "{ndjson}");
+    assert!(ndjson.lines().all(|l| l.starts_with('{')), "{ndjson}");
+
+    let (status, usage) = h
+        .api
+        .send(Method::GET, "/v1/governance/usage", Some(&key), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{usage}");
+    assert_eq!(usage["records"], 2);
+    assert_eq!(usage["resources"]["vcpu_millis"], 3_600_000);
+    assert_eq!(
+        usage["resources"]["memory_mib_millis"],
+        json!(2u64 * 1024 * 3_600_000)
+    );
+
+    let (status, reported) = h
+        .api
+        .send(Method::GET, "/v1/governance/status", Some(&key), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reported}");
+    let flag = |name: &str, default: bool| {
+        std::env::var(name)
+            .ok()
+            .map(|v| !v.trim().eq_ignore_ascii_case("off"))
+            .unwrap_or(default)
+    };
+    assert_eq!(
+        reported["enforcement"],
+        json!(std::env::var("AGENT_EGRESS_ENFORCEMENT").unwrap_or_else(|_| "proxy".into()))
+    );
+    assert_eq!(
+        reported["compression"],
+        json!(flag("AGENT_COMPRESSION", true))
+    );
+    assert_eq!(reported["metering"], json!(flag("AGENT_METERING", true)));
+    assert!(reported["credentials_configured"].is_boolean());
+    assert!(reported["sandbox_configured"].is_boolean());
+}
+
+#[tokio::test]
+async fn governance_credentials_and_checkpoints_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let tag = uuid::Uuid::new_v4();
+    let key = format!("gov-manage-{tag}");
+    let pid = format!("gov-checkpoint-{tag}");
+    issue_key(&h, &key, &pid, &["read", "write"]).await;
+
+    // `build_router` does not attach a credential store: the endpoints must
+    // report the missing dependency loudly rather than serve fake metadata.
+    for (method, path, body) in [
+        (Method::GET, "/v1/governance/credentials", None),
+        (
+            Method::PUT,
+            "/v1/governance/credentials/openai",
+            Some(json!({"value": "sk-e2e"})),
+        ),
+        (Method::DELETE, "/v1/governance/credentials/openai", None),
+    ] {
+        let (status, _) = h.api.send(method, path, Some(&key), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+    }
+
+    let checkpoint = CheckpointRef::new("img:latest", "sbx", now_ms());
+    global_store()
+        .put_checkpoint(&pid, checkpoint.clone())
+        .await
+        .expect("seed checkpoint");
+    let (status, listed) = h
+        .api
+        .send(Method::GET, "/v1/governance/checkpoints", Some(&key), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed
+        .as_array()
+        .expect("checkpoint list")
+        .iter()
+        .any(|c| c["id"] == json!(checkpoint.id)));
+
+    // Creating a checkpoint needs a sandbox backend, which the test router
+    // deliberately does not attach.
+    let (status, _) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/governance/checkpoints",
+            Some(&key),
+            Some(json!({"sandbox_id": "sbx"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Restoring distinguishes a missing checkpoint from a missing backend.
+    let (status, _) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/governance/checkpoints/nope/restore",
+            Some(&key),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/governance/checkpoints/{}/restore", checkpoint.id),
+            Some(&key),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn agent_and_session_crud_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let tag = uuid::Uuid::new_v4();
+    let name = format!("crud-{tag}");
+
+    let (status, agent) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/agents",
+            auth,
+            Some(json!({"name": name})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{agent}");
+    let aid = agent["id"].as_str().expect("agent id");
+
+    let (status, updated) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agents/{aid}"),
+            auth,
+            Some(json!({"name": format!("{name}-renamed")})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["name"], json!(format!("{name}-renamed")));
+
+    let (status, session) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/agents/sessions",
+            auth,
+            Some(json!({"agent_id": aid})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let sid = session["id"].as_str().expect("session id").to_string();
+
+    let (status, sessions) = h
+        .api
+        .send(Method::GET, "/v1/agents/sessions", auth, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sessions}");
+    assert!(sessions["data"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .any(|s| s["id"] == json!(sid)));
+
+    let (status, updated) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agents/sessions/{sid}"),
+            auth,
+            Some(json!({"instructions": "be brief"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["instructions"], json!("be brief"));
+
+    let (status, _) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/agents/sessions/{sid}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{sid}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = h
+        .api
+        .send(Method::DELETE, &format!("/v1/agents/{aid}"), auth, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h
+        .api
+        .send(Method::GET, &format!("/v1/agents/{aid}"), auth, None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

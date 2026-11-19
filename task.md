@@ -413,6 +413,21 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       AGENTS.md updated; hermetic stub-server tests cover request shape, SSE
       decoding, error mapping and the CLI seam.
 
+## Milestone 18 — real-socket E2E coverage for governance + CRUD
+- [x] `tests/e2e_http.rs`: governance egress-policy scenario over the socket —
+      read/write scope gates (403), revision-guarded `PUT`/`PATCH` (200/409),
+      invalid mode/host (400) and cross-principal `deny_all` isolation.
+- [x] Governance audit/usage/status scenario: tenant-filtered audit list,
+      `kind` filter + bad kind, NDJSON export, state-split usage summary and
+      the boot-wired status flags; all driven through `build_router`.
+- [x] Governance credentials/checkpoints scenario: missing-store/backend fail
+      loudly (400), checkpoint seed → list, unknown restore → 404, known
+      restore without a sandbox → 400.
+- [x] Agent/session CRUD scenario: create → update → list → update → delete →
+      404 on both resource types (was covered only by oneshot/curl smoke).
+- [x] `just e2e` now runs 9 real-socket scenarios (was 5); fmt, clippy
+      `-D warnings`, `cargo test --workspace` and `just cov-check` stay green.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.
