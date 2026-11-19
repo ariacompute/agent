@@ -738,8 +738,10 @@ mod tests {
 
     #[tokio::test]
     async fn bind_reports_an_unusable_address() {
+        // A space makes the address invalid on every platform; `256.0.0.1`
+        // depends on the resolver and can bind on Windows.
         assert!(
-            LocalForwardProxy::bind("256.0.0.1:0", gateway(allow_localhost()))
+            LocalForwardProxy::bind("not a host:0", gateway(allow_localhost()))
                 .await
                 .is_err()
         );
@@ -903,11 +905,10 @@ mod tests {
         let addr = proxy.addr();
         let server = tokio::spawn(async move { proxy.serve_one().await });
         let mut client = TcpStream::connect(addr).await.unwrap();
-        // No header terminator at all: the proxy must stop at the limit.
-        client
-            .write_all(&vec![b'x'; MAX_HEADER_BYTES + 16])
-            .await
-            .unwrap();
+        // No header terminator at all: the proxy must stop at the limit. The
+        // client write may be cut short by the reset; only the proxy's verdict
+        // matters here, and Windows closes the socket earlier than Linux.
+        let _ = client.write_all(&vec![b'x'; MAX_HEADER_BYTES + 16]).await;
         let result = tokio::time::timeout(Duration::from_secs(5), server)
             .await
             .unwrap()
