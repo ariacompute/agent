@@ -24,6 +24,7 @@ one `recall → model → memorize` runtime with pluggable sandboxes.
 **Get started**
 
 - [✨ Features](#-features)
+- [🏗️ Architecture](#-architecture)
 - [🧩 Modules](#-modules)
 - [🚀 Quick start](#-quick-start)
 
@@ -65,6 +66,30 @@ where tools execute:
 - 📱 **On-device store** — `aria-agent-memo` (aria memo / SQLite) keeps a local-first context copy that is interchangeable with the cloud backend behind one `ContextStore` trait.
 - 🌐 **Five-language SDKs** — JS / Python are thin clients over the cloud API; Rust / Swift / Kotlin embed the runtime in-process with no server or network.
 - 🧭 **Pluggable sandbox** — every tool container is capped by `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` and reaches the daemon through `DOCKER_HOST` / `ARIA_DOCKER_SOCKET`.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🏗️ Architecture
+
+A capability-seam agent runtime: `aria-agent-core` owns the loop while every
+capability is a replaceable provider, with cloud and native front-ends sharing the
+same `recall → model → memorize` runtime.
+
+### Tech stack
+
+![AGENT tech stack architecture](./arch.png)
+
+### Data flow
+
+A turn flows through recall, prompt assembly, token-pressure control, the model
+call, the tool pipeline and terminal events; `SessionEvent` is the single source
+of truth for both persistence and SSE streaming.
+
+![AGENT data flow](./dataflow.png)
 
 <div align="right">
 

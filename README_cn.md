@@ -24,6 +24,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 **上手**
 
 - [✨ 功能](#-功能)
+- [🏗️ 架构](#-架构)
 - [🧩 模块](#-模块)
 - [🚀 快速开始](#-快速开始)
 
@@ -64,6 +65,28 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 - 📱 **端侧存储** —— `aria-agent-memo`（aria memo / SQLite）保存 local-first 的上下文副本，与云端后端通过同一个 `ContextStore` trait 互换。
 - 🌐 **五语言 SDK** —— JS / Python 是云端 API 的薄客户端；Rust / Swift / Kotlin 把运行时嵌入进程内，无需服务端、无需网络。
 - 🧭 **可插拔 sandbox** —— 每个工具容器都受 `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` 限制，并经由 `DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 访问守护进程。
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🏗️ 架构
+
+以能力接缝组合的 agent 运行时：`aria-agent-core` 负责主循环，每项能力都是可替换的
+provider；云端与原生前端共享同一套 `recall → model → memorize` 运行时。
+
+### 技术栈
+
+![AGENT 技术栈架构](./arch_cn.png)
+
+### 数据流
+
+一轮对话依次经过召回、Prompt 组装、Token 压力检查、模型调用、工具管线与终止事件；
+`SessionEvent` 是持久化与 SSE 流式输出的单一事实来源。
+
+![AGENT 数据流](./dataflow_cn.png)
 
 <div align="right">
 
