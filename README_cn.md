@@ -37,6 +37,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 
 **架构与 SDK**
 
+- [🐋 本轮运行时（turn runtime）](#-本轮运行时turn-runtime)
 - [🌐 浏览器 sandbox](#-浏览器-sandbox)
 - [🧠 记忆图与 memo 工具族](#-记忆图与-memo-工具族)
 - [🔌 OpenAI Agents API 兼容性](#-openai-agents-api-兼容性)
@@ -80,20 +81,6 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 
 以能力接缝组合的 agent 运行时：`aria-agent-core` 负责 agent 外壳，每项能力都是可替换的
 provider；云端与原生前端共享同一套 `recall → runtime → memorize` 流程。
-
-### 本轮运行时（turn runtime）
-
-turn 循环本身就是 `agent_loop` 接缝，默认提供方是 **DeepSeek Harness**：每个会话一个
-`dsh` 子进程，经 JSON-RPC 通信，拥有独立的 `DSH_HOME` 与工作目录、白名单环境变量，并以
-池化方式复用（空闲回收）。dsh 同时执行模型调用**与它自己的工具**，所以在
-`harness = "dsh"` 下 aria 的 sandbox/工具管线不再参与本轮；aria 仍负责 recall、记忆落库、
-会话事件与标题、审批/提问桥接以及对外信封。`AGENT_HARNESS=native` 可显式切回
-内置 Rust 循环；未知取值，或选了 `dsh` 却没有可用运行时，都直接报错，绝不静默降级。
-
-```bash
-just dsh-smoke  # 脚本化假运行时：握手 + 回合帧序，离线可跑
-just dsh-e2e    # 真实一轮（需 ARIA_DSH_E2E=1 + DSH_BIN + 供应商密钥）
-```
 
 ### 技术栈
 
@@ -434,10 +421,33 @@ echo "DOCKER_GID set to $DOCKER_GID"
 
 ### E2E 测试
 
-`just e2e`（即 `cargo test -p agent-tests --test e2e_http`）将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
+所有与 E2E 相关的 `just` 命令：
+
+| 命令 | 作用 |
+|---|---|
+| `just e2e` | 运行真实 socket 的 HTTP E2E 套件（`cargo test -p agent-tests --test e2e_http`）；可选 DB/Docker 场景缺依赖时跳过。 |
+| `just dsh-smoke` | 拉起脚本化假 `dsh`，校验 JSON-RPC 握手与回合帧序（`cargo test -p aria-agent-dsh --test stdio -- --nocapture`）；离线、无需凭据。 |
+| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需 `DSH_BIN` 以及 provider 端点与密钥（`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`，如阿里云 Model Studio 的 OpenAI 兼容路由），缺依赖时明确跳过；该 `just` 任务会自动设置 `ARIA_DSH_E2E=1`。 |
+
+`just e2e` 将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
 
 - `DATABASE_URL` —— 通过两个独立构建的 router 验证 Postgres + pgvector 存储；未设置或不可达时跳过。
 - `ARIA_E2E_DOCKER=1` —— 经流式路由在真实容器中执行 `shell` 工具；需 Docker 守护进程可达且本地已有 `alpine:latest` 镜像，否则跳过。
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🐋 本轮运行时（turn runtime）
+
+turn 循环本身就是 `agent_loop` 接缝，默认提供方是 **DeepSeek Harness**：每个会话一个
+`dsh` 子进程，经 JSON-RPC 通信，拥有独立的 `DSH_HOME` 与工作目录、白名单环境变量，并以
+池化方式复用（空闲回收）。dsh 同时执行模型调用**与它自己的工具**，所以在
+`harness = "dsh"` 下 aria 的 sandbox/工具管线不再参与本轮；aria 仍负责 recall、记忆落库、
+会话事件与标题、审批/提问桥接以及对外信封。`AGENT_HARNESS=native` 可显式切回
+内置 Rust 循环；未知取值，或选了 `dsh` 却没有可用运行时，都直接报错，绝不静默降级。
 
 <div align="right">
 

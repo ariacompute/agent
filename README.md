@@ -37,6 +37,7 @@ by default, with pluggable sandboxes.
 
 **Architecture & SDK**
 
+- [🐋 Turn runtime](#-turn-runtime)
 - [🌐 Browser sandbox](#-browser-sandbox)
 - [🧠 Memory graph & memo tools](#-memory-graph--memo-tools)
 - [🔌 OpenAI Agents API compatibility](#-openai-agents-api-compatibility)
@@ -82,23 +83,6 @@ where tools execute:
 A capability-seam agent runtime: `aria-agent-core` owns the agent shell while every
 capability is a replaceable provider, with cloud and native front-ends sharing the
 same `recall → runtime → memorize` flow.
-
-### Turn runtime
-
-The turn loop is the `agent_loop` seam. Its default provider is **DeepSeek
-Harness**: one `dsh` child process per session, spoken to over JSON-RPC, with its
-own `DSH_HOME` and workspace, an allow-list environment, and a pooled runtime that
-reaps when idle. dsh executes the model call *and* its own tools, so under
-`harness = "dsh"` the aria sandbox/tool pipeline is idle; aria still owns recall,
-memory writes, session events/titles, approval + question bridging and the wire
-envelope. `AGENT_HARNESS=native` selects the built-in Rust loop instead;
-an unknown value — or `dsh` without an installed runtime — is a hard error, never
-a silent fallback.
-
-```bash
-just dsh-smoke  # scripted fake runtime: handshake + turn framing, offline
-just dsh-e2e    # one real turn (ARIA_DSH_E2E=1 + DSH_BIN + provider key)
-```
 
 ### Tech stack
 
@@ -467,10 +451,36 @@ warning, so the service always boots.
 
 ### E2E tests
 
-`just e2e` (`cargo test -p agent-tests --test e2e_http`) binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
+All E2E-oriented `just` recipes:
+
+| Command | Effect |
+|---|---|
+| `just e2e` | Run the real-socket HTTP E2E suite (`cargo test -p agent-tests --test e2e_http`); optional DB/Docker cases skip when unavailable. |
+| `just dsh-smoke` | Spawn a scripted fake `dsh` and verify the JSON-RPC handshake + turn framing (`cargo test -p aria-agent-dsh --test stdio -- --nocapture`); offline, no credentials. |
+| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs `DSH_BIN` plus a provider endpoint and key (`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`, e.g. Alibaba Model Studio's OpenAI-compatible route), and skips loudly when unset. The recipe sets `ARIA_DSH_E2E=1`. |
+
+`just e2e` binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
 
 - `DATABASE_URL` — exercises the Postgres + pgvector stores through two independently built routers; skipped when unset or unreachable.
 - `ARIA_E2E_DOCKER=1` — executes a `shell` tool in a real container via the streaming route; requires a reachable daemon and a locally cached `alpine:latest` image, otherwise skipped.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🐋 Turn runtime
+
+The turn loop is the `agent_loop` seam. Its default provider is **DeepSeek
+Harness**: one `dsh` child process per session, spoken to over JSON-RPC, with its
+own `DSH_HOME` and workspace, an allow-list environment, and a pooled runtime that
+reaps when idle. dsh executes the model call *and* its own tools, so under
+`harness = "dsh"` the aria sandbox/tool pipeline is idle; aria still owns recall,
+memory writes, session events/titles, approval + question bridging and the wire
+envelope. `AGENT_HARNESS=native` selects the built-in Rust loop instead;
+an unknown value — or `dsh` without an installed runtime — is a hard error, never
+a silent fallback.
 
 <div align="right">
 
