@@ -109,9 +109,10 @@ detail).
 `<root>/.aria/dsh/<session>` (home) and `<root>/.aria/dsh-workspaces/<session>`
 (cwd), with the id sanitised to a filesystem-safe leaf. `~/.dsh` is never
 discovered implicitly — dsh requires an explicit `DSH_HOME` and so do we. The
-child environment is an **allow-list** (`DSH_HOME`, `PATH`,
-`DEEPSEEK_BASE_URL`/`DEEPSEEK_API_KEY`, explicit extras), never the whole process
-environment.
+child environment is an **allow-list** (`DSH_HOME`, `PATH`, the `GATEWAY_*`
+values bridged into the two child env names dsh reads, explicit extras), never
+the whole process environment. There are no separate `DEEPSEEK_*` or `OPENAI_*`
+deployment variables, and no `GATEWAY_* → OPENAI_*` fallback.
 
 Cloud wiring keeps one `DshPool` per principal; the pool reuses one runtime per
 session (handshake is bounded at 30 s), caps live runtimes
@@ -156,9 +157,11 @@ pipelines together would double-execute side effects and is not supported.
 - Deployments need the runtime installed: `pip install deepseek-harness-sdk`
   (pulls `deepseek-harness-runtime-bin`) or set `DSH_BIN`. Missing binary ⇒ boot
   or first-turn failure with an install hint.
-- dsh must be pointed at a provider: `DEEPSEEK_BASE_URL` + `DEEPSEEK_API_KEY`
-  (any OpenAI-compatible endpoint, e.g. Alibaba Model Studio) and `DSH_PROVIDER`
-  when it is not `openai-compatible`.
+- dsh must be pointed at a provider: `GATEWAY_BASE_URL` + `GATEWAY_API_KEY`
+  (any OpenAI-compatible endpoint, e.g. Alibaba Model Studio), with
+  `GATEWAY_MODEL` optionally pinning the model id. The deployment bridges these
+  into dsh's child env names; `DSH_PROVIDER` is still needed when the provider
+  is not `openai-compatible`.
 - `just dsh-smoke` runs the scripted-fake-runtime tests (offline);
   `just dsh-e2e` runs one real turn against a real `dsh` and provider, gated on
   `ARIA_DSH_E2E=1`. Neither fabricates a result when the dependency is absent.

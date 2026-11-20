@@ -7,7 +7,7 @@
 # as a lean runtime image. The cloud service needs:
 #   * Postgres+pgvector (metadata: agents / runs AND context: context_fragments)
 #                                                    -> DATABASE_URL
-#   * OpenAI API    (model calls via agent-core)      -> OPENAI_API_KEY
+#   * Gateway API   (model calls via agent-core)      -> GATEWAY_API_KEY
 #
 # NOTE: conversational context lives in Postgres (`context_fragments`, pgvector),
 # so the database image must provide the `vector` extension

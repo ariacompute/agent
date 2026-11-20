@@ -1,5 +1,14 @@
 # Release notes
 
+## Unified model gateway configuration
+
+`GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` now configure model
+access for both `AGENT_HARNESS=dsh` and `native`. The separate
+`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` variables are removed, and `GATEWAY_*`
+no longer falls back to `OPENAI_*`. For dsh, the gateway values are bridged into
+its allow-listed child environment; the model id is taken from `GATEWAY_MODEL`
+when set.
+
 ## Governed execution: one egress boundary, audit, metering and credentials
 
 Every outbound request now crosses a single boundary that decides, substitutes and

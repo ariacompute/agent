@@ -1,5 +1,13 @@
 # 发布说明
 
+## 统一模型网关配置
+
+`GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` 现在同时为
+`AGENT_HARNESS=dsh` 与 `native` 提供模型配置。独立的
+`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` 已移除，`GATEWAY_*` 也不再回退到
+`OPENAI_*`。dsh 会通过其子进程白名单接收这些网关值；设置 `GATEWAY_MODEL` 时，
+模型 id 由它决定。
+
 ## 受控执行：单一出站边界、审计、计量与凭据
 
 每个出站请求现在都经过同一条边界：判定、替换、记录（ADR-0020）。开启

@@ -245,8 +245,7 @@ cp .env.example .env
 | `DSH_HOME_ROOT` | `.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories. |
 | `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
 | `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | _(unset)_ | OpenAI-compatible provider route handed to the harness (e.g. Alibaba Model Studio). Forwarded explicitly; the child environment is an allow-list. |
-| `OPENAI_API_KEY` | _(empty)_ | OpenAI key for model calls. Used by the `native` runtime; leave empty only for stub/offline runs. |
+| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com/v1` / _(empty)_ / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. Base URL must include `/v1`; no `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
@@ -457,7 +456,7 @@ All E2E-oriented `just` recipes:
 |---|---|
 | `just e2e` | Run the real-socket HTTP E2E suite (`cargo test -p agent-tests --test e2e_http`); optional DB/Docker cases skip when unavailable. |
 | `just dsh-smoke` | Spawn a scripted fake `dsh` and verify the JSON-RPC handshake + turn framing (`cargo test -p aria-agent-dsh --test stdio -- --nocapture`); offline, no credentials. |
-| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs `DSH_BIN` plus a provider endpoint and key (`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`, e.g. Alibaba Model Studio's OpenAI-compatible route), and skips loudly when unset. The recipe sets `ARIA_DSH_E2E=1`. |
+| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs `DSH_BIN` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`), and skips loudly when unset. The recipe sets `ARIA_DSH_E2E=1`. |
 
 `just e2e` binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
 

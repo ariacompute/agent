@@ -5,8 +5,8 @@
 //! ```text
 //! ARIA_DSH_E2E=1 \
 //! DSH_BIN=/path/to/dsh \
-//! DEEPSEEK_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 \
-//! DEEPSEEK_API_KEY=sk-… \
+//! GATEWAY_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 \
+//! GATEWAY_API_KEY=sk-… \
 //! cargo test -p aria-agent-dsh --test e2e_live -- --nocapture
 //! ```
 //!
@@ -17,6 +17,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use agent_core::gateway_model;
 use aria_agent_dsh::{no_bridge, DshConfig, DshRuntime, HarnessRuntime};
 use serde_json::Value;
 
@@ -30,12 +31,14 @@ async fn a_real_dsh_turn_completes() {
         eprintln!("skip: set ARIA_DSH_E2E=1 to run the live DeepSeek Harness test");
         return;
     }
-    if env("DEEPSEEK_API_KEY").is_none() {
-        eprintln!("skip: DEEPSEEK_API_KEY is not set (third-party compatible endpoint key)");
+    if env("GATEWAY_API_KEY").is_none() {
+        eprintln!("skip: GATEWAY_API_KEY is not set (OpenAI-compatible gateway key)");
         return;
     }
     let bin = env("DSH_BIN").unwrap_or_else(|| "dsh".to_string());
-    let model = env("DSH_E2E_MODEL").unwrap_or_else(|| "deepseek-v4".to_string());
+    let model = gateway_model()
+        .or_else(|| env("DSH_E2E_MODEL"))
+        .unwrap_or_else(|| "deepseek-v4".to_string());
     let root = tempfile::tempdir().expect("tempdir");
 
     let mut cfg = DshConfig::for_session(root.path(), "e2e-session", &model)
@@ -46,13 +49,12 @@ async fn a_real_dsh_turn_completes() {
     if let Some(provider) = env("DSH_PROVIDER") {
         cfg.provider = provider;
     }
-    // The child env is an allow-list, so the provider route is forwarded here.
-    if let Some(base) = env("DEEPSEEK_BASE_URL") {
-        cfg = cfg.with_env("DEEPSEEK_BASE_URL", base);
-    }
-    if let Some(key) = env("DEEPSEEK_API_KEY") {
-        cfg = cfg.with_env("DEEPSEEK_API_KEY", key);
-    }
+    // The child env is an allow-list: bridge the same GATEWAY_* values the
+    // native harness uses into the names dsh reads.
+    cfg = cfg.with_gateway_env(
+        env("GATEWAY_BASE_URL").unwrap_or_default().as_str(),
+        env("GATEWAY_API_KEY").unwrap_or_default().as_str(),
+    );
 
     let runtime = DshRuntime::connect(cfg, no_bridge())
         .await

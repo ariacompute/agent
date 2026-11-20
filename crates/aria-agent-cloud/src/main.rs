@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::seams::{ApprovalBroker, AutoAllow, DenyAll, NoQuestions, PermissionPreset};
-use agent_core::{ModelClient, OpenAiModel};
+use agent_core::{gateway_api_key, gateway_base_url, gateway_model, ModelClient, OpenAiModel};
 use agent_sandbox::Sandbox;
 use aria_agent_cloud::app::{AppState, DEFAULT_MODEL};
 use aria_agent_cloud::cli_config;
@@ -275,6 +275,10 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let pool_max = env_u64("DSH_POOL_MAX", 8) as usize;
         let idle = Duration::from_secs(env_u64("DSH_IDLE_TTL_SEC", 900));
         let bin = std::env::var("DSH_BIN").ok();
+        // Both harnesses are configured from the same GATEWAY_* values.
+        let model_override = gateway_model();
+        let gateway_base = gateway_base_url();
+        let gateway_key = gateway_api_key();
         // One pool per tenant: session homes never cross tenants (AGENTS rule 7).
         let pools: Arc<std::sync::Mutex<HashMap<String, Arc<DshPool>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -294,23 +298,26 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     cfg.session.clone(),
                     preset,
                 ));
+                let dsh_model = model_override
+                    .as_deref()
+                    .unwrap_or(cfg.model.as_str())
+                    .to_string();
                 let mut dsh = DshConfig::for_session(
                     &PathBuf::from(&dsh_root).join(&tenant),
                     &cfg.session,
-                    &cfg.model,
+                    &dsh_model,
                 )
                 .with_permission_mode(dsh_permission_mode(preset));
                 if let Some(bin) = &bin {
                     dsh = dsh.with_bin(bin.clone());
                 }
-                // The child env is an allow-list: forward the provider route
-                // explicitly instead of inheriting the process environment.
-                if let Ok(base) = std::env::var("DEEPSEEK_BASE_URL") {
-                    dsh = dsh.with_env("DEEPSEEK_BASE_URL", base);
-                }
-                if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-                    dsh = dsh.with_env("DEEPSEEK_API_KEY", key);
-                }
+                // The child env is an allow-list: bridge the deployment's
+                // GATEWAY_* values into the names dsh reads, never inheriting
+                // the parent environment.
+                dsh = dsh.with_gateway_env(
+                    gateway_base.as_deref().unwrap_or_default(),
+                    gateway_key.as_str(),
+                );
                 Arc::new(DshPool::new(dsh, pool_max, idle, bridge))
             });
             Arc::new(DshAgentLoop::new(pool.clone()))

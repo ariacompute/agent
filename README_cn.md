@@ -240,8 +240,7 @@ cp .env.example .env
 | `DSH_HOME_ROOT` | `.aria/dsh` | 每租户/每会话 `DSH_HOME` 的根目录。 |
 | `DSH_POOL_MAX` | `8` | 每租户保留的活跃运行时上限。 |
 | `DSH_IDLE_TTL_SEC` | `900` | 池化运行时被回收前的空闲窗口（会话可凭 `DSH_HOME` 续用）。 |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | _(未设置)_ | 交给 harness 的 OpenAI 兼容端点（如阿里云 Model Studio）。仅显式转发；子进程环境为白名单。 |
-| `OPENAI_API_KEY` | _(空)_ | OpenAI 密钥，供 `native` 运行时调用模型；仅 stub/离线可留空。 |
+| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com/v1` / _(空)_ / `ariacompute/ariamodel` | **两种运行时（`dsh` 与 `native`）共用**的模型网关配置。Base URL 必须含 `/v1`；不再回退 `OPENAI_*`。`dsh` 通过子进程白名单接收这些值。仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
 | `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
@@ -427,7 +426,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
 |---|---|
 | `just e2e` | 运行真实 socket 的 HTTP E2E 套件（`cargo test -p agent-tests --test e2e_http`）；可选 DB/Docker 场景缺依赖时跳过。 |
 | `just dsh-smoke` | 拉起脚本化假 `dsh`，校验 JSON-RPC 握手与回合帧序（`cargo test -p aria-agent-dsh --test stdio -- --nocapture`）；离线、无需凭据。 |
-| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需 `DSH_BIN` 以及 provider 端点与密钥（`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`，如阿里云 Model Studio 的 OpenAI 兼容路由），缺依赖时明确跳过；该 `just` 任务会自动设置 `ARIA_DSH_E2E=1`。 |
+| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需 `DSH_BIN` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`），缺依赖时明确跳过；该 `just` 任务会自动设置 `ARIA_DSH_E2E=1`。 |
 
 `just e2e` 将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
 

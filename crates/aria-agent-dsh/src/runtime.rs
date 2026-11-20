@@ -92,6 +92,21 @@ impl DshConfig {
         self
     }
 
+    /// Bridge the deployment's unified `GATEWAY_*` config into the names the
+    /// external dsh binary reads in its allow-listed child environment.
+    ///
+    /// The `DEEPSEEK_*` keys here are dsh's own process contract, not aria
+    /// configuration variables; callers only supply gateway values.
+    pub fn with_gateway_env(mut self, base_url: &str, api_key: &str) -> Self {
+        if !base_url.is_empty() {
+            self = self.with_env("DEEPSEEK_BASE_URL", base_url);
+        }
+        if !api_key.is_empty() {
+            self = self.with_env("DEEPSEEK_API_KEY", api_key);
+        }
+        self
+    }
+
     /// Replace the permission preset.
     pub fn with_permission_mode(mut self, mode: impl Into<String>) -> Self {
         self.permission_mode = mode.into();
@@ -441,6 +456,32 @@ mod tests {
         assert!(env.iter().any(|(k, v)| k == "DSH_X" && v == "1"));
         assert!(env.iter().any(|(k, _)| k == "DSH_HOME"));
         assert!(env.iter().any(|(k, _)| k == "PATH"));
+    }
+
+    #[test]
+    fn gateway_config_is_mapped_into_the_child_allow_list() {
+        let cfg = DshConfig::for_session(Path::new("/srv"), "s1", "m")
+            .with_gateway_env("https://gateway.example/v1", "gw-key");
+        assert_eq!(
+            cfg.extra_env,
+            vec![
+                (
+                    "DEEPSEEK_BASE_URL".to_string(),
+                    "https://gateway.example/v1".to_string()
+                ),
+                ("DEEPSEEK_API_KEY".to_string(), "gw-key".to_string()),
+            ]
+        );
+        let env = cfg.child_env();
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "DEEPSEEK_BASE_URL" && v == "https://gateway.example/v1"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "DEEPSEEK_API_KEY" && v == "gw-key"));
+
+        let empty = DshConfig::for_session(Path::new("/srv"), "s1", "m").with_gateway_env("", "");
+        assert!(empty.extra_env.is_empty());
     }
 
     /// Fake runtime that counts prompts and shutdowns.

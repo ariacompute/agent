@@ -59,6 +59,40 @@ fn model_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Model(e.to_string())
 }
 
+/// Read a trimmed, non-empty environment value.
+fn trimmed_env(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) => {
+            let v = v.trim().to_string();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Deployment-wide model gateway configuration, shared by both turn runtimes.
+///
+/// `native` uses these values directly in `OpenAiModel`; `dsh` receives the same
+/// values through its child-process allow-list. There is deliberately no
+/// fallback to `OPENAI_*` names.
+pub fn gateway_model() -> Option<String> {
+    trimmed_env("GATEWAY_MODEL")
+}
+
+/// Gateway base URL; it must include the `/v1` prefix.
+pub fn gateway_base_url() -> Option<String> {
+    trimmed_env("GATEWAY_BASE_URL")
+}
+
+/// Gateway API key; empty when unset.
+pub fn gateway_api_key() -> String {
+    trimmed_env("GATEWAY_API_KEY").unwrap_or_default()
+}
+
 /// A single model request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -267,24 +301,20 @@ mod openai_impl {
 
     impl OpenAiModel {
         pub fn new(model: &str) -> Self {
-            // Model backend configuration. Prefer the aria-compute GATEWAY_* vars
-            // (used by the standalone cloud deployment); fall back to the raw
-            // OPENAI_* vars (used when the playground injects the gateway into the
-            // agent sandbox). The gateway is OpenAI-compatible. Its base URL MUST
-            // include the `/v1` prefix because async-openai appends the resource
-            // path to it (final URL = base + "/chat/completions").
+            // Both turn runtimes share the GATEWAY_* configuration. The gateway
+            // is OpenAI-compatible; its base URL MUST include `/v1` because
+            // async-openai appends the resource path (final URL = base +
+            // "/chat/completions"). OPENAI_* names are not consulted.
             Self::from_values(
                 model,
-                trimmed_env("GATEWAY_MODEL").or_else(|| trimmed_env("OPENAI_MODEL")),
-                trimmed_env("GATEWAY_BASE_URL").or_else(|| trimmed_env("OPENAI_BASE_URL")),
-                trimmed_env("GATEWAY_API_KEY")
-                    .or_else(|| trimmed_env("OPENAI_API_KEY"))
-                    .unwrap_or_default(),
+                gateway_model(),
+                gateway_base_url(),
+                gateway_api_key(),
             )
         }
 
         /// Build from already-resolved values; the environment half lives in
-        /// [`Self::new`] so the fallbacks are testable without touching it.
+        /// [`Self::new`] so resolution is testable without touching it.
         fn from_values(
             model: &str,
             model_override: Option<String>,
@@ -304,22 +334,6 @@ mod openai_impl {
                 client: Client::with_config(config),
                 model,
             }
-        }
-    }
-
-    /// Reads an env var, trims surrounding whitespace, and returns `Some` only
-    /// when the result is non-empty.
-    fn trimmed_env(key: &str) -> Option<String> {
-        match std::env::var(key) {
-            Ok(v) => {
-                let v = v.trim().to_string();
-                if v.is_empty() {
-                    None
-                } else {
-                    Some(v)
-                }
-            }
-            Err(_) => None,
         }
     }
 
@@ -774,9 +788,7 @@ mod openai_impl {
                     .await;
                 let _guard = EnvGuard::apply(&[
                     ("GATEWAY_BASE_URL", Some(&format!("{}/v1", server.uri()))),
-                    ("OPENAI_BASE_URL", None),
-                    ("OPENAI_MODEL", Some("fallback-model")),
-                    ("GATEWAY_MODEL", None),
+                    ("GATEWAY_MODEL", Some("gateway-model")),
                 ]);
                 let model = OpenAiModel::new("ignored");
                 let err = model.complete(&request()).await.unwrap_err();
@@ -903,25 +915,42 @@ mod openai_impl {
             }
 
             #[test]
-            fn blank_env_values_fall_through_to_the_next_source() {
-                // Blank GATEWAY_* values must fall back to the OPENAI_* pair, and an
-                // explicit model override must win over the constructor argument.
+            fn gateway_config_is_resolved_from_gateway_env_only() {
+                let _guard = EnvGuard::apply(&[
+                    ("GATEWAY_BASE_URL", Some("  https://gw.example/v1  ")),
+                    ("GATEWAY_API_KEY", Some("  gw-key  ")),
+                    ("GATEWAY_MODEL", Some("  gw-model  ")),
+                    ("OPENAI_BASE_URL", Some("http://127.0.0.1:1/v1/")),
+                    ("OPENAI_API_KEY", Some("openai-key")),
+                    ("OPENAI_MODEL", Some("openai-model")),
+                ]);
+                assert_eq!(
+                    crate::gateway_base_url().as_deref(),
+                    Some("https://gw.example/v1")
+                );
+                assert_eq!(crate::gateway_api_key(), "gw-key");
+                assert_eq!(crate::gateway_model().as_deref(), Some("gw-model"));
+            }
+
+            #[test]
+            fn blank_gateway_env_does_not_fall_back_to_openai_env() {
                 let _guard = EnvGuard::apply(&[
                     ("GATEWAY_BASE_URL", Some("   ")),
+                    ("GATEWAY_API_KEY", Some("   ")),
+                    ("GATEWAY_MODEL", None),
                     ("OPENAI_BASE_URL", Some("http://127.0.0.1:1/v1/")),
-                    ("GATEWAY_MODEL", Some("")),
+                    ("OPENAI_API_KEY", Some("openai-key")),
                     ("OPENAI_MODEL", Some("openai-model")),
-                    ("GATEWAY_API_KEY", None),
-                    ("OPENAI_API_KEY", None),
                 ]);
+                assert_eq!(crate::gateway_base_url(), None);
+                assert_eq!(crate::gateway_api_key(), "");
+                assert_eq!(crate::gateway_model(), None);
                 let model = OpenAiModel::new("ctor-model");
-                assert_eq!(model.model, "openai-model");
+                assert_eq!(model.model, "ctor-model");
                 assert_eq!(
-                    trimmed_env("OPENAI_BASE_URL").as_deref(),
-                    Some("http://127.0.0.1:1/v1/")
+                    crate::trimmed_env("OPENAI_MODEL").as_deref(),
+                    Some("openai-model")
                 );
-                assert_eq!(trimmed_env("GATEWAY_BASE_URL"), None);
-                assert_eq!(trimmed_env("__ARIA_UNSET_VAR__"), None);
             }
         }
     }

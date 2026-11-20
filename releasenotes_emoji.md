@@ -2,7 +2,7 @@
 
 ## 🛡️ 受控执行：出站、审计、计量与凭据 🔐
 
-每个出站请求都经过同一条边界：判定 → 替换 `${credential}` → 审计（ADR-0020）。开启 `AGENT_EGRESS_ENFORCEMENT=network` 后，这条边界成为唯一出口：sandbox 在 `internal` 网络上运行，唯一可达的对端是不持任何密钥的代理（ADR-0024）。
+每个出站请求都经过同一条边界：判定 → 替换 `${credential}` → 审计。开启 `AGENT_EGRESS_ENFORCEMENT=network` 后，这条边界成为唯一出口：sandbox 在 `internal` 网络上运行，唯一可达的对端是不持任何密钥的代理。
 
 ### 🚦 出站
 
@@ -35,7 +35,7 @@
 
 ## ☁️ Rust / Swift / Kotlin SDK 改为云端 API 客户端 🚀
 
-UniFFI 表面不再内嵌运行时：`ariacompute-agent` 现在是 beta Agents API 的薄 HTTP 客户端，词汇与 JS/Python SDK 一致。设备二进制里没有循环、sandbox、工具族，也不需要模型密钥（ADR-0020）。
+UniFFI 表面不再内嵌运行时：`ariacompute-agent` 现在是 beta Agents API 的薄 HTTP 客户端，词汇与 JS/Python SDK 一致。设备二进制里没有循环、sandbox、工具族，也不需要模型密钥。
 
 ### 🧩 新接口
 
