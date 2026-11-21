@@ -83,7 +83,7 @@ pub fn gateway_model() -> Option<String> {
     trimmed_env("GATEWAY_MODEL")
 }
 
-/// Gateway base URL; it must include the `/v1` prefix.
+/// Shared gateway root; each runtime appends its own API prefix.
 pub fn gateway_base_url() -> Option<String> {
     trimmed_env("GATEWAY_BASE_URL")
 }
@@ -662,6 +662,12 @@ mod openai_impl {
                 assert_eq!(model.model, "gpt-4o");
                 let model = OpenAiModel::from_values("fallback", None, None, "k".into());
                 assert_eq!(model.model, "fallback");
+            }
+
+            #[test]
+            fn empty_gateway_base_is_not_normalized() {
+                assert_eq!(super::openai_api_base(None), None);
+                assert_eq!(super::openai_api_base(Some("   ".into())), None);
             }
 
             #[tokio::test]
