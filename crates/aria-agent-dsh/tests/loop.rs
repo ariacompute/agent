@@ -233,6 +233,54 @@ async fn a_failed_turn_and_a_silent_runtime_both_fail_the_turn() {
 }
 
 #[tokio::test]
+async fn structured_failure_detail_reaches_the_terminal_error() {
+    let attempt_failure = frame(
+        "session.event",
+        json!({"sessionId": "s3", "event": {"type": "assistant/attempt", "data": {"stream": [
+            {"chunk": {"reason": {"kind": "error", "failure": {
+                "code": "TRANSPORT", "message": "DeepSeek Messages transport failed"
+            }}}}
+        ]}}}),
+    );
+
+    // A reason=error terminal frame keeps fail-closed semantics but carries the
+    // detail captured from the earlier assistant/attempt frame.
+    let failed = harness(vec![
+        attempt_failure.clone(),
+        frame(
+            "session.event",
+            json!({"sessionId": "s3", "event": {"type": "turn/end",
+                "data": {"reason": {"kind": "error"}}}}),
+        ),
+    ]);
+    let events = collect(&failed, context("s3"), "hi").await;
+    match events.last() {
+        Some(Err(CoreError::Model(message))) => {
+            assert!(message.contains("dsh finished the turn with reason `error`"));
+            assert!(
+                message.contains("assistant/attempt: TRANSPORT DeepSeek Messages transport failed"),
+                "{message}"
+            );
+        }
+        other => panic!("expected enriched model error, got {other:?}"),
+    }
+
+    // An explicit error notification gets the same structured detail appended.
+    let explicit = harness(vec![
+        attempt_failure,
+        frame("error", json!({"message": "quota exceeded"})),
+    ]);
+    let events = collect(&explicit, context("s4"), "hi").await;
+    match events.last() {
+        Some(Err(CoreError::Model(message))) => {
+            assert!(message.starts_with("quota exceeded: "), "{message}");
+            assert!(message.contains("TRANSPORT"), "{message}");
+        }
+        other => panic!("expected enriched model error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn protocol_violations_and_errors_are_surfaced() {
     let broken = harness(vec![
         frame("turn/end", json!({"reason": {}})),

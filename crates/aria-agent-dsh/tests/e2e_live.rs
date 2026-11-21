@@ -18,33 +18,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use agent_core::gateway_model;
-use aria_agent_dsh::event_map::{self, Mapped};
+use aria_agent_dsh::event_map::{self, failure_detail, Mapped};
 use aria_agent_dsh::{no_bridge, DshConfig, DshRuntime, HarnessRuntime};
 use serde_json::{json, Value};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
-}
-
-fn failure_detail(frame: &Value) -> Option<String> {
-    let params = frame.get("params")?;
-    let event = params.get("event").unwrap_or(params);
-    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-    let failure = if kind == "assistant/attempt" {
-        event
-            .get("data")?
-            .get("stream")?
-            .as_array()?
-            .iter()
-            .find_map(|chunk| chunk.get("chunk")?.get("reason")?.get("failure"))?
-    } else if kind == "turn/end" {
-        event.get("data")?.get("reason")?.get("failure")?
-    } else {
-        params.get("reason")?.get("failure")?
-    };
-    let code = failure.get("code").and_then(Value::as_str).unwrap_or("");
-    let message = failure.get("message").and_then(Value::as_str).unwrap_or("");
-    Some(format!("{kind}: {code} {message}").trim().to_string())
 }
 
 #[test]

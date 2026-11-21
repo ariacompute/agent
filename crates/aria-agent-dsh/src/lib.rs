@@ -128,7 +128,11 @@ impl AgentLoop for DshAgentLoop {
             let recorder = recorder;
             let mut text = String::new();
             let mut terminal = false;
+            let mut last_failure: Option<String> = None;
             while let Some(frame) = rx.recv().await {
+                if let Some(detail) = event_map::failure_detail(&frame) {
+                    last_failure = Some(detail);
+                }
                 for mapped in event_map::map_notification(&frame) {
                     match mapped {
                         Mapped::Step { phase, label } => {
@@ -183,7 +187,10 @@ impl AgentLoop for DshAgentLoop {
                         Mapped::TurnEnd { reason } => {
                             terminal = true;
                             if reason == "error" {
-                                let message = "dsh finished the turn with reason `error`".to_string();
+                                let message = with_failure_detail(
+                                    "dsh finished the turn with reason `error`",
+                                    last_failure.take(),
+                                );
                                 let mut guard = recorder.lock().await;
                                 guard.push(SessionEvent::TurnFailed {
                                     turn_id: turn_id.clone(),
@@ -204,6 +211,7 @@ impl AgentLoop for DshAgentLoop {
                         }
                         Mapped::TurnFailed { message } => {
                             terminal = true;
+                            let message = with_failure_detail(message, last_failure.take());
                             let mut guard = recorder.lock().await;
                             guard.push(SessionEvent::TurnFailed {
                                 turn_id: turn_id.clone(),
@@ -244,6 +252,18 @@ impl AgentLoop for DshAgentLoop {
             }
         };
         Ok(Box::pin(stream))
+    }
+}
+
+/// Append the last structured dsh failure detail to a terminal error message.
+/// Details already present in the base message are not repeated.
+fn with_failure_detail(base: impl Into<String>, detail: Option<String>) -> String {
+    let base = base.into();
+    match detail {
+        Some(detail) if !detail.is_empty() && !base.contains(&detail) => {
+            format!("{base}: {detail}")
+        }
+        _ => base,
     }
 }
 

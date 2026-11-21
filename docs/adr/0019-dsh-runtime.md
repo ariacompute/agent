@@ -94,6 +94,14 @@ Ordering invariants are preserved (`Usage` before `Token` before `Done`), the
 stream is bounded (64-slot channel), and a runtime that closes without
 `turn/end` fails the turn instead of yielding an empty answer.
 
+When a turn fails, `event_map::failure_detail` extracts the bounded
+`reason.failure.code/message` from `assistant/attempt`, `turn/end`, or older
+`params.reason` frames. `DshAgentLoop` appends the latest detail to
+`CoreError::Model`, which the cloud surfaces as `agent.turn.failed.error.message`.
+`error` is never rewritten as `Done`; when dsh provides no detail the previous
+generic message is kept. Details are capped at 512 characters so provider
+payload fragments cannot flood SSE errors.
+
 ### 4. Approvals and questions go through the seams
 
 `approval/request` → `ApprovalBroker::decide` → `{"decision":"allow"|"deny"}`;
@@ -137,6 +145,11 @@ pipelines together would double-execute side effects and is not supported.
 - **`SessionEvent` payloads are mapped defensively.** Unknown frames are ignored;
   a terminal frame missing `reason.kind` is a protocol error rather than an
   invented finish reason.
+- **Provider compatibility is not abstracted away.** The bundled
+  `deepseek-official` adapter rejects `redacted_thinking` blocks emitted by some
+  gateway reasoning models with `UNSUPPORTED_CONTENT`. Use `AGENT_HARNESS=native`
+  for those models, or a dsh build whose adapter supports them; the enriched
+  error reports the provider failure instead of masking it.
 - **`AGENT_LOOP` keeps its historical key name**; dsh's `agentLoop` spelling is
   accepted via `ALIASES` (`approval`, `terminals`, `spillStore`, …), and new
   dsh seam keys/service roles were added to the manifest instead of renaming.

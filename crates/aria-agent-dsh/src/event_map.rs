@@ -184,6 +184,64 @@ fn usage_of(data: &Value) -> Option<Mapped> {
     })
 }
 
+/// Keep provider failure details bounded: a message may carry URLs or long
+/// payload fragments, and it ends up in SSE errors visible to SDK callers.
+const FAILURE_DETAIL_MAX_CHARS: usize = 512;
+
+/// Extract a bounded, human-readable failure detail from one dsh notification.
+///
+/// dsh reports failures in three shapes: `assistant/attempt` stream chunks,
+/// the terminal `turn/end` reason, and older builds that put `reason` directly
+/// under `params`. Unknown shapes return `None` so callers keep their generic
+/// fail-closed message.
+pub fn failure_detail(frame: &Value) -> Option<String> {
+    let params = frame.get("params")?;
+    let event = params.get("event").unwrap_or(params);
+    let kind = event
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| frame.get("method").and_then(Value::as_str))
+        .unwrap_or("");
+    let legacy_failure = || params.get("reason")?.get("failure");
+    let failure = match kind {
+        "assistant/attempt" => event
+            .get("data")
+            .and_then(|data| data.get("stream"))
+            .and_then(Value::as_array)
+            .and_then(|chunks| {
+                chunks
+                    .iter()
+                    .find_map(|chunk| chunk.get("chunk")?.get("reason")?.get("failure"))
+            })
+            .or_else(legacy_failure),
+        "turn/end" => event
+            .get("data")
+            .and_then(|data| data.get("reason"))
+            .and_then(|reason| reason.get("failure"))
+            .or_else(legacy_failure),
+        _ => legacy_failure(),
+    }?;
+    let code = failure.get("code").and_then(Value::as_str).unwrap_or("");
+    let message = failure.get("message").and_then(Value::as_str).unwrap_or("");
+    let mut body = [code, message]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if body.is_empty() {
+        return None;
+    }
+    if !kind.is_empty() && kind != "session.event" {
+        body = format!("{kind}: {body}");
+    }
+    let truncated = body.chars().count() > FAILURE_DETAIL_MAX_CHARS;
+    let mut out: String = body.chars().take(FAILURE_DETAIL_MAX_CHARS).collect();
+    if truncated {
+        out.push('…');
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +444,67 @@ mod tests {
         assert_eq!(text_of(&json!({})), "");
         assert_eq!(string_at(&json!({"a": {"b": 1}}), &["a", "b"]), None);
         assert_eq!(string_at(&json!({"a": "x"}), &["a"]).as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn failure_detail_extracts_every_dsh_shape() {
+        let attempt = json!({
+            "method": "session.event",
+            "params": {"event": {"type": "assistant/attempt", "data": {"stream": [
+                {"chunk": {"reason": {"kind": "error", "failure": {
+                    "code": "TRANSPORT", "message": "DeepSeek Messages transport failed"
+                }}}}
+            ]}}}
+        });
+        assert_eq!(
+            failure_detail(&attempt).as_deref(),
+            Some("assistant/attempt: TRANSPORT DeepSeek Messages transport failed")
+        );
+
+        let turn_end = json!({
+            "method": "session.event",
+            "params": {"event": {"type": "turn/end", "data": {"reason": {"kind": "error",
+                "failure": {"code": "RATE_LIMIT", "message": "quota exhausted"}}}}}
+        });
+        assert_eq!(
+            failure_detail(&turn_end).as_deref(),
+            Some("turn/end: RATE_LIMIT quota exhausted")
+        );
+
+        let legacy = json!({
+            "method": "turn/end",
+            "params": {"reason": {"kind": "error", "failure": {
+                "code": "MODEL", "message": "bad request"
+            }}}
+        });
+        assert_eq!(
+            failure_detail(&legacy).as_deref(),
+            Some("turn/end: MODEL bad request")
+        );
+    }
+
+    #[test]
+    fn failure_detail_is_bounded_and_ignores_unknown_shapes() {
+        let long = "x".repeat(1_000);
+        let frame = json!({
+            "method": "session.event",
+            "params": {"event": {"type": "turn/end", "data": {"reason": {"kind": "error",
+                "failure": {"code": "LONG", "message": long}}}}}
+        });
+        let detail = failure_detail(&frame).expect("detail");
+        assert_eq!(detail.chars().count(), FAILURE_DETAIL_MAX_CHARS + 1);
+        assert!(detail.ends_with('…'));
+
+        assert_eq!(
+            failure_detail(&json!({"method": "turn/start", "params": {}})),
+            None
+        );
+        assert_eq!(
+            failure_detail(&json!({
+                "method": "session.event",
+                "params": {"event": {"type": "turn/end", "data": {"reason": {"kind": "error"}}}}
+            })),
+            None
+        );
     }
 }
