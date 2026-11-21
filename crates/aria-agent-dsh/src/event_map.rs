@@ -506,5 +506,14 @@ mod tests {
             })),
             None
         );
+        assert_eq!(
+            failure_detail(&json!({
+                "method": "session.event",
+                "params": {"event": {"type": "turn/end", "data": {"reason": {
+                    "kind": "error", "failure": {"code": "", "message": ""}
+                }}}}
+            })),
+            None
+        );
     }
 }
