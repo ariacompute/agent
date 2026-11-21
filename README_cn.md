@@ -426,7 +426,21 @@ echo "DOCKER_GID set to $DOCKER_GID"
 |---|---|
 | `just e2e` | 运行真实 socket 的 HTTP E2E 套件（`cargo test -p agent-tests --test e2e_http`）；可选 DB/Docker 场景缺依赖时跳过。 |
 | `just dsh-smoke` | 拉起脚本化假 `dsh`，校验 JSON-RPC 握手与回合帧序（`cargo test -p aria-agent-dsh --test stdio -- --nocapture`）；离线、无需凭据。 |
-| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需 `DSH_BIN` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`），缺依赖时明确跳过；该 `just` 任务会自动设置 `ARIA_DSH_E2E=1`。 |
+| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需 `.env` 中的 `DSH_BIN` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`），缺依赖时明确跳过；该 `just` 任务会自动设置 `ARIA_DSH_E2E=1` 并 source `.env`。 |
+
+`just dsh-e2e` 从 `.env` 读取 `DSH_BIN` 与 `GATEWAY_*`。recipe 自身会 source
+`.env`，也可以在 shell 中显式加载，或让 `just` 加载：
+
+```bash
+set -a; . ./.env; set +a; just dsh-e2e
+# 或
+just --dotenv-path .env dsh-e2e
+```
+
+`set -a` 会把 `.env` 中的赋值导出，使 `cargo test` 子进程能读到
+`GATEWAY_API_KEY`；`--dotenv-path` 则让 `just` 把同一文件加载进 recipe 环境。
+若两者都不用，测试会打印 `skip: GATEWAY_API_KEY is not set` 并返回 `ok` ——
+这是跳过，不是通过。
 
 `just e2e` 将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧、工具调用、租户隔离、记忆与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
 

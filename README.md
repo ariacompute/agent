@@ -456,7 +456,22 @@ All E2E-oriented `just` recipes:
 |---|---|
 | `just e2e` | Run the real-socket HTTP E2E suite (`cargo test -p agent-tests --test e2e_http`); optional DB/Docker cases skip when unavailable. |
 | `just dsh-smoke` | Spawn a scripted fake `dsh` and verify the JSON-RPC handshake + turn framing (`cargo test -p aria-agent-dsh --test stdio -- --nocapture`); offline, no credentials. |
-| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs `DSH_BIN` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`), and skips loudly when unset. The recipe sets `ARIA_DSH_E2E=1`. |
+| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs `DSH_BIN` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`) from `.env`, and skips loudly when unset. The recipe sets `ARIA_DSH_E2E=1` and sources `.env`. |
+
+`just dsh-e2e` reads `DSH_BIN` and `GATEWAY_*` from `.env`. The recipe sources
+`.env` itself, but you can also load it explicitly in the shell or let `just`
+load it:
+
+```bash
+set -a; . ./.env; set +a; just dsh-e2e
+# or
+just --dotenv-path .env dsh-e2e
+```
+
+`set -a` exports every assignment in `.env` so the `cargo test` child process
+sees `GATEWAY_API_KEY`; `--dotenv-path` makes `just` load the same file into the
+recipe environment. Without one of these, the test prints
+`skip: GATEWAY_API_KEY is not set` and returns `ok` — that is a skip, not a pass.
 
 `just e2e` binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
 
