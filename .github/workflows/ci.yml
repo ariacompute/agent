@@ -84,6 +84,8 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun test
+          bun run typecheck
+          bun run build
 
       - name: Python SDK tests
         working-directory: sdk/python
