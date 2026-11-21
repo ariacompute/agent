@@ -652,7 +652,9 @@ async for event in streamed.events:
 something to run out of the box. Deployments seeded with the previous default
 (`playground-demo`) are renamed in place on the next boot. List the agents
 visible to your key with `GET /v1/agents` (admins see every agent, tenants
-only their own).
+only their own). An SDK that references an unknown agent **name** creates that
+agent on first session creation; an explicit unknown `agent_id` still returns
+404 instead of silently minting a new one.
 
 <div align="right">
 

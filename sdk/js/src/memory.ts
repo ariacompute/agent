@@ -158,11 +158,11 @@ export class CloudMemoryStore implements MemoryStore {
 
   async get(key: string): Promise<string | null> {
     const resolved = resolveClient(this.client);
-    const res = await getJson<{ value?: string | null }>(
+    const res = await getJson<{ content?: string | null }>(
       resolved,
       `${this.base()}/${encodeURIComponent(key)}`,
     );
-    return res.value ?? null;
+    return res.content ?? null;
   }
 }
 

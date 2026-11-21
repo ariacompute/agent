@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use crate::app::{build_agent, build_sse_stream, AppState};
 use crate::auth::{Principal, PrincipalKind};
-use crate::store::{ItemRow, SessionRow, TurnRow};
+use crate::store::{agent_from_request, ItemRow, SessionRow, TurnRow};
 use crate::types::{
-    Agent, AgentSession, CreateRelationRequest, CreateSessionRequest, GraphRetrieveResponse,
-    ListResponse, MemoryItem, PutMemoryRequest, RelationDeleted, RelationGraphQuery, RelationItem,
-    RelationListParams, RetrieveTraceWire, ScoredMemoryItem, SessionAgent, SessionDeleted,
-    SessionInputEvent, SessionItem, SessionTitle, SessionTurn, Subagent, UpdateSessionRequest,
-    ITEM_OBJECT, SESSION_OBJECT, SESSION_TITLE_OBJECT, TURN_OBJECT,
+    Agent, AgentSession, CreateAgentRequest, CreateRelationRequest, CreateSessionRequest,
+    GraphRetrieveResponse, ListResponse, MemoryItem, PutMemoryRequest, RelationDeleted,
+    RelationGraphQuery, RelationItem, RelationListParams, RetrieveTraceWire, ScoredMemoryItem,
+    SessionAgent, SessionDeleted, SessionInputEvent, SessionItem, SessionTitle, SessionTurn,
+    Subagent, UpdateSessionRequest, ITEM_OBJECT, SESSION_OBJECT, SESSION_TITLE_OBJECT, TURN_OBJECT,
 };
 use crate::util::{new_id, now_ms};
 use crate::AppError;
@@ -99,12 +99,37 @@ pub async fn create_session(
     principal: Principal,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<AgentSession>, AppError> {
-    let agent_ref = body
-        .agent_id
-        .clone()
-        .or_else(|| body.agent.clone())
-        .ok_or_else(|| AppError::BadRequest("either `agent_id` or `agent` is required".into()))?;
-    let agent = state.agents.get_agent(&principal, &agent_ref).await?;
+    let (agent_ref, by_name) = match (&body.agent_id, &body.agent) {
+        (Some(id), _) => (id.clone(), false),
+        (None, Some(name)) => (name.clone(), true),
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "either `agent_id` or `agent` is required".into(),
+            ))
+        }
+    };
+    let agent = match state.agents.get_agent(&principal, &agent_ref).await {
+        Ok(agent) => agent,
+        // A name is a convenience reference: create it on first use so the SDKs'
+        // `Agent(name)` happy path works on a fresh deployment. An explicit
+        // `agent_id` stays strict — a typo must not silently mint a new agent.
+        Err(AppError::NotFound) if by_name => {
+            if agent_ref.trim().is_empty() {
+                return Err(AppError::BadRequest("`agent` must not be empty".into()));
+            }
+            let agent = agent_from_request(
+                new_id("agent"),
+                CreateAgentRequest {
+                    name: Some(agent_ref.clone()),
+                    ..Default::default()
+                },
+                now_ms(),
+            )?;
+            state.agents.insert_agent(&principal, &agent).await?;
+            agent
+        }
+        Err(err) => return Err(err),
+    };
 
     let row = SessionRow {
         id: new_id("sess"),

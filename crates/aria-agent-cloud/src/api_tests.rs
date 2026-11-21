@@ -897,6 +897,54 @@ async fn session_crud_roundtrip_and_validation() {
 }
 
 #[tokio::test]
+async fn session_by_agent_name_creates_then_reuses_the_agent() {
+    let _env = env_admin().await;
+    let h = harness();
+
+    let (status, first) = send(
+        &h.app,
+        "POST",
+        "/v1/agents/sessions",
+        Some(ADMIN_KEY),
+        Some(json!({"agent": "fresh-from-sdk"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["agent"]["name"], "fresh-from-sdk");
+    let agent_id = first["agent"]["id"].as_str().expect("agent id").to_string();
+
+    let (status, second) = send(
+        &h.app,
+        "POST",
+        "/v1/agents/sessions",
+        Some(ADMIN_KEY),
+        Some(json!({"agent": "fresh-from-sdk"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["agent"]["id"], agent_id.as_str());
+
+    let (_, listed) = send(&h.app, "GET", "/v1/agents", Some(ADMIN_KEY), None).await;
+    let matches = listed["data"]
+        .as_array()
+        .expect("agent list")
+        .iter()
+        .filter(|a| a["name"] == "fresh-from-sdk")
+        .count();
+    assert_eq!(matches, 1, "a name must be reused, not duplicated");
+
+    let (bad, _) = send(
+        &h.app,
+        "POST",
+        "/v1/agents/sessions",
+        Some(ADMIN_KEY),
+        Some(json!({"agent": "   "})),
+    )
+    .await;
+    assert_eq!(bad, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn sessions_of_deleted_agents_are_not_listed() {
     let _env = env_admin().await;
     let h = harness();

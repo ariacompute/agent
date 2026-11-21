@@ -181,7 +181,7 @@ describe("SSE decoding", () => {
 
 describe("Session long-term memory", () => {
   test("memorize posts the key/value to the session memory endpoint", async () => {
-    const { impl, calls } = fakeFetch(() => jsonResponse({ key: "user_name", value: "Ada" }));
+    const { impl, calls } = fakeFetch(() => jsonResponse({ key: "user_name", content: "Ada" }));
     const session = new Session("sess_1", { ...client, fetch: impl });
     await session.memorize("user_name", "Ada");
     expect(calls[0].url).toBe("http://aria.test/v1/agents/sessions/sess_1/memory");
@@ -200,7 +200,7 @@ describe("Session long-term memory", () => {
   });
 
   test("recall returns the stored value", async () => {
-    const { impl } = fakeFetch(() => jsonResponse({ key: "user_name", value: "Ada" }));
+    const { impl } = fakeFetch(() => jsonResponse({ key: "user_name", content: "Ada" }));
     const session = new Session("sess_1", { ...client, fetch: impl });
     expect(await session.recall("user_name")).toBe("Ada");
   });

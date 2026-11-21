@@ -193,7 +193,7 @@ class CloudMemoryStore:
     def get(self, key: str) -> Optional[str]:
         resolved = resolve_client(self.client)
         res = get_json(resolved, f"{self._base()}/{key}")
-        return res.get("value")
+        return res.get("content")
 
 
 # --- both --------------------------------------------------------------------

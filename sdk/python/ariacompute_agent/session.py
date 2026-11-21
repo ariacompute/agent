@@ -42,7 +42,11 @@ class Session:
 
     @classmethod
     def create(cls, agent: "Agent", client: Optional[ClientOptions] = None) -> "Session":
-        """Create a session bound to ``agent`` (the agent must exist in the cloud)."""
+        """Create a session bound to ``agent``.
+
+        The cloud resolves the agent by id or name; an unknown name is created
+        on first use (an explicit unknown id is still an error).
+        """
         from .agent import Agent  # local import to avoid a cycle
 
         assert isinstance(agent, Agent)

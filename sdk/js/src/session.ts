@@ -68,7 +68,8 @@ export class Session {
    * Create a server-side session bound to `agent`, inheriting the agent's
    * memory backend configuration.
    *
-   * The agent must already exist in the cloud (by id or by name).
+   * The cloud resolves the agent by id or name; an unknown name is created
+   * on first use (an explicit unknown id is still an error).
    */
   static async create(agent: Agent, client: ClientOptions = {}): Promise<Session> {
     const resolved = resolveClient({ ...agent.client, ...client });

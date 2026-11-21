@@ -393,7 +393,7 @@ class SessionMemoryTest(unittest.TestCase):
 
         def fake_request(client, method, path, body=None, stream=False):
             calls.append((method, path, body))
-            return FakeResponse(json.dumps({"key": "user_name", "value": "Ada"}).encode())
+            return FakeResponse(json.dumps({"key": "user_name", "content": "Ada"}).encode())
 
         session = Session("sess_1", ClientOptions(base_url="http://aria.test"))
         with mock.patch.object(transport, "_request", side_effect=fake_request):

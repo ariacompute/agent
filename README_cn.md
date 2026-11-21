@@ -608,7 +608,8 @@ async for event in streamed.events:
 `name: Agent Demo` —— 让全新部署（以及 Aria Playground）开箱即可运行。
 已用旧默认值（`playground-demo`）预置过的部署，会在下次启动时被就地重命名。
 用 `GET /v1/agents` 可列出当前密钥可见的智能体（管理员看到全部，租户只看自己
-的）。
+的）。SDK 引用不存在的智能体 **名称** 时，会在首次创建会话时自动建号；显式传入
+不存在的 `agent_id` 仍返回 404，不会静默新建。
 
 <div align="right">
 

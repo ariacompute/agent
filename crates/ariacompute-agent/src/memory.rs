@@ -198,11 +198,11 @@ impl Memory {
 
     fn cloud_get(&self, key: &str) -> Result<Option<String>, AriaError> {
         #[derive(serde::Deserialize)]
-        struct MemoryValue {
-            value: Option<String>,
+        struct MemoryItem {
+            content: Option<String>,
         }
-        let res: MemoryValue = get_json(&self.client, &self.memory_path(Some(key)))?;
-        Ok(res.value)
+        let res: MemoryItem = get_json(&self.client, &self.memory_path(Some(key)))?;
+        Ok(res.content)
     }
 
     fn args(&self, command: &[&str]) -> Vec<String> {

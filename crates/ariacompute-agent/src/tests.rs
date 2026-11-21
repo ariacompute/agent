@@ -533,8 +533,8 @@ fn a_streamed_read_error_is_reported() {
 fn cloud_memory_round_trips_through_the_session_endpoints() {
     let stub = Stub::start(vec![
         Canned::json(json!({ "ok": true })),
-        Canned::json(json!({ "value": "Ada" })),
-        Canned::json(json!({ "value": null })),
+        Canned::json(json!({ "content": "Ada" })),
+        Canned::json(json!({ "content": null })),
     ]);
     let agent = make_agent(&stub.url(), |_| {});
     let session = agent.session("sess 6/x".into()).expect("session");
@@ -564,7 +564,7 @@ fn cloud_memory_round_trips_through_the_session_endpoints() {
 
 #[test]
 fn a_per_call_backend_override_wins() {
-    let stub = Stub::start(vec![Canned::json(json!({ "value": "Ada" }))]);
+    let stub = Stub::start(vec![Canned::json(json!({ "content": "Ada" }))]);
     let agent = make_agent(&stub.url(), |c| {
         c.memory = Some(MemoryConfig {
             backend: Some("local".into()),
@@ -637,7 +637,7 @@ fn a_stream_endpoint_error_is_reported() {
 fn both_backends_prefer_the_cloud_copy() {
     let stub = Stub::start(vec![
         Canned::json(json!({ "ok": true })),
-        Canned::json(json!({ "value": "Cloud" })),
+        Canned::json(json!({ "content": "Cloud" })),
     ]);
     let agent = make_agent(&stub.url(), |c| {
         c.memory = Some(MemoryConfig {

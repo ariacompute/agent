@@ -164,7 +164,7 @@ describe("both backend", () => {
 
 describe("Session backend selection", () => {
   test("defaults to cloud and honours the backend override", async () => {
-    const { impl, calls } = fakeFetch(() => jsonResponse({ key: "k", value: "cloud-value" }));
+    const { impl, calls } = fakeFetch(() => jsonResponse({ key: "k", content: "cloud-value" }));
     const session = new Session("sess_1", { ...client, fetch: impl });
     expect(session.backend).toBe("cloud");
 
@@ -185,7 +185,7 @@ describe("Session backend selection", () => {
   });
 
   test("both backend writes local then cloud", async () => {
-    const { impl, calls } = fakeFetch(() => jsonResponse({ key: "k", value: "v" }));
+    const { impl, calls } = fakeFetch(() => jsonResponse({ key: "k", content: "v" }));
     const { run, calls: cliCalls } = fakeExec(() => "");
     const session = new Session("sess_1", {
       ...client,
@@ -209,7 +209,7 @@ describe("Session backend selection", () => {
   test("Session.create inherits the agent memory config", async () => {
     const { impl } = fakeFetch((url: string) => {
       if (url.endsWith("/v1/agents/sessions")) return jsonResponse({ id: "sess_9" });
-      return jsonResponse({ key: "k", value: "v" });
+      return jsonResponse({ key: "k", content: "v" });
     });
     const agent = new Agent({
       name: "tutor",
