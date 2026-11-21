@@ -45,7 +45,7 @@ pub(crate) fn resolve_client(
     let base_url = base_url.trim().trim_end_matches('/').to_string();
     if base_url.is_empty() {
         return Err(AriaError::Config {
-            message: "base_url must not be empty".into(),
+            detail: "base_url must not be empty".into(),
         });
     }
     Ok(ResolvedClient {
@@ -125,13 +125,13 @@ fn decode_json<T: DeserializeOwned>(res: reqwest::blocking::Response) -> Result<
         return Err(api_error(status.as_u16(), &res.text().unwrap_or_default()));
     }
     res.json::<T>().map_err(|e| AriaError::Unknown {
-        message: format!("cannot decode the response: {e}"),
+        detail: format!("cannot decode the response: {e}"),
     })
 }
 
 fn network_error(err: reqwest::Error) -> AriaError {
     AriaError::Network {
-        message: format!("aria agent request failed (network): {err}"),
+        detail: format!("aria agent request failed (network): {err}"),
     }
 }
 
@@ -154,9 +154,12 @@ pub(crate) fn api_error(status: u16, body: &str) -> AriaError {
             }
         });
     if status == 401 || status == 403 {
-        AriaError::Auth { message }
+        AriaError::Auth { detail: message }
     } else {
-        AriaError::Api { status, message }
+        AriaError::Api {
+            status,
+            detail: message,
+        }
     }
 }
 
@@ -200,7 +203,7 @@ pub(crate) fn read_frames(
         let read = reader
             .read_line(&mut line)
             .map_err(|e| AriaError::Network {
-                message: format!("aria agent stream read failed: {e}"),
+                detail: format!("aria agent stream read failed: {e}"),
             })?;
         if read == 0 {
             break;
@@ -237,7 +240,7 @@ fn dispatch(
         return Ok(false);
     }
     let value: Value = serde_json::from_str(&payload).map_err(|e| AriaError::Unknown {
-        message: format!("cannot decode a stream frame: {e}"),
+        detail: format!("cannot decode a stream frame: {e}"),
     })?;
     on_frame(value)?;
     *frames += 1;
@@ -270,7 +273,7 @@ mod tests {
             "{plain}"
         );
         let empty = api_error(400, "   ");
-        assert!(matches!(empty, AriaError::Api { message, .. } if message.contains("400")));
+        assert!(matches!(empty, AriaError::Api { detail, .. } if detail.contains("400")));
     }
 
     #[test]
@@ -365,7 +368,7 @@ mod stream_tests {
             "data: {\"type\":\"a\"}\n\ndata: {\"type\":\"b\"}\n\n".as_bytes(),
             |_| {
                 Err(AriaError::Unknown {
-                    message: "stop".into(),
+                    detail: "stop".into(),
                 })
             },
         )

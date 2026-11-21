@@ -33,20 +33,20 @@ type FfiResult<T> = Result<T, AriaError>;
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AriaError {
     /// Bad configuration (missing name, unknown backend, unparseable URL, …).
-    #[error("config: {message}")]
-    Config { message: String },
+    #[error("config: {detail}")]
+    Config { detail: String },
     /// The server rejected the API key (`401` / `403`).
-    #[error("auth: {message}")]
-    Auth { message: String },
+    #[error("auth: {detail}")]
+    Auth { detail: String },
     /// The request never reached the server (DNS, TLS, timeout, refused, …).
-    #[error("network: {message}")]
-    Network { message: String },
+    #[error("network: {detail}")]
+    Network { detail: String },
     /// The server answered with a non-2xx status.
-    #[error("api ({status}): {message}")]
-    Api { status: u16, message: String },
+    #[error("api ({status}): {detail}")]
+    Api { status: u16, detail: String },
     /// Anything else (malformed body, CLI failure, …).
-    #[error("unknown: {message}")]
-    Unknown { message: String },
+    #[error("unknown: {detail}")]
+    Unknown { detail: String },
 }
 
 impl AriaError {
@@ -188,7 +188,7 @@ impl AriaAgent {
     pub fn new(config: AriaAgentConfig) -> FfiResult<Arc<Self>> {
         if config.name.trim().is_empty() {
             return Err(AriaError::Config {
-                message: "agent requires a `name`".into(),
+                detail: "agent requires a `name`".into(),
             });
         }
         let client = transport::resolve_client(config.client.as_ref())?;
@@ -238,7 +238,7 @@ impl AriaAgent {
     pub fn session(&self, id: String) -> FfiResult<Arc<Session>> {
         if id.trim().is_empty() {
             return Err(AriaError::Config {
-                message: "session id must not be empty".into(),
+                detail: "session id must not be empty".into(),
             });
         }
         Ok(Arc::new(Session::new(
@@ -284,7 +284,7 @@ impl AriaAgent {
     ) -> FfiResult<RunResult> {
         if max_turns == Some(0) {
             return Err(AriaError::Config {
-                message: "maxTurns must be a positive integer".into(),
+                detail: "maxTurns must be a positive integer".into(),
             });
         }
         let session = self.ensure_session(session)?;
@@ -309,7 +309,7 @@ impl AriaAgent {
                             state.failure =
                                 Some(format!("exceeded maxTurns ({})", max_turns.unwrap_or(0)));
                             return Err(AriaError::Config {
-                                message: state.failure.clone().unwrap_or_default(),
+                                detail: state.failure.clone().unwrap_or_default(),
                             });
                         }
                     }
@@ -350,7 +350,7 @@ impl AriaAgent {
                 }
                 if frames == 0 {
                     return Err(AriaError::Unknown {
-                        message: "the stream ended without any event".into(),
+                        detail: "the stream ended without any event".into(),
                     });
                 }
                 session.record(&input, &state.text);
@@ -366,7 +366,7 @@ impl AriaAgent {
             Err(err) => match state.failure.take() {
                 Some(message) => Err(AriaError::Api {
                     status: 200,
-                    message,
+                    detail: message,
                 }),
                 None => Err(err),
             },
@@ -514,11 +514,11 @@ impl Session {
 /// as a failed turn is an `api` error even though the stream itself was `200`.
 fn failure_error(message: String) -> AriaError {
     if message.starts_with("exceeded maxTurns") {
-        return AriaError::Config { message };
+        return AriaError::Config { detail: message };
     }
     AriaError::Api {
         status: 200,
-        message,
+        detail: message,
     }
 }
 

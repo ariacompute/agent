@@ -39,7 +39,7 @@ impl MemoRunner for CliMemoRunner {
             .args(args)
             .output()
             .map_err(|e| AriaError::Config {
-                message: format!(
+                detail: format!(
                     "cannot run `{}`: {e}. Install aria-memo (`aria-memo setup`) or set ARIA_MEMO_BIN",
                     self.bin
                 ),
@@ -48,7 +48,7 @@ impl MemoRunner for CliMemoRunner {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(AriaError::Unknown {
-                message: format!(
+                detail: format!(
                     "`{}` exited with {}: {}",
                     self.bin,
                     output
@@ -113,7 +113,7 @@ impl Memory {
         };
         if !matches!(backend.as_str(), "cloud" | "local" | "both") {
             return Err(AriaError::Config {
-                message: format!("unknown memory backend: {backend} (expected cloud|local|both)"),
+                detail: format!("unknown memory backend: {backend} (expected cloud|local|both)"),
             });
         }
         Ok(Self {
@@ -146,7 +146,7 @@ impl Memory {
                 let cloud = self.cloud_put(key, value);
                 match (local, cloud) {
                     (Err(l), Err(c)) => Err(AriaError::Unknown {
-                        message: format!("memory write failed on every backend: {l}; {c}"),
+                        detail: format!("memory write failed on every backend: {l}; {c}"),
                     }),
                     _ => Ok(()),
                 }
@@ -170,7 +170,7 @@ impl Memory {
                 }
                 match (local, cloud) {
                     (Err(l), Err(c)) => Err(AriaError::Unknown {
-                        message: format!("memory read failed on every backend: {l}; {c}"),
+                        detail: format!("memory read failed on every backend: {l}; {c}"),
                     }),
                     _ => Ok(None),
                 }
@@ -275,7 +275,7 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Ok(String::new()));
-            next.map_err(|message| AriaError::Unknown { message })
+            next.map_err(|message| AriaError::Unknown { detail: message })
         }
     }
 

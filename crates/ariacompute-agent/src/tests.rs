@@ -622,7 +622,10 @@ fn a_stream_endpoint_error_is_reported() {
         )
         .unwrap_err();
     match &err {
-        AriaError::Api { status, message } => {
+        AriaError::Api {
+            status,
+            detail: message,
+        } => {
             assert_eq!(*status, 500);
             assert_eq!(message, "boom");
         }
@@ -738,7 +741,10 @@ fn a_max_turns_failure_maps_to_config_and_other_failures_to_api() {
     assert!(matches!(config, AriaError::Config { .. }), "{config}");
     let api = failure_error("model exploded".into());
     match api {
-        AriaError::Api { status, message } => {
+        AriaError::Api {
+            status,
+            detail: message,
+        } => {
             assert_eq!(status, 200);
             assert_eq!(message, "model exploded");
         }

@@ -1733,27 +1733,27 @@ public enum AriaError {
     /**
      * Bad configuration (missing name, unknown backend, unparseable URL, …).
      */
-    case Config(message: String
+    case Config(detail: String
     )
     /**
      * The server rejected the API key (`401` / `403`).
      */
-    case Auth(message: String
+    case Auth(detail: String
     )
     /**
      * The request never reached the server (DNS, TLS, timeout, refused, …).
      */
-    case Network(message: String
+    case Network(detail: String
     )
     /**
      * The server answered with a non-2xx status.
      */
-    case Api(status: UInt16, message: String
+    case Api(status: UInt16, detail: String
     )
     /**
      * Anything else (malformed body, CLI failure, …).
      */
-    case Unknown(message: String
+    case Unknown(detail: String
     )
 }
 
@@ -1772,20 +1772,20 @@ public struct FfiConverterTypeAriaError: FfiConverterRustBuffer {
 
         
         case 1: return .Config(
-            message: try FfiConverterString.read(from: &buf)
+            detail: try FfiConverterString.read(from: &buf)
             )
         case 2: return .Auth(
-            message: try FfiConverterString.read(from: &buf)
+            detail: try FfiConverterString.read(from: &buf)
             )
         case 3: return .Network(
-            message: try FfiConverterString.read(from: &buf)
+            detail: try FfiConverterString.read(from: &buf)
             )
         case 4: return .Api(
             status: try FfiConverterUInt16.read(from: &buf), 
-            message: try FfiConverterString.read(from: &buf)
+            detail: try FfiConverterString.read(from: &buf)
             )
         case 5: return .Unknown(
-            message: try FfiConverterString.read(from: &buf)
+            detail: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -1799,30 +1799,30 @@ public struct FfiConverterTypeAriaError: FfiConverterRustBuffer {
 
         
         
-        case let .Config(message):
+        case let .Config(detail):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
             
         
-        case let .Auth(message):
+        case let .Auth(detail):
             writeInt(&buf, Int32(2))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
             
         
-        case let .Network(message):
+        case let .Network(detail):
             writeInt(&buf, Int32(3))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
             
         
-        case let .Api(status,message):
+        case let .Api(status,detail):
             writeInt(&buf, Int32(4))
             FfiConverterUInt16.write(status, into: &buf)
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
             
         
-        case let .Unknown(message):
+        case let .Unknown(detail):
             writeInt(&buf, Int32(5))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
             
         }
     }

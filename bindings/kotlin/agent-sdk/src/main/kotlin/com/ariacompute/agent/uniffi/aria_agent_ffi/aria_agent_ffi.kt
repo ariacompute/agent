@@ -2441,10 +2441,10 @@ sealed class AriaException: kotlin.Exception() {
      */
     class Config(
         
-        val `message`: kotlin.String
+        val `detail`: kotlin.String
         ) : AriaException() {
         override val message
-            get() = "message=${ `message` }"
+            get() = "detail=${ `detail` }"
     }
     
     /**
@@ -2452,10 +2452,10 @@ sealed class AriaException: kotlin.Exception() {
      */
     class Auth(
         
-        val `message`: kotlin.String
+        val `detail`: kotlin.String
         ) : AriaException() {
         override val message
-            get() = "message=${ `message` }"
+            get() = "detail=${ `detail` }"
     }
     
     /**
@@ -2463,10 +2463,10 @@ sealed class AriaException: kotlin.Exception() {
      */
     class Network(
         
-        val `message`: kotlin.String
+        val `detail`: kotlin.String
         ) : AriaException() {
         override val message
-            get() = "message=${ `message` }"
+            get() = "detail=${ `detail` }"
     }
     
     /**
@@ -2476,10 +2476,10 @@ sealed class AriaException: kotlin.Exception() {
         
         val `status`: kotlin.UShort, 
         
-        val `message`: kotlin.String
+        val `detail`: kotlin.String
         ) : AriaException() {
         override val message
-            get() = "status=${ `status` }, message=${ `message` }"
+            get() = "status=${ `status` }, detail=${ `detail` }"
     }
     
     /**
@@ -2487,10 +2487,10 @@ sealed class AriaException: kotlin.Exception() {
      */
     class Unknown(
         
-        val `message`: kotlin.String
+        val `detail`: kotlin.String
         ) : AriaException() {
         override val message
-            get() = "message=${ `message` }"
+            get() = "detail=${ `detail` }"
     }
     
 
@@ -2534,28 +2534,28 @@ public object FfiConverterTypeAriaError : FfiConverterRustBuffer<AriaException> 
             is AriaException.Config -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterString.allocationSize(value.`detail`)
             )
             is AriaException.Auth -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterString.allocationSize(value.`detail`)
             )
             is AriaException.Network -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterString.allocationSize(value.`detail`)
             )
             is AriaException.Api -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterUShort.allocationSize(value.`status`)
-                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterString.allocationSize(value.`detail`)
             )
             is AriaException.Unknown -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
-                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterString.allocationSize(value.`detail`)
             )
         }
     }
@@ -2564,28 +2564,28 @@ public object FfiConverterTypeAriaError : FfiConverterRustBuffer<AriaException> 
         when(value) {
             is AriaException.Config -> {
                 buf.putInt(1)
-                FfiConverterString.write(value.`message`, buf)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is AriaException.Auth -> {
                 buf.putInt(2)
-                FfiConverterString.write(value.`message`, buf)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is AriaException.Network -> {
                 buf.putInt(3)
-                FfiConverterString.write(value.`message`, buf)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is AriaException.Api -> {
                 buf.putInt(4)
                 FfiConverterUShort.write(value.`status`, buf)
-                FfiConverterString.write(value.`message`, buf)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is AriaException.Unknown -> {
                 buf.putInt(5)
-                FfiConverterString.write(value.`message`, buf)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
