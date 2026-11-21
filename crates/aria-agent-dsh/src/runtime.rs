@@ -28,8 +28,16 @@ use crate::transport::{RpcTransport, StdioTransport, DEFAULT_MAX_FRAME_BYTES};
 
 /// dsh `sdk` profile flag (`dsh --profile sdk` owns the JSON-RPC server).
 pub const SDK_PROFILE: &str = "sdk";
+/// Provider route shipped with `deepseek-harness-sdk` 0.2.x.
+pub const DEFAULT_DSH_PROVIDER: &str = "deepseek-official";
 /// Permission presets the `sdk` profile accepts.
 pub const PERMISSION_MODES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
+
+fn provider_from_env(value: Option<String>) -> String {
+    value
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_DSH_PROVIDER.to_string())
+}
 
 /// Everything needed to start one harness runtime.
 #[derive(Debug, Clone)]
@@ -40,7 +48,7 @@ pub struct DshConfig {
     pub home: PathBuf,
     /// Agent workspace (the child's cwd).
     pub cwd: PathBuf,
-    /// Provider route inside dsh (e.g. `openai-compatible`).
+    /// Provider route inside dsh (defaults to [`DEFAULT_DSH_PROVIDER`]).
     pub provider: String,
     /// Model id inside that provider.
     pub model: String,
@@ -68,8 +76,7 @@ impl DshConfig {
             bin: std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string()),
             home: root.join(".aria/dsh").join(&leaf),
             cwd: root.join(".aria/dsh-workspaces").join(leaf),
-            provider: std::env::var("DSH_PROVIDER")
-                .unwrap_or_else(|_| "openai-compatible".to_string()),
+            provider: provider_from_env(std::env::var("DSH_PROVIDER").ok()),
             model: model.to_string(),
             permission_mode: std::env::var("DSH_PERMISSION_MODE")
                 .unwrap_or_else(|_| "workspace-write".to_string()),
@@ -429,6 +436,16 @@ mod tests {
         assert_ne!(cfg.home, cfg.cwd);
         assert_eq!(cfg.permission_mode, "workspace-write");
         cfg.validate().expect("valid");
+    }
+
+    #[test]
+    fn provider_defaults_to_registered_dsh_adapter() {
+        assert_eq!(provider_from_env(None), "deepseek-official");
+        assert_eq!(provider_from_env(Some("  ".into())), "deepseek-official");
+        assert_eq!(
+            provider_from_env(Some("custom-adapter".into())),
+            "custom-adapter"
+        );
     }
 
     #[test]

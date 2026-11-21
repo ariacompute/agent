@@ -20,3 +20,5 @@ bindings/kotlin/agent-sdk/src/main/jniLibs/
 
 # governance audit output (local JSONL sink)
 .aria/
+
+.venv-dsh/
