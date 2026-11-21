@@ -103,14 +103,21 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_aria_home(dir: &Path, f: impl Fn()) {
-        with_aria_home_seeded(dir, None, f)
+        with_aria_home_seeded(dir, None, f, |_| {})
     }
 
     /// Run `f` with `ARIA_COMPUTE_HOME=dir`, restoring `seed` (or unsetting it)
-    /// afterwards. `seed` lets the restore path be exercised for both the
-    /// "previous value existed" and "previous value was absent" cases.
-    fn with_aria_home_seeded(dir: &Path, seed: Option<&str>, f: impl Fn()) {
+    /// afterwards, then hand the caller's original value to `after` while the
+    /// lock is still held. `seed` exercises both restore paths; `after` lets a
+    /// test assert on the restored value without another thread racing it.
+    fn with_aria_home_seeded(
+        dir: &Path,
+        seed: Option<&str>,
+        f: impl Fn(),
+        after: impl FnOnce(Option<String>),
+    ) {
         let _g = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("ARIA_COMPUTE_HOME").ok();
         match seed {
             Some(v) => std::env::set_var("ARIA_COMPUTE_HOME", v),
             None => std::env::remove_var("ARIA_COMPUTE_HOME"),
@@ -121,6 +128,7 @@ mod tests {
         f();
         let _ = std::fs::remove_dir_all(dir);
         restore_env("ARIA_COMPUTE_HOME", prev);
+        after(original);
     }
 
     /// Restore one environment variable to its previous value (`None` = unset).
@@ -216,16 +224,23 @@ mod tests {
     #[test]
     fn seeding_a_previous_override_is_restored() {
         let dir = std::env::temp_dir().join(format!("aria_agent_cli_seed_{}", std::process::id()));
-        with_aria_home_seeded(&dir, Some("/tmp/aria-seeded-home"), || {
-            // Inside the scope the test directory wins.
-            assert_eq!(aria_home().unwrap(), dir);
-            let _ = save_cli_config(&AgentCliConfig::default());
-        });
-        assert_eq!(
-            std::env::var("ARIA_COMPUTE_HOME").unwrap(),
-            "/tmp/aria-seeded-home"
+        with_aria_home_seeded(
+            &dir,
+            Some("/tmp/aria-seeded-home"),
+            || {
+                // Inside the scope the test directory wins.
+                assert_eq!(aria_home().unwrap(), dir);
+                let _ = save_cli_config(&AgentCliConfig::default());
+            },
+            |original| {
+                // `after` still holds ENV_LOCK: no other test can race the read.
+                assert_eq!(
+                    std::env::var("ARIA_COMPUTE_HOME").unwrap(),
+                    "/tmp/aria-seeded-home"
+                );
+                restore_env("ARIA_COMPUTE_HOME", original);
+            },
         );
-        std::env::remove_var("ARIA_COMPUTE_HOME");
     }
 
     #[test]
