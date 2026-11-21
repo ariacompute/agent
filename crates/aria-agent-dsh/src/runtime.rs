@@ -39,6 +39,13 @@ fn provider_from_env(value: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_DSH_PROVIDER.to_string())
 }
 
+fn prompt_params(session: &str, input: &str) -> Value {
+    json!({
+        "sessionId": session,
+        "contentBlocks": [{"type": "text", "text": input}],
+    })
+}
+
 /// Everything needed to start one harness runtime.
 #[derive(Debug, Clone)]
 pub struct DshConfig {
@@ -237,10 +244,7 @@ impl HarnessRuntime for DshRuntime {
         self.client
             .call(
                 METHOD_SESSION_PROMPT,
-                json!({
-                    "sessionId": session,
-                    "blocks": [{"type": "text", "text": input}],
-                }),
+                prompt_params(session, input),
                 self.cfg.request_timeout,
             )
             .await?;
@@ -436,6 +440,15 @@ mod tests {
         assert_ne!(cfg.home, cfg.cwd);
         assert_eq!(cfg.permission_mode, "workspace-write");
         cfg.validate().expect("valid");
+    }
+
+    #[test]
+    fn prompt_payload_uses_content_blocks() {
+        let params = prompt_params("s1", "hello");
+        assert_eq!(params["sessionId"], "s1");
+        assert_eq!(params["contentBlocks"][0]["type"], "text");
+        assert_eq!(params["contentBlocks"][0]["text"], "hello");
+        assert!(params.get("blocks").is_none());
     }
 
     #[test]
