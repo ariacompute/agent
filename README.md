@@ -245,7 +245,7 @@ cp .env.example .env
 | `DSH_HOME_ROOT` | `.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories. |
 | `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
 | `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
-| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com/v1` / _(empty)_ / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. Base URL must include `/v1`; no `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
+| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(empty)_ / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. The value is the gateway root; `native` appends `/v1/chat/completions` and `dsh` appends `/anthropic/v1/messages`. No `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |

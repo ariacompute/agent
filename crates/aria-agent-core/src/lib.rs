@@ -88,6 +88,21 @@ pub fn gateway_base_url() -> Option<String> {
     trimmed_env("GATEWAY_BASE_URL")
 }
 
+/// Normalize the shared gateway root to the OpenAI API base.
+#[cfg(feature = "openai")]
+fn openai_api_base(base: Option<String>) -> Option<String> {
+    base.and_then(|b| {
+        let b = b.trim().trim_end_matches('/');
+        if b.is_empty() {
+            None
+        } else if b.ends_with("/v1") {
+            Some(b.to_string())
+        } else {
+            Some(format!("{b}/v1"))
+        }
+    })
+}
+
 /// Gateway API key; empty when unset.
 pub fn gateway_api_key() -> String {
     trimmed_env("GATEWAY_API_KEY").unwrap_or_default()
@@ -326,7 +341,7 @@ mod openai_impl {
                 None => model.to_string(),
             };
             let config = OpenAIConfig::new().with_api_key(api_key);
-            let config = match base.map(|b| b.trim_end_matches('/').to_string()) {
+            let config = match openai_api_base(base) {
                 Some(base) => config.with_api_base(base),
                 None => config,
             };
@@ -647,6 +662,22 @@ mod openai_impl {
                 assert_eq!(model.model, "gpt-4o");
                 let model = OpenAiModel::from_values("fallback", None, None, "k".into());
                 assert_eq!(model.model, "fallback");
+            }
+
+            #[tokio::test]
+            async fn root_gateway_base_gets_v1_prefix() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/chat/completions"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(chat_response(Some("ok"), None)),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let model = OpenAiModel::from_values("m", None, Some(server.uri()), "k".into());
+                let resp = model.complete(&request()).await.unwrap();
+                assert_eq!(resp.text, "ok");
             }
 
             static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

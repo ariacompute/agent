@@ -39,6 +39,18 @@ fn provider_from_env(value: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_DSH_PROVIDER.to_string())
 }
 
+fn dsh_base_url(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return String::new();
+    }
+    if base.ends_with("/anthropic/v1") {
+        return base.to_string();
+    }
+    let root = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{root}/anthropic/v1")
+}
+
 fn prompt_params(session: &str, input: &str) -> Value {
     json!({
         "sessionId": session,
@@ -109,11 +121,12 @@ impl DshConfig {
     /// Bridge the deployment's unified `GATEWAY_*` config into the names the
     /// external dsh binary reads in its allow-listed child environment.
     ///
-    /// The `DEEPSEEK_*` keys here are dsh's own process contract, not aria
-    /// configuration variables; callers only supply gateway values.
+    /// The shared `GATEWAY_BASE_URL` is the gateway root; dsh needs the
+    /// Anthropic Messages prefix while the native loop uses the OpenAI one.
     pub fn with_gateway_env(mut self, base_url: &str, api_key: &str) -> Self {
+        let base_url = dsh_base_url(base_url);
         if !base_url.is_empty() {
-            self = self.with_env("DEEPSEEK_BASE_URL", base_url);
+            self = self.with_env("DEEPSEEK_BASE_URL", &base_url);
         }
         if !api_key.is_empty() {
             self = self.with_env("DEEPSEEK_API_KEY", api_key);
@@ -452,6 +465,23 @@ mod tests {
     }
 
     #[test]
+    fn dsh_base_url_uses_anthropic_prefix() {
+        assert_eq!(dsh_base_url(""), "");
+        assert_eq!(
+            dsh_base_url("https://gateway.example"),
+            "https://gateway.example/anthropic/v1"
+        );
+        assert_eq!(
+            dsh_base_url("https://gateway.example/v1/"),
+            "https://gateway.example/anthropic/v1"
+        );
+        assert_eq!(
+            dsh_base_url("https://gateway.example/anthropic/v1"),
+            "https://gateway.example/anthropic/v1"
+        );
+    }
+
+    #[test]
     fn provider_defaults_to_registered_dsh_adapter() {
         assert_eq!(provider_from_env(None), "deepseek-official");
         assert_eq!(provider_from_env(Some("  ".into())), "deepseek-official");
@@ -491,13 +521,13 @@ mod tests {
     #[test]
     fn gateway_config_is_mapped_into_the_child_allow_list() {
         let cfg = DshConfig::for_session(Path::new("/srv"), "s1", "m")
-            .with_gateway_env("https://gateway.example/v1", "gw-key");
+            .with_gateway_env("https://gateway.example", "gw-key");
         assert_eq!(
             cfg.extra_env,
             vec![
                 (
                     "DEEPSEEK_BASE_URL".to_string(),
-                    "https://gateway.example/v1".to_string()
+                    "https://gateway.example/anthropic/v1".to_string()
                 ),
                 ("DEEPSEEK_API_KEY".to_string(), "gw-key".to_string()),
             ]
@@ -505,7 +535,7 @@ mod tests {
         let env = cfg.child_env();
         assert!(env
             .iter()
-            .any(|(k, v)| k == "DEEPSEEK_BASE_URL" && v == "https://gateway.example/v1"));
+            .any(|(k, v)| k == "DEEPSEEK_BASE_URL" && v == "https://gateway.example/anthropic/v1"));
         assert!(env
             .iter()
             .any(|(k, v)| k == "DEEPSEEK_API_KEY" && v == "gw-key"));
