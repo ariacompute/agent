@@ -18,6 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use agent_core::gateway_model;
+use aria_agent_dsh::event_map::{self, Mapped};
 use aria_agent_dsh::{no_bridge, DshConfig, DshRuntime, HarnessRuntime};
 use serde_json::Value;
 
@@ -67,22 +68,22 @@ async fn a_real_dsh_turn_completes() {
 
     let mut text = String::new();
     let mut reason: Option<String> = None;
-    while let Some(frame) = rx.recv().await {
-        let method = frame["method"].as_str().unwrap_or("");
-        match method {
-            "assistant/message" => {
-                let content = aria_agent_dsh::event_map::text_of(&frame["params"]);
-                if !content.is_empty() {
-                    text = content;
+    'frames: while let Some(frame) = rx.recv().await {
+        for mapped in event_map::map_notification(&frame) {
+            match mapped {
+                Mapped::Token { text: chunk } => {
+                    if !chunk.is_empty() {
+                        text = chunk;
+                    }
                 }
+                Mapped::TurnEnd { reason: kind } => {
+                    reason = Some(kind);
+                    break 'frames;
+                }
+                Mapped::TurnFailed { message } => panic!("dsh turn failed: {message}"),
+                Mapped::Protocol { message } => panic!("dsh protocol error: {message}"),
+                _ => {}
             }
-            "turn/end" => {
-                reason = frame["params"]["reason"]["kind"]
-                    .as_str()
-                    .map(str::to_string);
-                break;
-            }
-            _ => {}
         }
     }
     runtime.shutdown().await.expect("shutdown");

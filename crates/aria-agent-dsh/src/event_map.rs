@@ -56,7 +56,22 @@ pub enum Mapped {
 /// Map one notification frame to zero or more normalized steps.
 pub fn map_notification(frame: &Value) -> Vec<Mapped> {
     let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
-    let data = frame.get("params").unwrap_or(&Value::Null);
+    let params = frame.get("params").unwrap_or(&Value::Null);
+    // dsh 0.2.x delivers every session event as one `session.event` envelope:
+    // `params.event.type` plus `params.event.data`. Older builds used the event
+    // type as the notification method; both shapes land in `map_event`.
+    if method == "session.event" {
+        let Some(event) = params.get("event") else {
+            return vec![Mapped::Ignore];
+        };
+        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let data = event.get("data").unwrap_or(&Value::Null);
+        return map_event(kind, data);
+    }
+    map_event(method, params)
+}
+
+fn map_event(method: &str, data: &Value) -> Vec<Mapped> {
     match method {
         "turn/start" => vec![Mapped::Step {
             phase: "harness",
@@ -280,6 +295,40 @@ mod tests {
         // A content-less assistant message is legal (max-tokens) and ignored.
         assert_eq!(
             mapped("assistant/message", json!({"content": []})),
+            vec![Mapped::Ignore]
+        );
+    }
+
+    #[test]
+    fn session_event_envelopes_are_unwrapped() {
+        let out = mapped(
+            "session.event",
+            json!({"sessionId": "s1", "event": {
+                "type": "assistant/message",
+                "data": {"message": {"content": [{"type": "text", "text": "pong"}]}}
+            }}),
+        );
+        assert_eq!(
+            out,
+            vec![Mapped::Token {
+                text: "pong".into()
+            }]
+        );
+
+        assert_eq!(
+            mapped(
+                "session.event",
+                json!({"sessionId": "s1", "event": {
+                    "type": "turn/end",
+                    "data": {"reason": {"kind": "completed"}}
+                }}),
+            ),
+            vec![Mapped::TurnEnd {
+                reason: "completed".into()
+            }]
+        );
+        assert_eq!(
+            mapped("session.event", json!({"sessionId": "s1"})),
             vec![Mapped::Ignore]
         );
     }
