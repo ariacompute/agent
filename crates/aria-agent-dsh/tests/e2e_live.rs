@@ -20,10 +20,47 @@ use std::time::Duration;
 use agent_core::gateway_model;
 use aria_agent_dsh::event_map::{self, Mapped};
 use aria_agent_dsh::{no_bridge, DshConfig, DshRuntime, HarnessRuntime};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+fn failure_detail(frame: &Value) -> Option<String> {
+    let params = frame.get("params")?;
+    let event = params.get("event").unwrap_or(params);
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let failure = if kind == "assistant/attempt" {
+        event
+            .get("data")?
+            .get("stream")?
+            .as_array()?
+            .iter()
+            .find_map(|chunk| chunk.get("chunk")?.get("reason")?.get("failure"))?
+    } else if kind == "turn/end" {
+        event.get("data")?.get("reason")?.get("failure")?
+    } else {
+        params.get("reason")?.get("failure")?
+    };
+    let code = failure.get("code").and_then(Value::as_str).unwrap_or("");
+    let message = failure.get("message").and_then(Value::as_str).unwrap_or("");
+    Some(format!("{kind}: {code} {message}").trim().to_string())
+}
+
+#[test]
+fn failure_detail_extracts_dsh_error() {
+    let frame = json!({
+        "method": "session.event",
+        "params": {"sessionId": "s1", "event": {
+            "type": "assistant/attempt",
+            "data": {"stream": [{"chunk": {"reason": {"kind": "error",
+                "failure": {"code": "TRANSPORT", "message": "DeepSeek Messages transport failed"}}}}]}
+        }}
+    });
+    assert_eq!(
+        failure_detail(&frame).as_deref(),
+        Some("assistant/attempt: TRANSPORT DeepSeek Messages transport failed")
+    );
 }
 
 #[tokio::test]
@@ -68,7 +105,12 @@ async fn a_real_dsh_turn_completes() {
 
     let mut text = String::new();
     let mut reason: Option<String> = None;
+    let mut failures: Vec<String> = Vec::new();
     'frames: while let Some(frame) = rx.recv().await {
+        if let Some(detail) = failure_detail(&frame) {
+            eprintln!("dsh failure: {detail}");
+            failures.push(detail);
+        }
         for mapped in event_map::map_notification(&frame) {
             match mapped {
                 Mapped::Token { text: chunk } => {
@@ -90,7 +132,8 @@ async fn a_real_dsh_turn_completes() {
     assert_eq!(
         reason.as_deref(),
         Some("completed"),
-        "turn did not complete (frames must end with a completed turn/end)"
+        "turn did not complete (frames must end with a completed turn/end)\n{}",
+        failures.join("\n")
     );
     assert!(
         !text.trim().is_empty(),
