@@ -456,21 +456,34 @@ All E2E-oriented `just` recipes:
 |---|---|
 | `just e2e` | Run the real-socket HTTP E2E suite (`cargo test -p agent-tests --test e2e_http`); optional DB/Docker cases skip when unavailable. |
 | `just dsh-smoke` | Spawn a scripted fake `dsh` and verify the JSON-RPC handshake + turn framing (`cargo test -p aria-agent-dsh --test stdio -- --nocapture`); offline, no credentials. |
-| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs `DSH_BIN` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`) from `.env`, and skips loudly when unset. The recipe sets `ARIA_DSH_E2E=1` and sources `.env`. |
+| `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs a local `dsh` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`). The recipe only sets `ARIA_DSH_E2E=1`; `just` does not load `.env` by default, so use one of the two loading forms below. |
 
-`just dsh-e2e` reads `DSH_BIN` and `GATEWAY_*` from `.env`. The recipe sources
-`.env` itself, but you can also load it explicitly in the shell or let `just`
-load it:
+**Local `dsh` install.** The image installs `dsh` from `deepseek-harness-sdk`
+(which pulls `deepseek-harness-runtime-bin`) into `/opt/dsh/bin/dsh`. Locally:
 
 ```bash
-set -a; . ./.env; set +a; just dsh-e2e
-# or
-just --dotenv-path .env dsh-e2e
+cd <repo-root>
+python3 -m venv .venv-dsh
+.venv-dsh/bin/pip install --upgrade pip
+.venv-dsh/bin/pip install deepseek-harness-sdk
+test -x .venv-dsh/bin/dsh && echo "dsh ready"
 ```
 
-`set -a` exports every assignment in `.env` so the `cargo test` child process
-sees `GATEWAY_API_KEY`; `--dotenv-path` makes `just` load the same file into the
-recipe environment. Without one of these, the test prints
+`.env` ships with `DSH_BIN=/opt/dsh/bin/dsh` (the image path). Override it with
+the venv binary — inline or by editing `.env` — then load `.env` into the test
+process with one of these two forms:
+
+```bash
+# shell source: put the DSH_BIN override after sourcing
+set -a; . ./.env; set +a; DSH_BIN="$PWD/.venv-dsh/bin/dsh" just dsh-e2e
+
+# or let just load .env: an explicit shell DSH_BIN still wins
+DSH_BIN="$PWD/.venv-dsh/bin/dsh" just --dotenv-path .env dsh-e2e
+```
+
+`set -a` exports every assignment in `.env` so `cargo test` sees
+`GATEWAY_API_KEY`; `--dotenv-path` makes `just` load the same file into the
+recipe environment. Without either form the test prints
 `skip: GATEWAY_API_KEY is not set` and returns `ok` — that is a skip, not a pass.
 
 `just e2e` binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames, tool calls, tenant isolation, memory and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:

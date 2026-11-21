@@ -426,15 +426,28 @@ echo "DOCKER_GID set to $DOCKER_GID"
 |---|---|
 | `just e2e` | 运行真实 socket 的 HTTP E2E 套件（`cargo test -p agent-tests --test e2e_http`）；可选 DB/Docker 场景缺依赖时跳过。 |
 | `just dsh-smoke` | 拉起脚本化假 `dsh`，校验 JSON-RPC 握手与回合帧序（`cargo test -p aria-agent-dsh --test stdio -- --nocapture`）；离线、无需凭据。 |
-| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需 `.env` 中的 `DSH_BIN` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`），缺依赖时明确跳过；该 `just` 任务会自动设置 `ARIA_DSH_E2E=1` 并 source `.env`。 |
+| `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需本地 `dsh` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`）。该 `just` 任务只设置 `ARIA_DSH_E2E=1`；`just` 默认不加载 `.env`，请用下面两种方式之一加载。 |
 
-`just dsh-e2e` 从 `.env` 读取 `DSH_BIN` 与 `GATEWAY_*`。recipe 自身会 source
-`.env`，也可以在 shell 中显式加载，或让 `just` 加载：
+**本地安装 `dsh`。** 镜像通过 `deepseek-harness-sdk`（它会拉
+`deepseek-harness-runtime-bin`）把 `dsh` 装到 `/opt/dsh/bin/dsh`。本地同样安装：
 
 ```bash
-set -a; . ./.env; set +a; just dsh-e2e
-# 或
-just --dotenv-path .env dsh-e2e
+cd <仓库根目录>
+python3 -m venv .venv-dsh
+.venv-dsh/bin/pip install --upgrade pip
+.venv-dsh/bin/pip install deepseek-harness-sdk
+test -x .venv-dsh/bin/dsh && echo "dsh ready"
+```
+
+`.env` 默认写的是镜像路径 `DSH_BIN=/opt/dsh/bin/dsh`。用上面的 venv 二进制覆盖它
+（命令行临时覆盖，或直接修改 `.env`），然后用以下两种方式之一把 `.env` 加载进测试进程：
+
+```bash
+# shell source：DSH_BIN 覆盖要放在 source 之后
+set -a; . ./.env; set +a; DSH_BIN="$PWD/.venv-dsh/bin/dsh" just dsh-e2e
+
+# 或让 just 加载 .env：shell 中显式指定的 DSH_BIN 优先
+DSH_BIN="$PWD/.venv-dsh/bin/dsh" just --dotenv-path .env dsh-e2e
 ```
 
 `set -a` 会把 `.env` 中的赋值导出，使 `cargo test` 子进程能读到
