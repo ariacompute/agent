@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Single governed egress boundary: policy, credential substitution and tool-output projection for aria-agent."
+# This crate is NOT published: it depends on workspace-internal crates by
+# path only (no version requirement). See `publish-cargo.yml`.
+publish = false
 
 [lib]
 name = "agent_governance"

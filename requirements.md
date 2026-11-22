@@ -143,8 +143,12 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
   `aria-agent-sandbox` → `aria-agent-plugin` → `aria-agent-core` →
   `aria-agent-tools` → `aria-agent-memo` → `aria-agent-browser` →
   `ariacompute-agent` (`secrets.CARGO_REGISTRY_TOKEN`). The workspace-internal
-  `aria-agent-orchestrator`, `aria-agent-cloud` and `aria-agent-ffigen` crates
-  are not published.
+  `aria-agent-orchestrator`, `aria-agent-cloud`, `aria-agent-ffigen`,
+  `aria-agent-dsh`, `aria-agent-governance` and `aria-agent-egress-proxy`
+  crates are **not** published: they depend on workspace-internal crates by
+  path only (no version requirement), so `cargo package` refuses them. Each
+  carries `publish = false` in its manifest so `cargo publish` skips it
+  instead of failing the workspace release.
 * `publish-maven.yml` publishes the Kotlin/Android binding to Maven Central
   (`com.ariacompute:agent`) via vanniktech (`secrets.SONATYPE_*`,
   `secrets.GPG_*`).
