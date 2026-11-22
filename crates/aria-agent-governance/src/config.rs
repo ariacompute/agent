@@ -166,6 +166,28 @@ impl GovernanceConfig {
             self.env_overrides
                 .push("AGENT_CREDENTIAL_MASTER_KEY_ENV".into());
         }
+        if let Some(raw) = get("AGENT_AUDIT_RETENTION_DAYS") {
+            match raw.parse::<u64>() {
+                Ok(days) => {
+                    self.audit_retention_days = days;
+                    self.env_overrides.push("AGENT_AUDIT_RETENTION_DAYS".into());
+                }
+                Err(_) => self
+                    .env_overrides
+                    .push(format!("AGENT_AUDIT_RETENTION_DAYS={raw} (invalid)")),
+            }
+        }
+        if let Some(raw) = get("AGENT_IDLE_TIMEOUT_SECS") {
+            match raw.parse::<u64>() {
+                Ok(secs) => {
+                    self.idle_timeout_secs = secs;
+                    self.env_overrides.push("AGENT_IDLE_TIMEOUT_SECS".into());
+                }
+                Err(_) => self
+                    .env_overrides
+                    .push(format!("AGENT_IDLE_TIMEOUT_SECS={raw} (invalid)")),
+            }
+        }
     }
 
     /// Fail closed on anything ambiguous.
@@ -542,6 +564,35 @@ mod tests {
         let err = bad.validate().unwrap_err();
         assert!(
             err.to_string().contains("invalid governance environment"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn audit_retention_and_idle_timeout_are_env_overridable() {
+        let mut resolved = GovernanceConfig::from_agent_config(&cfg()).unwrap();
+        let values = std::collections::HashMap::from([
+            ("AGENT_AUDIT_RETENTION_DAYS", "7"),
+            ("AGENT_IDLE_TIMEOUT_SECS", "120"),
+        ]);
+        resolved.apply_from(|key| values.get(key).map(|v| v.to_string()));
+        assert_eq!(resolved.audit_retention_days, 7);
+        assert_eq!(resolved.idle_timeout_secs, 120);
+        assert!(resolved.describe().contains("AGENT_AUDIT_RETENTION_DAYS"));
+        resolved.validate().unwrap();
+
+        // Garbage is recorded and fails closed instead of silently keeping the
+        // default, so a typo cannot disable retention or idle suspension.
+        let mut bad = GovernanceConfig::from_agent_config(&cfg()).unwrap();
+        let values = std::collections::HashMap::from([
+            ("AGENT_AUDIT_RETENTION_DAYS", "thirty"),
+            ("AGENT_IDLE_TIMEOUT_SECS", "-5"),
+        ]);
+        bad.apply_from(|key| values.get(key).map(|v| v.to_string()));
+        let err = bad.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("AGENT_AUDIT_RETENTION_DAYS=thirty (invalid)"),
             "{err}"
         );
     }
