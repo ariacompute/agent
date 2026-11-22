@@ -241,6 +241,7 @@ cp .env.example .env
 | `DSH_POOL_MAX` | `8` | 每租户保留的活跃运行时上限。 |
 | `DSH_IDLE_TTL_SEC` | `900` | 池化运行时被回收前的空闲窗口（会话可凭 `DSH_HOME` 续用）。 |
 | `DSH_THINKING_FILTER` | `enable` | `enable` 让 dsh 经本地回环代理访问网关，双向剥离 Anthropic `redacted_thinking` 块（内置 adapter 无法回放该块，第二轮会报 `UNSUPPORTED_CONTENT`），`thinking` 块保留；`disable` 直连网关。其它取值启动即失败。 |
+| `DSH_PERMISSION_MODE` | `workspace-write` | dsh 在沙箱内应用的权限上限（`read-only` \| `workspace-write` \| `danger-full-access`）。不要设得比沙箱本身更宽。 |
 | `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(空)_ / `ariacompute/ariamodel` | **两种运行时（`dsh` 与 `native`）共用**的模型网关配置。该值是网关根地址；`native` 追加 `/v1/chat/completions`，`dsh` 追加 `/anthropic/v1/messages`。不再回退 `OPENAI_*`。`dsh` 通过子进程白名单接收这些值。仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
 | `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
@@ -1114,6 +1115,8 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 | `AGENT_COMPRESSION` | `on` | 面向模型的规则化工具输出投影 |
 | `AGENT_CREDENTIALS_DIR` | *（未设置即关闭）* | 落盘加密的凭据库 |
 | `AGENT_CREDENTIAL_MASTER_KEY` | *（开启凭据库时必填）* | CHACHA20-POLY1305 的口令 |
+| `AGENT_CREDENTIAL_MASTER_KEY_ENV` | `AGENT_CREDENTIAL_MASTER_KEY` | 存放口令的环境变量名，供以其他变量名注入的部署使用 |
+| `AGENT_CREDENTIAL_ROTATE_SECS` | `0` | 凭据轮换周期（秒）；`0` 表示不轮换 |
 | `AGENT_IDLE_TIMEOUT_SECS` | `900` | `0` 关闭挂起；五个信号必须全部静默 |
 
 凭据在工具参数中以字面量 `${credential}` 书写；明文只在边界处替换，绝不进入日志、事件或审计记录。
@@ -1140,6 +1143,7 @@ docker compose up
 | `AGENT_EGRESS_PROXY_URL` | sandbox 内可达的地址（默认 `http://aria-egress-proxy:8080`） |
 | `CONTROL_PLANE_URL` | 代理如何访问本服务 |
 | `EGRESS_PROXY_TOKEN` | 共享密钥；未设置时每次启动随机生成 |
+| `EGRESS_PROXY_PEER_TTL_SECS` | 边车 peer 身份缓存 TTL（默认 `10`） |
 
 任何一步失败（没有网络、没有镜像、代理未运行、不在容器内）服务都会**拒绝启动**，并在消息中
 给出下一步动作；不会退回 `proxy` 模式。

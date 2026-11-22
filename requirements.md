@@ -25,7 +25,9 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 * Requests accept `OpenAI-Beta: agents=v1`. Auth is Bearer / ApiKey +
   Postgres `api_keys` (sha256), multi-tenant via `principal_id`.
 * Calls the model through `aria-agent-core`'s `OpenAiModel` (feature `openai`);
-  `OPENAI_BASE_URL` / `OPENAI_API_KEY` configure it.
+  `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` configure it. There is
+  no `OPENAI_*` fallback: a blank gateway URL/key fails instead of reaching
+  api.openai.com.
 * **Streaming contract (frozen).** `agent.turn.created` →
   `agent.turn.in_progress` → `agent.turn.item.added` / `agent.turn.item.done` →
   `agent.turn.output_text.delta` → `agent.turn.output_text.done` →

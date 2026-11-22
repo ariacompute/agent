@@ -246,6 +246,7 @@ cp .env.example .env
 | `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
 | `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
 | `DSH_THINKING_FILTER` | `enable` | `enable` routes dsh through a loopback proxy that strips Anthropic `redacted_thinking` blocks in both directions (the bundled adapter cannot replay them and fails turn two with `UNSUPPORTED_CONTENT`); `thinking` blocks are preserved. `disable` connects dsh straight to the gateway. Any other value fails at boot. |
+| `DSH_PERMISSION_MODE` | `workspace-write` | Tool-permission ceiling dsh applies inside the sandbox (`read-only` \| `workspace-write` \| `danger-full-access`). Never set it wider than the sandbox allows. |
 | `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(empty)_ / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. The value is the gateway root; `native` appends `/v1/chat/completions` and `dsh` appends `/anthropic/v1/messages`. No `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
@@ -1184,6 +1185,8 @@ cloud deployment cannot disagree about what the default is.
 | `AGENT_COMPRESSION` | `on` | rule-based projection of tool output for the model |
 | `AGENT_CREDENTIALS_DIR` | *(unset → disabled)* | encrypted-at-rest credential store |
 | `AGENT_CREDENTIAL_MASTER_KEY` | *(required if the store is on)* | passphrase for CHACHA20-POLY1305 |
+| `AGENT_CREDENTIAL_MASTER_KEY_ENV` | `AGENT_CREDENTIAL_MASTER_KEY` | name of the environment variable that holds the passphrase, for deployments that inject it under a different name |
+| `AGENT_CREDENTIAL_ROTATE_SECS` | `0` | credential rotation period in seconds; `0` disables rotation |
 | `AGENT_IDLE_TIMEOUT_SECS` | `900` | `0` disables suspension; five signals must all be quiet |
 
 Credentials are written as the literal `${credential}`; the plaintext is only
@@ -1213,6 +1216,7 @@ with `network_mode=aria-egress`. The proxy is not a compose service.
 | `AGENT_EGRESS_PROXY_URL` | address reachable from the sandbox (default `http://aria-egress-proxy:8080`) |
 | `CONTROL_PLANE_URL` | how the proxy reaches this service |
 | `EGRESS_PROXY_TOKEN` | shared secret; generated per boot when unset |
+| `EGRESS_PROXY_PEER_TTL_SECS` | peer identity cache TTL for the sidecar (default `10`) |
 
 If any step fails (no network, no image, proxy not running, not inside a
 container) the service **refuses to start** with the next action in the message.

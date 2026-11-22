@@ -95,8 +95,9 @@ see `docs/followups/*` for the downstream cleanups.
 - [x] `aria-agent-cloud`: `GET /v1/agents` list (admins see all, tenants their
       own) + idempotent default agent seed `agent-demo` / `Agent Demo` with an
       in-place rename of the legacy `playground-demo` row.
-- [x] `aria-agent-core`: `OpenAiModel` honours `OPENAI_BASE_URL` so the agent
-      can target an OpenAI-compatible gateway.
+- [x] `aria-agent-core`: `OpenAiModel` honours `GATEWAY_BASE_URL` /
+      `GATEWAY_API_KEY` / `GATEWAY_MODEL` so the agent can target an
+      OpenAI-compatible gateway (no `OPENAI_*` fallback).
 - [x] Docs: `README.md` / `README_cn.md` streaming examples (Python / Rust /
       TypeScript) parse `response.*`, plus a new "OpenAI Agents API
       compatibility" section (event table + official-SDK snippet) and the
