@@ -2089,6 +2089,38 @@ mod tests {
         assert!(err.to_string().contains("start restored"), "{err}");
     }
 
+    /// The checkpoint surface (ADR-0022) must report engine failures from the
+    /// stub, not from whatever daemon happens to exist on the runner: `cov-check`
+    /// has to be hermetic (see `docs/coverage.md`).
+    #[tokio::test]
+    async fn docker_status_checkpoint_and_restore_surface_engine_errors() {
+        let handle = SandboxHandle { id: "cid-1".into() };
+
+        let inspect = EngineStub::start_failing(Route::InspectContainer);
+        let err = inspect.sandbox().status(&handle).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
+        assert!(err.to_string().contains("inspect cid-1"), "{err}");
+
+        let commit = EngineStub::start_failing(Route::CommitContainer);
+        let err = commit.sandbox().checkpoint(&handle).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
+        assert!(err.to_string().contains("commit cid-1"), "{err}");
+
+        // Restore: the checkpoint image cannot even be created, so there is
+        // nothing to start.
+        let checkpoint = CheckpointRef::new("aria-ckpt-cid-1:latest", "cid-1", 1);
+        let create = EngineStub::start_failing(Route::CreateContainer);
+        let err = create
+            .sandbox()
+            .restore(&checkpoint, &stub_spec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err}");
+        // The message names the checkpoint id (a fresh uuid), not the source.
+        assert!(err.to_string().contains("restore "), "{err}");
+        assert_eq!(checkpoint.source, "cid-1");
+    }
+
     #[tokio::test]
     async fn docker_spawn_surfaces_create_and_start_errors() {
         let create = EngineStub::start_failing(Route::CreateContainer);
