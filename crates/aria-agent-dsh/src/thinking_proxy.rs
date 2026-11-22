@@ -21,6 +21,7 @@
 //! gateway. See `docs/adr/0019-dsh-runtime.md`.
 
 use std::collections::BTreeSet;
+use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -32,7 +33,7 @@ use reqwest::header::{
 };
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::runtime::dsh_base_url;
@@ -164,36 +165,36 @@ impl SseRedactedFilter {
     }
 
     /// Filter one complete SSE frame. `None` means the whole frame is dropped.
-    pub fn filter_frame(&mut self, frame: &str) -> Result<Option<String>, CoreError> {
+    pub fn filter_frame(&mut self, frame: &str) -> Option<String> {
         let Some((prefix, mut data)) = parse_sse_frame(frame) else {
-            return Ok(Some(frame.to_string()));
+            return Some(frame.to_string());
         };
         let kind = data.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
             "content_block_start" => {
                 let Some(index) = data.get("index").and_then(Value::as_u64) else {
-                    return Ok(Some(frame.to_string()));
+                    return Some(frame.to_string());
                 };
                 if data.get("content_block").is_some_and(is_redacted) {
                     self.suppressed.insert(index);
-                    return Ok(None);
+                    return None;
                 }
                 let new_index = remap_index(index, &self.suppressed);
                 if new_index == index {
-                    return Ok(Some(frame.to_string()));
+                    return Some(frame.to_string());
                 }
                 data["index"] = json!(new_index);
             }
             "content_block_delta" | "content_block_stop" => {
                 let Some(index) = data.get("index").and_then(Value::as_u64) else {
-                    return Ok(Some(frame.to_string()));
+                    return Some(frame.to_string());
                 };
                 if self.suppressed.contains(&index) {
-                    return Ok(None);
+                    return None;
                 }
                 let new_index = remap_index(index, &self.suppressed);
                 if new_index == index {
-                    return Ok(Some(frame.to_string()));
+                    return Some(frame.to_string());
                 }
                 data["index"] = json!(new_index);
             }
@@ -204,12 +205,12 @@ impl SseRedactedFilter {
                     .map(|content| strip_from_content(Some(content)))
                     .unwrap_or(0);
                 if removed == 0 {
-                    return Ok(Some(frame.to_string()));
+                    return Some(frame.to_string());
                 }
             }
-            _ => return Ok(Some(frame.to_string())),
+            _ => return Some(frame.to_string()),
         }
-        Ok(Some(rebuild_frame(&prefix, &data)))
+        Some(rebuild_frame(&prefix, &data))
     }
 }
 
@@ -222,6 +223,58 @@ const MAX_SSE_FRAME_BYTES: usize = 1024 * 1024;
 /// bound, so a live (but slow) stream keeps flowing while a dead one is cut.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Format a `CoreError::Config` from a fallible step. The mapping lives in one
+/// helper on purpose: a per-call-site `map_err(|e| ...)` closure is a region
+/// that stays unexecuted on the happy path (see `docs/coverage.md`).
+fn config_err<E: std::fmt::Display>(context: &'static str) -> impl FnOnce(E) -> CoreError {
+    move |error| CoreError::Config(format!("{context}: {error}"))
+}
+
+/// The same for `CoreError::Model`.
+fn model_err<E: std::fmt::Display>(context: &'static str) -> impl FnOnce(E) -> CoreError {
+    move |error| CoreError::Model(format!("{context}: {error}"))
+}
+
+/// Build the client used for upstream calls. `rustls-tls` uses the compiled-in
+/// webpki-roots 1.0.10+ store, never the system CA bundle (eMudhra/emSign CA
+/// compromise, 2026-10).
+fn build_client() -> Result<Client, CoreError> {
+    build_client_with(|| {
+        Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+    })
+}
+
+/// Seam for [`build_client`]: the TLS backend cannot be made to fail on demand.
+fn build_client_with<B, E>(build: B) -> Result<Client, CoreError>
+where
+    B: FnOnce() -> Result<Client, E>,
+    E: std::fmt::Display,
+{
+    build().map_err(config_err("cannot build proxy TLS client"))
+}
+
+/// Seam for the loopback listener: `bind`, `local_addr` and `accept` failures
+/// cannot be produced against a real ephemeral socket, so tests inject one.
+#[async_trait::async_trait]
+trait ProxyListener: Send + 'static {
+    async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)>;
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+}
+
+#[async_trait::async_trait]
+impl ProxyListener for TcpListener {
+    async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        TcpListener::accept(self).await
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        TcpListener::local_addr(self)
+    }
+}
 
 /// A loopback reverse proxy that sits between dsh and the real gateway.
 ///
@@ -238,25 +291,29 @@ impl ThinkingFilterProxy {
     /// Bind an ephemeral loopback port and start the accept loop. A failure to
     /// bind or build the TLS client is a hard error (fail closed).
     pub async fn start(upstream_root: &str) -> Result<Self, CoreError> {
+        Self::start_with(upstream_root, || TcpListener::bind("127.0.0.1:0")).await
+    }
+
+    /// `bind` is a seam so tests can exercise the binding and address failures.
+    async fn start_with<L, B, F>(upstream_root: &str, bind: B) -> Result<Self, CoreError>
+    where
+        L: ProxyListener,
+        B: FnOnce() -> F,
+        F: std::future::Future<Output = io::Result<L>>,
+    {
         let upstream_base = dsh_base_url(upstream_root);
         if upstream_base.is_empty() {
             return Err(CoreError::Config(
                 "thinking filter proxy: empty upstream root".into(),
             ));
         }
-        // `rustls-tls` uses the compiled-in webpki-roots 1.0.10+ store, never the
-        // system CA bundle (eMudhra/emSign CA compromise, 2026-10).
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .build()
-            .map_err(|e| CoreError::Config(format!("cannot build proxy TLS client: {e}")))?;
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let client = build_client()?;
+        let listener = bind()
             .await
-            .map_err(|e| CoreError::Config(format!("cannot bind thinking filter proxy: {e}")))?;
+            .map_err(config_err("cannot bind thinking filter proxy"))?;
         let addr = listener
             .local_addr()
-            .map_err(|e| CoreError::Config(format!("cannot read proxy address: {e}")))?;
+            .map_err(config_err("cannot read proxy address"))?;
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
@@ -320,7 +377,10 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, value)| value.as_str())
 }
 
-async fn read_request_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), CoreError> {
+async fn read_request_head<S>(stream: &mut S) -> Result<(String, Vec<u8>), CoreError>
+where
+    S: AsyncRead + Unpin,
+{
     let mut buf = Vec::new();
     loop {
         if buf.len() > MAX_REQUEST_HEAD_BYTES {
@@ -330,7 +390,7 @@ async fn read_request_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), 
         let n = stream
             .read(&mut chunk)
             .await
-            .map_err(|e| CoreError::Model(format!("proxy read failed: {e}")))?;
+            .map_err(model_err("proxy read failed"))?;
         if n == 0 {
             return Err(CoreError::Model(
                 "connection closed before request head".into(),
@@ -349,9 +409,9 @@ type ParsedRequestHead = (String, String, Vec<(String, String)>);
 
 fn parse_request_head(head: &str) -> Result<ParsedRequestHead, CoreError> {
     let mut lines = head.split("\r\n");
-    let request_line = lines
-        .next()
-        .ok_or_else(|| CoreError::Model("empty proxy request".into()))?;
+    // `split` always yields at least one item (possibly empty), so an empty head
+    // falls through to the "missing request method" error below.
+    let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
     let method = parts
         .next()
@@ -370,20 +430,16 @@ fn parse_request_head(head: &str) -> Result<ParsedRequestHead, CoreError> {
     Ok((method, target, headers))
 }
 
-async fn write_response_head(
-    stream: &mut TcpStream,
-    status: StatusCode,
-    headers: &HeaderMap,
-    content_length: Option<usize>,
-) -> Result<(), CoreError> {
+/// Render the downstream response head. `content-length` is recomputed and
+/// `content-encoding` is never forwarded (the proxy forces identity encoding so
+/// it can always inspect bodies).
+fn build_head(status: StatusCode, headers: &HeaderMap, content_length: Option<usize>) -> String {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
         status.as_u16(),
         status.canonical_reason().unwrap_or("")
     );
     for (name, value) in headers {
-        // `content-length` is recomputed, `content-encoding` is never forwarded
-        // (the proxy forces identity encoding so it can always inspect bodies).
         if is_hop_by_hop(name.as_str()) || name == CONTENT_LENGTH || name == CONTENT_ENCODING {
             continue;
         }
@@ -399,10 +455,69 @@ async fn write_response_head(
         head.push_str(&format!("Content-Length: {len}\r\n"));
     }
     head.push_str("\r\n");
+    head
+}
+
+async fn write_head<S>(
+    stream: &mut S,
+    status: StatusCode,
+    headers: &HeaderMap,
+    content_length: Option<usize>,
+) -> Result<(), CoreError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let head = build_head(status, headers, content_length);
     stream
         .write_all(head.as_bytes())
         .await
-        .map_err(|e| CoreError::Model(format!("proxy write failed: {e}")))
+        .map_err(model_err("proxy write failed"))
+}
+
+/// Head and body go out in one write so a slow client cannot split the response.
+/// Read the request body up to `content_length`, appending to whatever arrived
+/// alongside the head. EOF before the declared length means the client vanished
+/// mid-body, which is a hard error (never a silently truncated prompt).
+async fn read_body<S>(
+    stream: &mut S,
+    mut body: Vec<u8>,
+    content_length: usize,
+) -> Result<Vec<u8>, CoreError>
+where
+    S: AsyncRead + Unpin,
+{
+    while body.len() < content_length {
+        let mut chunk = [0u8; 8192];
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(model_err("proxy body read failed"))?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    if body.len() != content_length {
+        return Err(CoreError::Model("incomplete proxy request body".into()));
+    }
+    Ok(body)
+}
+
+async fn write_response<S>(
+    stream: &mut S,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), CoreError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut out = build_head(status, headers, Some(body.len())).into_bytes();
+    out.extend_from_slice(body);
+    stream
+        .write_all(&out)
+        .await
+        .map_err(model_err("proxy response write failed"))
 }
 
 fn split_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
@@ -432,7 +547,10 @@ fn split_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
 /// Stream an upstream SSE body through the filter. Errors after the response
 /// head is written are logged and end the stream; they must not become a second
 /// HTTP response on the same connection.
-async fn pipe_sse(stream: &mut TcpStream, response: reqwest::Response) {
+async fn pipe_sse<S>(stream: &mut S, response: reqwest::Response)
+where
+    S: AsyncWrite + Unpin,
+{
     let mut filter = SseRedactedFilter::new();
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunks = response.bytes_stream();
@@ -447,24 +565,12 @@ async fn pipe_sse(stream: &mut TcpStream, response: reqwest::Response) {
         buffer.extend_from_slice(&chunk);
         while let Some((frame_bytes, consumed)) = split_sse_frame(&buffer) {
             buffer.drain(..consumed);
-            let frame = match String::from_utf8(frame_bytes) {
-                Ok(frame) => frame,
-                Err(_) => {
-                    tracing::debug!("thinking filter proxy dropped a non-UTF8 SSE frame");
-                    return;
-                }
+            let Ok(frame) = String::from_utf8(frame_bytes) else {
+                tracing::debug!("thinking filter proxy dropped a non-UTF8 SSE frame");
+                return;
             };
-            match filter.filter_frame(&frame) {
-                Ok(Some(kept)) => {
-                    if stream.write_all(kept.as_bytes()).await.is_err()
-                        || stream.write_all(b"\n\n").await.is_err()
-                    {
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::debug!(error = %e, "thinking filter proxy SSE filter failed");
+            if let Some(kept) = filter.filter_frame(&frame) {
+                if write_frame(stream, &kept).await.is_err() {
                     return;
                 }
             }
@@ -476,16 +582,26 @@ async fn pipe_sse(stream: &mut TcpStream, response: reqwest::Response) {
     }
     if !buffer.is_empty() {
         if let Ok(frame) = String::from_utf8(buffer) {
-            if let Ok(Some(kept)) = filter.filter_frame(frame.trim_end()) {
-                let _ = stream.write_all(kept.as_bytes()).await;
-                let _ = stream.write_all(b"\n\n").await;
+            if let Some(kept) = filter.filter_frame(frame.trim_end()) {
+                let _ = write_frame(stream, &kept).await;
             }
         }
     }
-    tracing::debug!(
-        removed = filter.removed_count(),
-        "thinking filter proxy finished SSE stream"
-    );
+    tracing::debug!(removed = filter.removed_count(), "thinking proxy SSE done");
+}
+
+/// Write one filtered frame followed by the SSE frame terminator.
+async fn write_frame<S>(stream: &mut S, frame: &str) -> Result<(), CoreError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut out = Vec::with_capacity(frame.len() + 2);
+    out.extend_from_slice(frame.as_bytes());
+    out.extend_from_slice(b"\n\n");
+    stream
+        .write_all(&out)
+        .await
+        .map_err(model_err("proxy SSE write failed"))
 }
 
 async fn serve_connection(mut stream: TcpStream, client: Client, upstream_base: String) {
@@ -501,12 +617,15 @@ async fn serve_connection(mut stream: TcpStream, client: Client, upstream_base: 
     }
 }
 
-async fn handle_connection(
-    stream: &mut TcpStream,
+async fn handle_connection<S>(
+    stream: &mut S,
     client: &Client,
     upstream_base: &str,
-) -> Result<(), CoreError> {
-    let (head, mut body) = read_request_head(stream).await?;
+) -> Result<(), CoreError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (head, body) = read_request_head(stream).await?;
     let (method, target, headers) = parse_request_head(&head)?;
     let content_length = header_value(&headers, CONTENT_LENGTH.as_str())
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -526,20 +645,7 @@ async fn handle_connection(
             "chunked request bodies are not supported by the thinking filter proxy".into(),
         ));
     }
-    while body.len() < content_length {
-        let mut chunk = [0u8; 8192];
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|e| CoreError::Model(format!("proxy body read failed: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..n]);
-    }
-    if body.len() != content_length {
-        return Err(CoreError::Model("incomplete proxy request body".into()));
-    }
+    let mut body = read_body(stream, body, content_length).await?;
 
     let mut removed_request = 0;
     if !body.is_empty() {
@@ -547,20 +653,19 @@ async fn handle_connection(
             .unwrap_or("")
             .to_ascii_lowercase();
         if content_type.is_empty() || content_type.contains("json") {
-            let mut value: Value = serde_json::from_slice(&body)
-                .map_err(|e| CoreError::Model(format!("invalid proxy request JSON: {e}")))?;
+            let mut value: Value =
+                serde_json::from_slice(&body).map_err(model_err("invalid proxy request JSON"))?;
             removed_request = strip_redacted_from_messages_json(&mut value);
             if removed_request > 0 {
-                body = serde_json::to_vec(&value).map_err(|e| {
-                    CoreError::Model(format!("cannot serialize proxy request: {e}"))
-                })?;
+                body = serde_json::to_vec(&value)
+                    .map_err(model_err("cannot serialize proxy request"))?;
             }
         }
     }
 
     let url = upstream_url(upstream_base, &target)?;
-    let method = Method::from_bytes(method.as_bytes())
-        .map_err(|e| CoreError::Model(format!("invalid proxy request method: {e}")))?;
+    let method =
+        Method::from_bytes(method.as_bytes()).map_err(model_err("invalid proxy request method"))?;
     let mut request = client.request(method, &url);
     for (name, value) in &headers {
         // `accept-encoding` is dropped: a compressed response could not be
@@ -571,10 +676,10 @@ async fn handle_connection(
         {
             continue;
         }
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|e| CoreError::Model(format!("invalid proxy header: {e}")))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|e| CoreError::Model(format!("invalid proxy header value: {e}")))?;
+        let name =
+            HeaderName::from_bytes(name.as_bytes()).map_err(model_err("invalid proxy header"))?;
+        let value =
+            HeaderValue::from_str(value).map_err(model_err("invalid proxy header value"))?;
         request = request.header(name, value);
     }
     let response = request
@@ -582,7 +687,7 @@ async fn handle_connection(
         .body(body)
         .send()
         .await
-        .map_err(|e| CoreError::Model(format!("upstream request failed: {e}")))?;
+        .map_err(model_err("upstream request failed"))?;
     let status = response.status();
     let response_headers = response.headers().clone();
     // Identity was requested; anything else means the body cannot be inspected,
@@ -603,7 +708,7 @@ async fn handle_connection(
         .to_ascii_lowercase();
 
     if content_type.contains("text/event-stream") {
-        write_response_head(stream, status, &response_headers, None).await?;
+        write_head(stream, status, &response_headers, None).await?;
         pipe_sse(stream, response).await;
         tracing::debug!(removed_request, "thinking filter proxy streamed a response");
         return Ok(());
@@ -612,34 +717,31 @@ async fn handle_connection(
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| CoreError::Model(format!("upstream body failed: {e}")))?;
+        .map_err(model_err("upstream body failed"))?;
     let mut body = bytes.to_vec();
     let mut removed_response = 0;
     if content_type.contains("json") && !body.is_empty() {
         if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
             removed_response = strip_redacted_from_response_json(&mut value);
             if removed_response > 0 {
-                body = serde_json::to_vec(&value)
-                    .map_err(|e| CoreError::Model(format!("cannot serialize response: {e}")))?;
+                body =
+                    serde_json::to_vec(&value).map_err(model_err("cannot serialize response"))?;
             }
         }
     }
-    write_response_head(stream, status, &response_headers, Some(body.len())).await?;
-    stream
-        .write_all(&body)
-        .await
-        .map_err(|e| CoreError::Model(format!("proxy response write failed: {e}")))?;
-    tracing::debug!(
-        removed_request,
-        removed_response,
-        "thinking filter proxy forwarded a response"
-    );
+    write_response(stream, status, &response_headers, &body).await?;
+    tracing::debug!(removed_request, removed_response, "proxy forwarded");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::{Context, Poll};
+    use tokio::net::TcpListener as TokioListener;
+    use tokio::sync::oneshot;
+
+    const TEST_TIMEOUT: Duration = Duration::from_millis(50);
 
     #[test]
     fn filter_mode_accepts_enable_disable_and_defaults_on() {
@@ -776,34 +878,25 @@ mod tests {
         let message_stop = frame("message_stop", json!({"type":"message_stop"}));
 
         assert_eq!(
-            filter.filter_frame(&start_text).unwrap().as_deref(),
+            filter.filter_frame(&start_text).as_deref(),
             Some(start_text.as_str())
         );
         assert_eq!(
-            filter.filter_frame(&delta_text).unwrap().as_deref(),
+            filter.filter_frame(&delta_text).as_deref(),
             Some(delta_text.as_str())
         );
-        assert_eq!(filter.filter_frame(&start_redacted).unwrap(), None);
-        assert_eq!(filter.filter_frame(&stop_redacted).unwrap(), None);
+        assert_eq!(filter.filter_frame(&start_redacted), None);
+        assert_eq!(filter.filter_frame(&stop_redacted), None);
         assert_eq!(filter.removed_count(), 1);
 
-        let rewritten_tool = filter
-            .filter_frame(&start_tool)
-            .unwrap()
-            .expect("tool start kept");
+        let rewritten_tool = filter.filter_frame(&start_tool).expect("tool start kept");
         assert!(rewritten_tool.contains("\"index\":1"), "{rewritten_tool}");
-        let rewritten_delta = filter
-            .filter_frame(&delta_tool)
-            .unwrap()
-            .expect("tool delta kept");
+        let rewritten_delta = filter.filter_frame(&delta_tool).expect("tool delta kept");
         assert!(rewritten_delta.contains("\"index\":1"), "{rewritten_delta}");
-        let rewritten_stop = filter
-            .filter_frame(&stop_tool)
-            .unwrap()
-            .expect("tool stop kept");
+        let rewritten_stop = filter.filter_frame(&stop_tool).expect("tool stop kept");
         assert!(rewritten_stop.contains("\"index\":1"), "{rewritten_stop}");
         assert_eq!(
-            filter.filter_frame(&message_stop).unwrap().as_deref(),
+            filter.filter_frame(&message_stop).as_deref(),
             Some(message_stop.as_str())
         );
     }
@@ -818,10 +911,7 @@ mod tests {
                 {"type":"text","text":""}
             ]}}),
         );
-        let rewritten = filter
-            .filter_frame(&message_start)
-            .unwrap()
-            .expect("message start");
+        let rewritten = filter.filter_frame(&message_start).expect("message start");
         assert!(!rewritten.contains("redacted_thinking"), "{rewritten}");
 
         for index in [0, 2] {
@@ -829,14 +919,14 @@ mod tests {
                 "content_block_start",
                 json!({"type":"content_block_start","index":index,"content_block":{"type":"redacted_thinking","data":"s"}}),
             );
-            assert_eq!(filter.filter_frame(&start).unwrap(), None);
+            assert_eq!(filter.filter_frame(&start), None);
         }
         assert_eq!(filter.removed_count(), 2);
         let other = frame(
             "content_block_start",
             json!({"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}),
         );
-        let rewritten = filter.filter_frame(&other).unwrap().expect("kept");
+        let rewritten = filter.filter_frame(&other).expect("kept");
         assert!(rewritten.contains("\"index\":1"), "{rewritten}");
     }
 
@@ -852,12 +942,85 @@ mod tests {
                 json!({"type":"content_block_start","content_block":{"type":"text"}}),
             ),
         ] {
-            assert_eq!(
-                filter.filter_frame(&frame).unwrap().as_deref(),
-                Some(frame.as_str())
-            );
+            assert_eq!(filter.filter_frame(&frame).as_deref(), Some(frame.as_str()));
         }
         assert_eq!(filter.removed_count(), 0);
+    }
+
+    #[test]
+    fn sse_filter_passes_through_frames_without_index_or_redaction() {
+        let mut filter = SseRedactedFilter::new();
+        for frame in [
+            frame(
+                "content_block_start",
+                json!({"type":"content_block_start","content_block":{"type":"text","text":""}}),
+            ),
+            frame(
+                "content_block_delta",
+                json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}),
+            ),
+            frame("content_block_stop", json!({"type":"content_block_stop"})),
+            // `message_start` without a content array, and with nothing removed.
+            frame("message_start", json!({"type":"message_start"})),
+            frame(
+                "message_start",
+                json!({"type":"message_start","message":{"content":[{"type":"text","text":""}]}}),
+            ),
+        ] {
+            assert_eq!(filter.filter_frame(&frame).as_deref(), Some(frame.as_str()));
+        }
+        assert_eq!(filter.removed_count(), 0);
+    }
+
+    #[test]
+    fn sse_frame_split_prefers_the_earliest_terminator() {
+        assert_eq!(split_sse_frame(b"a\r\n\r\nb"), Some((b"a".to_vec(), 5)));
+        assert_eq!(split_sse_frame(b"a\n\nb"), Some((b"a".to_vec(), 3)));
+        assert_eq!(split_sse_frame(b"a\r\n\r\nb\n\n"), Some((b"a".to_vec(), 5)));
+        assert_eq!(split_sse_frame(b"a\n\nb\r\n\r\n"), Some((b"a".to_vec(), 3)));
+        assert_eq!(split_sse_frame(b"a\nb"), None);
+    }
+
+    #[test]
+    fn upstream_url_handles_root_and_bare_paths() {
+        let base = dsh_base_url("https://gateway.example/");
+        assert_eq!(base, "https://gateway.example/anthropic/v1");
+        assert_eq!(
+            upstream_url(&base, "/anthropic/v1").expect("root"),
+            "https://gateway.example/anthropic/v1"
+        );
+        assert_eq!(
+            upstream_url(&base, "/messages?stream=true").expect("query"),
+            "https://gateway.example/anthropic/v1/messages?stream=true"
+        );
+        assert!(upstream_url(&base, "messages").is_err());
+    }
+
+    #[test]
+    fn response_head_drops_hop_by_hop_and_opaque_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        headers.insert("content-length", HeaderValue::from_static("99"));
+        headers.insert("x-request-id", HeaderValue::from_static("abc"));
+        // obs-text: accepted by `from_bytes`, rejected by `to_str`.
+        headers.insert(
+            "x-opaque",
+            HeaderValue::from_bytes(b"\x80").expect("opaque value"),
+        );
+        let head = build_head(StatusCode::OK, &headers, Some(2));
+        assert!(head.contains("x-request-id: abc"), "{head}");
+        assert!(head.contains("Content-Length: 2"), "{head}");
+        assert!(!head.contains("connection"), "{head}");
+        assert!(!head.contains("content-encoding"), "{head}");
+        assert!(!head.contains("x-opaque"), "{head}");
+        assert!(!head.contains("99"), "{head}");
+
+        // Unknown status codes have no canonical reason phrase.
+        let custom = StatusCode::from_u16(599).expect("status");
+        let head = build_head(custom, &HeaderMap::new(), None);
+        assert!(head.starts_with("HTTP/1.1 599 "), "{head}");
+        assert!(!head.contains("Content-Length"), "{head}");
     }
 
     #[derive(Debug)]
@@ -867,6 +1030,16 @@ mod tests {
         x_api_key: String,
         authorization: String,
         accept_encoding: String,
+        connection: String,
+        keep_alive: String,
+    }
+
+    enum UpstreamReply {
+        Json(String),
+        Sse(Vec<u8>),
+        EncodedJson(String),
+        Plain(String),
+        TruncatedSse,
     }
 
     async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
@@ -875,25 +1048,38 @@ mod tests {
         let len = header_value(&headers, "content-length")
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(0);
-        while body.len() < len {
-            let mut chunk = [0u8; 4096];
-            let n = stream.read(&mut chunk).await.expect("body read");
-            if n == 0 {
-                break;
-            }
-            body.extend_from_slice(&chunk[..n]);
-        }
+        let mut rest = vec![0u8; len.saturating_sub(body.len())];
+        stream.read_exact(&mut rest).await.expect("body read");
+        body.extend_from_slice(&rest);
         (head, body)
     }
 
-    /// One-shot fake Anthropic-compatible gateway. Records what the proxy sent
-    /// and replies with a response containing a redacted block.
-    async fn spawn_fake_upstream(
-        sse: bool,
-    ) -> (SocketAddr, tokio::sync::oneshot::Receiver<CapturedRequest>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    async fn write_http(
+        stream: &mut TcpStream,
+        content_type: &str,
+        extra: Option<(&str, &str)>,
+        body: &[u8],
+    ) {
+        let mut head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        if let Some((name, value)) = extra {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).await.expect("write head");
+        stream.write_all(body).await.expect("write body");
+    }
+
+    /// One-shot fake Anthropic-compatible gateway: records what the proxy sent,
+    /// then answers with a body that contains a redacted block.
+    async fn spawn_upstream(
+        reply: UpstreamReply,
+    ) -> (SocketAddr, oneshot::Receiver<CapturedRequest>) {
+        let listener = TokioListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let (head, body) = read_http_request(&mut stream).await;
@@ -905,58 +1091,70 @@ mod tests {
                 x_api_key: header("x-api-key"),
                 authorization: header("authorization"),
                 accept_encoding: header("accept-encoding"),
+                connection: header("connection"),
+                keep_alive: header("keep-alive"),
             });
-            let (content_type, response_body) = if sse {
-                (
-                    "text/event-stream",
-                    concat!(
-                        "event: content_block_start\n",
-                        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-                        "event: content_block_start\n",
-                        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"sealed\"}}\n\n",
-                        "event: content_block_stop\n",
-                        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
-                        "event: content_block_start\n",
-                        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"shell\"}}\n\n",
-                        "event: message_stop\n",
-                        "data: {\"type\":\"message_stop\"}\n\n",
+            match reply {
+                UpstreamReply::Json(body) => {
+                    write_http(&mut stream, "application/json", None, body.as_bytes()).await;
+                }
+                UpstreamReply::EncodedJson(body) => {
+                    write_http(
+                        &mut stream,
+                        "application/json",
+                        Some(("Content-Encoding", "gzip")),
+                        body.as_bytes(),
                     )
-                    .to_string(),
-                )
-            } else {
-                (
-                    "application/json",
-                    json!({"content":[
-                        {"type":"redacted_thinking","data":"sealed"},
-                        {"type":"text","text":"hello"}
-                    ]})
-                    .to_string(),
-                )
-            };
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                response_body.len()
-            );
-            stream.write_all(head.as_bytes()).await.expect("write head");
-            stream
-                .write_all(response_body.as_bytes())
-                .await
-                .expect("write body");
+                    .await;
+                }
+                UpstreamReply::Plain(body) => {
+                    write_http(&mut stream, "text/plain", None, body.as_bytes()).await;
+                }
+                UpstreamReply::Sse(body) => {
+                    write_http(&mut stream, "text/event-stream", None, &body).await;
+                }
+                UpstreamReply::TruncatedSse => {
+                    // Declare more bytes than are sent, then close: the proxy's
+                    // body stream fails with an incomplete-message error.
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\n\r\n",
+                        )
+                        .await;
+                    let _ = stream
+                        .write_all(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+                        .await;
+                }
+            }
         });
         (addr, rx)
     }
 
-    async fn call_proxy(base_url: &str, body: &str) -> String {
-        let addr: SocketAddr = base_url
+    async fn start_proxy(upstream: SocketAddr) -> ThinkingFilterProxy {
+        ThinkingFilterProxy::start(&format!("http://{upstream}"))
+            .await
+            .expect("proxy start")
+    }
+
+    fn proxy_addr(proxy: &ThinkingFilterProxy) -> SocketAddr {
+        proxy
+            .local_base_url()
             .trim_start_matches("http://")
             .parse()
-            .expect("proxy addr");
-        let mut stream = TcpStream::connect(addr).await.expect("connect proxy");
-        let request = format!(
-            "POST /anthropic/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-Api-Key: secret-key\r\nAuthorization: Bearer gw-key\r\nAccept-Encoding: gzip, deflate\r\nContent-Length: {}\r\n\r\n{b}",
-            body.len(),
-            b = body
-        );
+            .expect("proxy addr")
+    }
+
+    fn post_request(target: &str, body: &str) -> String {
+        format!(
+            "POST {target} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-Api-Key: secret-key\r\nAuthorization: Bearer gw-key\r\nAccept-Encoding: gzip, deflate\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn exchange(proxy: &ThinkingFilterProxy, request: &str) -> String {
+        let mut stream = TcpStream::connect(proxy_addr(proxy))
+            .await
+            .expect("connect proxy");
         stream
             .write_all(request.as_bytes())
             .await
@@ -969,12 +1167,40 @@ mod tests {
         String::from_utf8_lossy(&response).into_owned()
     }
 
+    /// Drive `handle_connection` over an in-memory socket pair: no ports, no
+    /// timing, and the request is closed after the fixed payload.
+    async fn run_connection(request: &[u8], upstream: SocketAddr) -> Result<String, CoreError> {
+        let (mut client, mut server) = tokio::io::duplex(512 * 1024);
+        client.write_all(request).await.expect("write request");
+        client.shutdown().await.expect("shutdown");
+        let base = dsh_base_url(&format!("http://{upstream}"));
+        let http = build_client().expect("client");
+        handle_connection(&mut server, &http, &base).await?;
+        drop(server);
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.expect("read");
+        Ok(response)
+    }
+
+    async fn idle_upstream() -> SocketAddr {
+        TokioListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+    }
+
     #[tokio::test]
     async fn proxy_filters_json_request_and_response() {
-        let (upstream, captured) = spawn_fake_upstream(false).await;
-        let proxy = ThinkingFilterProxy::start(&format!("http://{upstream}"))
-            .await
-            .expect("proxy start");
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Json(
+            json!({"content":[
+                {"type":"redacted_thinking","data":"sealed"},
+                {"type":"text","text":"hello"}
+            ]})
+            .to_string(),
+        ))
+        .await;
+        let proxy = start_proxy(upstream).await;
         let body = json!({
             "model": "m",
             "messages": [{"role":"user","content":[
@@ -983,7 +1209,7 @@ mod tests {
             ]}]
         })
         .to_string();
-        let response = call_proxy(&proxy.local_base_url(), &body).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", &body)).await;
 
         let captured = captured.await.expect("captured request");
         assert_eq!(captured.target, "/anthropic/v1/messages");
@@ -991,6 +1217,9 @@ mod tests {
         assert_eq!(captured.authorization, "Bearer gw-key");
         // Compression is refused so every body can be inspected.
         assert_eq!(captured.accept_encoding, "identity");
+        // Hop-by-hop headers never reach the gateway.
+        assert!(captured.connection.is_empty(), "{captured:?}");
+        assert!(captured.keep_alive.is_empty(), "{captured:?}");
         assert!(
             !captured.body.contains("redacted_thinking"),
             "{}",
@@ -1009,46 +1238,242 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_filters_sse_stream_and_renumbers_indices() {
-        let (upstream, captured) = spawn_fake_upstream(true).await;
-        let proxy = ThinkingFilterProxy::start(&format!("http://{upstream}"))
-            .await
-            .expect("proxy start");
-        let response = call_proxy(&proxy.local_base_url(), "{}").await;
+        let sse = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"sealed\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"shell\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let (upstream, captured) =
+            spawn_upstream(UpstreamReply::Sse(sse.as_bytes().to_vec())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
 
         let _captured = captured.await.expect("captured request");
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(!response.contains("redacted_thinking"), "{response}");
-        // The tool_use block originally at index 2 must be renumbered to 1.
         assert!(response.contains("\"index\":1"), "{response}");
         assert!(response.contains("tool_use"), "{response}");
         assert!(response.contains("message_stop"), "{response}");
     }
 
     #[tokio::test]
+    async fn proxy_handles_crlf_sse_frames() {
+        let sse = "event: content_block_start\r\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n";
+        let (upstream, captured) =
+            spawn_upstream(UpstreamReply::Sse(sse.as_bytes().to_vec())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.contains("content_block_start"), "{response}");
+        assert!(response.contains("message_stop"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_flushes_a_trailing_sse_frame_without_terminator() {
+        let sse = "event: message_stop\ndata: {\"type\":\"message_stop\"}";
+        let (upstream, captured) =
+            spawn_upstream(UpstreamReply::Sse(sse.as_bytes().to_vec())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.contains("message_stop"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_drops_a_non_utf8_sse_frame() {
+        let mut sse = Vec::new();
+        sse.extend_from_slice(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
+        sse.extend_from_slice(b"event: bad\ndata: \xff\xfe\n\n");
+        sse.extend_from_slice(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Sse(sse)).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.contains("message_start"), "{response}");
+        assert!(!response.contains("message_stop"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_drops_an_oversized_sse_frame() {
+        let mut sse = Vec::new();
+        sse.extend_from_slice(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"",
+        );
+        sse.extend(std::iter::repeat_n(b'a', MAX_SSE_FRAME_BYTES + 16));
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Sse(sse)).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(!response.contains("aaaa"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_stops_when_the_upstream_stream_is_truncated() {
+        let (upstream, captured) = spawn_upstream(UpstreamReply::TruncatedSse).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(!response.contains("message_stop"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_passes_through_non_json_responses() {
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Plain("plain text".into())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("plain text"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_a_content_encoded_upstream() {
+        let (upstream, captured) = spawn_upstream(UpstreamReply::EncodedJson("{}".into())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 502"), "{response}");
+        assert!(response.contains("content-encoded"), "{response}");
+    }
+
+    #[tokio::test]
     async fn proxy_rejects_chunked_request_bodies() {
-        let (upstream, _captured) = spawn_fake_upstream(false).await;
-        let proxy = ThinkingFilterProxy::start(&format!("http://{upstream}"))
-            .await
-            .expect("proxy start");
-        let addr: SocketAddr = proxy
-            .local_base_url()
-            .trim_start_matches("http://")
-            .parse()
-            .expect("addr");
-        let mut stream = TcpStream::connect(addr).await.expect("connect proxy");
+        let upstream = idle_upstream().await;
+        let proxy = start_proxy(upstream).await;
         let request = "POST /anthropic/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .expect("write request");
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
-        let response = String::from_utf8_lossy(&response);
+        let response = exchange(&proxy, request).await;
         assert!(response.starts_with("HTTP/1.1 502"), "{response}");
         assert!(response.contains("chunked request bodies"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_serves_a_request_over_the_in_memory_socket() {
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Json(
+            json!({"content":[{"type":"text","text":"ok"}]}).to_string(),
+        ))
+        .await;
+        let response = run_connection(
+            post_request("/anthropic/v1/messages", "{}").as_bytes(),
+            upstream,
+        )
+        .await
+        .expect("handled");
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("\"text\":\"ok\""), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_an_oversized_body_declaration() {
+        let upstream = idle_upstream().await;
+        let request = format!(
+            "POST /anthropic/v1/messages HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            MAX_REQUEST_BODY_BYTES + 1
+        );
+        let err = run_connection(request.as_bytes(), upstream)
+            .await
+            .expect_err("body too large");
+        assert!(err.to_string().contains("body too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_an_incomplete_body() {
+        let upstream = idle_upstream().await;
+        let request = "POST /anthropic/v1/messages HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\nabc";
+        let err = run_connection(request.as_bytes(), upstream)
+            .await
+            .expect_err("incomplete body");
+        assert!(
+            err.to_string().contains("incomplete proxy request body"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_invalid_json_bodies() {
+        let upstream = idle_upstream().await;
+        let request =
+            "POST /anthropic/v1/messages HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 8\r\n\r\nnot-json";
+        let err = run_connection(request.as_bytes(), upstream)
+            .await
+            .expect_err("invalid json");
+        assert!(
+            err.to_string().contains("invalid proxy request JSON"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_unparsable_request_lines_and_headers() {
+        let upstream = idle_upstream().await;
+        let cases = [
+            ("\r\n\r\n", "missing request method"),
+            ("  \t\r\n\r\n", "missing request method"),
+            ("POST\r\n\r\n", "missing request target"),
+            ("G@T /x HTTP/1.1\r\n\r\n", "invalid proxy request method"),
+            (
+                "POST /x HTTP/1.1\r\nBad Name: value\r\n\r\n",
+                "invalid proxy header",
+            ),
+            (
+                "POST /x HTTP/1.1\r\nX-Bad: \u{7f}\r\n\r\n",
+                "invalid proxy header value",
+            ),
+        ];
+        for (request, expected) in cases {
+            let err = run_connection(request.as_bytes(), upstream)
+                .await
+                .expect_err(expected);
+            assert!(err.to_string().contains(expected), "{request:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_reports_an_unreachable_upstream() {
+        // Bind and drop to get a port that refuses connections.
+        let upstream = idle_upstream().await;
+        let request = post_request("/anthropic/v1/messages", "{}");
+        let err = run_connection(request.as_bytes(), upstream)
+            .await
+            .expect_err("upstream failure");
+        assert!(err.to_string().contains("upstream request failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn proxy_reads_a_body_that_arrives_after_the_head() {
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Json("{}".into())).await;
+        let base = dsh_base_url(&format!("http://{upstream}"));
+        let http = build_client().expect("client");
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move { handle_connection(&mut server, &http, &base).await });
+        client
+            .write_all(
+                b"POST /anthropic/v1/messages HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\n",
+            )
+            .await
+            .expect("head");
+        // Give the proxy a chance to consume the head before the body exists.
+        tokio::time::sleep(TEST_TIMEOUT).await;
+        client.write_all(b"{\"a\":1}").await.expect("body");
+        client.shutdown().await.expect("shutdown");
+        task.await.expect("join").expect("handled");
+        assert_eq!(captured.await.expect("captured").body, "{\"a\":1}");
     }
 
     #[tokio::test]
@@ -1060,21 +1485,233 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_maps_paths_without_duplicating_v1() {
-        let base = "https://gateway.example";
-        let normalized = dsh_base_url(base);
-        assert_eq!(
-            upstream_url(&normalized, "/anthropic/v1/messages").expect("url"),
-            "https://gateway.example/anthropic/v1/messages"
+    async fn start_reports_a_bind_failure() {
+        let err = ThinkingFilterProxy::start_with("https://gateway.example", || async {
+            Err::<AcceptFailingListener, _>(io::Error::other("address in use"))
+        })
+        .await
+        .expect_err("bind failure");
+        assert!(
+            err.to_string()
+                .contains("cannot bind thinking filter proxy"),
+            "{err}"
         );
-        assert_eq!(
-            upstream_url(&normalized, "/v1/messages").expect("url"),
-            "https://gateway.example/anthropic/v1/messages"
+    }
+
+    #[tokio::test]
+    async fn start_reports_an_address_failure() {
+        let err = ThinkingFilterProxy::start_with("https://gateway.example", || async {
+            Ok(AddressFailingListener)
+        })
+        .await
+        .expect_err("address failure");
+        assert!(
+            err.to_string().contains("cannot read proxy address"),
+            "{err}"
         );
-        assert_eq!(
-            upstream_url(&normalized, "/messages?stream=true").expect("url"),
-            "https://gateway.example/anthropic/v1/messages?stream=true"
+    }
+
+    #[tokio::test]
+    async fn accept_failures_end_the_accept_loop() {
+        let proxy = ThinkingFilterProxy::start_with("https://gateway.example", || async {
+            Ok(AcceptFailingListener)
+        })
+        .await
+        .expect("proxy");
+        assert_eq!(proxy.local_base_url(), "http://127.0.0.1:9");
+        // Let the spawned loop observe the failure and break out.
+        tokio::time::sleep(TEST_TIMEOUT).await;
+    }
+
+    #[test]
+    fn client_build_failure_is_a_config_error() {
+        let err = build_client_with(|| Err::<Client, _>(io::Error::other("no tls backend")))
+            .expect_err("client failure");
+        assert!(
+            err.to_string().contains("cannot build proxy TLS client"),
+            "{err}"
         );
-        assert!(upstream_url(&normalized, "messages").is_err());
+    }
+
+    #[tokio::test]
+    async fn request_head_must_stay_bounded() {
+        let (mut writer, mut reader) = tokio::io::duplex(256 * 1024);
+        let oversized = vec![b'X'; MAX_REQUEST_HEAD_BYTES + 4096];
+        writer.write_all(&oversized).await.expect("write head");
+        let err = read_request_head(&mut reader)
+            .await
+            .expect_err("head too large");
+        assert!(err.to_string().contains("head too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn request_head_eof_is_reported() {
+        let (writer, mut reader) = tokio::io::duplex(64);
+        drop(writer);
+        let err = read_request_head(&mut reader).await.expect_err("eof");
+        assert!(
+            err.to_string().contains("closed before request head"),
+            "{err}"
+        );
+    }
+
+    /// Reads fail immediately: the `SO_LINGER 0` reset cannot be relied on to
+    /// land before the proxy's next read on every kernel, so the seam is a
+    /// reader that always errors.
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset")))
+        }
+    }
+
+    #[tokio::test]
+    async fn body_bytes_after_the_head_are_appended() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(b"hello").await.expect("write body");
+        let body = read_body(&mut reader, Vec::new(), 5).await.expect("body");
+        assert_eq!(body, b"hello");
+        // Bytes that arrived with the head are kept and topped up.
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(b"lo").await.expect("write body");
+        let body = read_body(&mut reader, b"hel".to_vec(), 5)
+            .await
+            .expect("body");
+        assert_eq!(body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn a_short_body_is_an_error() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(b"abc").await.expect("write body");
+        writer.shutdown().await.expect("shutdown");
+        let err = read_body(&mut reader, Vec::new(), 5)
+            .await
+            .expect_err("short body");
+        assert!(
+            err.to_string().contains("incomplete proxy request body"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_read_failure_is_reported() {
+        let err = read_request_head(&mut FailingReader)
+            .await
+            .expect_err("read failure");
+        assert!(err.to_string().contains("proxy read failed"), "{err}");
+    }
+
+    /// Accepts anything but fails every write, so the three write branches are
+    /// exercised without a peer that has to disappear at the right moment.
+    struct FailingWriter;
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_write_failure_ends_the_stream() {
+        let (upstream, _captured) = spawn_upstream(UpstreamReply::Sse(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec(),
+        ))
+        .await;
+        let http = build_client().expect("client");
+        let response = http
+            .get(format!("http://{upstream}/anthropic/v1/messages"))
+            .send()
+            .await
+            .expect("response");
+        // The filtered frame cannot be written: the stream must end quietly.
+        pipe_sse(&mut FailingWriter, response).await;
+    }
+
+    #[tokio::test]
+    async fn write_failures_are_reported() {
+        let headers = HeaderMap::new();
+        let err = write_head(&mut FailingWriter, StatusCode::OK, &headers, None)
+            .await
+            .expect_err("head write");
+        assert!(err.to_string().contains("proxy write failed"), "{err}");
+
+        let err = write_response(&mut FailingWriter, StatusCode::OK, &headers, b"x")
+            .await
+            .expect_err("response write");
+        assert!(
+            err.to_string().contains("proxy response write failed"),
+            "{err}"
+        );
+
+        let err = write_frame(&mut FailingWriter, "data")
+            .await
+            .expect_err("frame write");
+        assert!(err.to_string().contains("proxy SSE write failed"), "{err}");
+
+        // Flushing and shutting down still succeed; only writes fail.
+        let mut writer = FailingWriter;
+        writer.flush().await.expect("flush");
+        writer.shutdown().await.expect("shutdown");
+    }
+
+    struct AddressFailingListener;
+
+    #[async_trait::async_trait]
+    impl ProxyListener for AddressFailingListener {
+        async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+            Err(io::Error::other("no address"))
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Err(io::Error::other("no address"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listener_without_an_address_fails_every_call() {
+        let err = AddressFailingListener.local_addr().expect_err("no address");
+        assert!(err.to_string().contains("no address"), "{err}");
+        let err = AddressFailingListener
+            .accept()
+            .await
+            .expect_err("no address");
+        assert!(err.to_string().contains("no address"), "{err}");
+    }
+
+    struct AcceptFailingListener;
+
+    #[async_trait::async_trait]
+    impl ProxyListener for AcceptFailingListener {
+        async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+            Err(io::Error::other("accept failed"))
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:9".parse::<SocketAddr>().expect("loopback addr"))
+        }
     }
 }

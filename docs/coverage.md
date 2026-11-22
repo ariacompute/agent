@@ -60,6 +60,7 @@ No test reaches the public internet or a live database:
 | Postgres / pgvector | `store/memory.rs` + `context::MemoryContextStore` |
 | `aria-memo` CLI | `cli-interop` feature (off by default) — a plain `cargo test` never silently skips |
 | Cloud HTTP API | `tower::ServiceExt::oneshot` against `build_router(state)` |
+| Gateway HTTP (thinking-filter proxy) | one-shot loopback gateway, plus `ProxyListener` / reader / writer seams for the `bind`/`local_addr`/`accept` and short-read/short-write branches a real socket cannot be made to produce |
 
 Tests that genuinely need an external binary or database stay gated and are
 excluded above; they must never assert a fabricated success.
@@ -71,6 +72,9 @@ excluded above; they must never assert a fabricated success.
    message in one shared helper (`db_err`, `model_err`, `prefixed`) so the
    mapping stays a single exercised line. `LocalForwardProxy` follows this: the
    socket-write and relay failures live in `send_bytes` / `relay`.
+   `ThinkingFilterProxy` uses `config_err` / `model_err` the same way, and keeps
+   its logging on one line so `rustfmt` cannot split a `tracing::debug!` into
+   regions that only run with a subscriber.
 3. If a branch is truly unreachable, remove it or document it here — do not pad
    the exclusion list with business logic.
 
