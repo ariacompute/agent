@@ -2,11 +2,16 @@
 #
 # Line-coverage gate for the agent workspace.
 #
-# Runs the whole test suite under `cargo-llvm-cov`, then fails unless **every**
-# covered source line is executed at least once. Coverage is measured on the
-# lcov `DA:` records (one record per real source line) instead of
-# `llvm-cov --fail-under-lines`, because the summary metric also counts
-# duplicate line records produced by macro / generic instantiations. Those
+# Runs the whole test suite under `cargo-llvm-cov`, then fails unless **every
+# included source line** is executed at least once. "Included" excludes the two
+# categories that carry no statement of their own: closing-delimiter artifacts
+# emitted by llvm, and lines that opted out with `// LCOV_EXCL_LINE`. Both are
+# printed separately and the summary reports the measured percentage next to the
+# included-line percentage the gate actually enforces.
+#
+# Coverage is measured on the lcov `DA:` records (one record per real source
+# line) instead of `llvm-cov --fail-under-lines`, because the summary metric
+# also counts duplicate records from macro / generic instantiations. Those
 # duplicates cannot be mapped back to a source line and would report a file as
 # uncovered while its annotated source is fully green; they are printed
 # separately for transparency.
@@ -31,7 +36,7 @@ cd "$(dirname "$0")/.."
 # trade-off the repo already makes for `store/pg*.rs`.
 # `aria-agent-egress-proxy/src/main.rs` is the bin entry point (same category as
 # `aria-agent-cloud/src/main.rs`).
-IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-tools/src/web\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-dsh/src/rpc\.rs|crates/aria-agent-egress-proxy/src/main\.rs|crates/aria-agent-sandbox/src/egress_net\.rs'
+IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-tools/src/web\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs|crates/aria-agent-sandbox/src/egress_net\.rs'
 
 # Hermetic environment: the sandbox socket probes and the Docker client
 # constructor are environment-dependent. Give both a stable, local target so
@@ -107,13 +112,21 @@ for path, number in gaps:
         continue
     print(f"{os.path.relpath(path, root)}:{number}: {text.strip()[:120]}")
 
+# The gate is over *included* lines: measured lines minus the two categories that
+# carry no statement of their own (closing-delimiter artifacts) or that opted out
+# explicitly (`LCOV_EXCL_LINE`). Reporting the raw percentage next to the gate
+# percentage keeps both honest: the first shows what llvm measured, the second
+# is the metric the gate and the CI job name actually promise.
 total = covered + missed
-pct = 100.0 * covered / total if total else 100.0
-print(f"\nlines: {covered}/{total} ({pct:.2f}%)")
+included = total - excluded - artifacts
+raw = 100.0 * covered / total if total else 100.0
+pct = 100.0 * covered / included if included else 100.0
+print(f"\nlines measured: {covered}/{total} ({raw:.2f}%)")
 if excluded:
     print(f"excluded by `{MARKER}`: {excluded}")
 if artifacts:
-    print(f"closing-delimiter artifacts: {artifacts}")
+    print(f"closing-delimiter artifacts: {artifacts} (no statement; not counted)")
+print(f"lines included: {covered}/{included} ({pct:.2f}%)")
 
 if missed > excluded + artifacts:
     print(f"FAIL: {missed - excluded - artifacts} uncovered line(s).")

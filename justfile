@@ -39,7 +39,7 @@ dsh-e2e:
 cov:
     cargo llvm-cov --workspace --lcov --output-path lcov.info
 
-# Coverage gate: 100% line coverage outside the documented exclusions.
+# Coverage gate: no uncovered included line outside the documented exclusions.
 cov-check:
     ./scripts/coverage.sh
 

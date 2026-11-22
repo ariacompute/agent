@@ -1,8 +1,19 @@
 # Line-coverage gate
 
-The workspace is held at **100% line coverage** by `scripts/coverage.sh`
-(`just cov-check`), which runs `cargo-llvm-cov` over the whole workspace and
-then checks the lcov `DA:` records.
+The workspace is held at **100% coverage of the included lines** by
+`scripts/coverage.sh` (`just cov-check`), which runs `cargo-llvm-cov` over the
+whole workspace and then checks the lcov `DA:` records.
+
+"Included" = every measured source line minus the two categories that carry no
+statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
+opt-outs (see below). The summary prints both numbers, so a run reads:
+
+```
+lines measured: 27188/27199 (99.96%)
+closing-delimiter artifacts: 11 (no statement; not counted)
+lines included: 27188/27188 (100.00%)
+OK: every included line is covered (or explicitly excluded).
+```
 
 ```bash
 just cov-check        # gate: fails on any uncovered included line
@@ -34,7 +45,13 @@ needs a reason that does not depend on "it was hard":
 | `crates/aria-agent-tools/src/terminal.rs` (`pty`) | optional `pty` provider needs a real terminal device; `scripts/coverage.sh` excludes this file so enabling the feature cannot make the gate depend on a TTY. The default build keeps `pty` off. |
 | `crates/aria-agent-tools/src/web.rs` (`web`) | optional `web` provider needs live HTTP; excluded by `scripts/coverage.sh` for the same reason. The default build keeps `web` off. |
 | `crates/aria-agent-dsh/src/transport.rs` | child-process plumbing: piped stdio "unavailable" is unreachable with `Stdio::piped`, and write/flush/read `EIO` plus `start_kill`/`try_wait` failures cannot be produced hermetically. Exercised end-to-end by `just dsh-smoke` (scripted child) and `just dsh-e2e` (real dsh). |
-| `crates/aria-agent-dsh/src/rpc.rs` | JSON-RPC demultiplexer: a few arms are only reachable on a torn-down channel at the same instant a call resolves (`oneshot` closed) or inside test-only transports; the request/response, timeout, server-request, notification and dead-pipe paths are unit-tested. `just dsh-smoke` exercises the same code against a real child. The event mapping, pool and loop stay in the gate. |
+
+`crates/aria-agent-dsh/src/rpc.rs` is **inside** the gate: the request/response,
+timeout, server-request, notification, dead-pipe, read-error and dropped-channel
+arms are unit-tested, and the test doubles' own arms are exercised by
+`the_test_transports_cover_their_unused_arms`, so no whole-file exclusion is
+needed for the demultiplexer. `just dsh-smoke` additionally exercises it against
+a real child process.
 
 `scripts/coverage.sh` exports an isolated `XDG_RUNTIME_DIR` and a placeholder
 `DOCKER_HOST` unix socket so sandbox socket probes and the Docker client

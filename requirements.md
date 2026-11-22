@@ -173,9 +173,12 @@ Six modules compose the agent platform. Each maps to a crate/deliverable.
 ### 9.1 Gate
 * `cargo test --workspace` must be green; new behaviour needs a normal-path and an
   abnormal-path test.
-* `just cov-check` (`scripts/coverage.sh`) must report **100% line coverage** for
-  every file that is not on the exclusion list in `docs/coverage.md`; CI runs it as
-  a required job (`.github/workflows/ci.yml`).
+* `just cov-check` (`scripts/coverage.sh`) must report **100% coverage of the
+  included lines** for every file that is not on the exclusion list in
+  `docs/coverage.md`: every measured source line is either executed, or it is a
+  closing-delimiter artifact / an explicit `// LCOV_EXCL_LINE` opt-out, both of
+  which are printed separately. CI runs it as a required job
+  (`.github/workflows/ci.yml`, `coverage gate (no uncovered lines)`).
 * Coverage is measured on lcov `DA:` records (one per source line), not on
   `llvm-cov --fail-under-lines`, which also counts duplicate records emitted for
   macro/generic instantiations.

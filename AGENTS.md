@@ -275,12 +275,18 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
 
 ## Testing & coverage (do not regress)
 
-* **Gate**: `just cov-check` (`scripts/coverage.sh`) must stay at 100% of lcov
-  `DA:` lines outside `docs/coverage.md`. CI runs fmt + `clippy -D warnings` +
-  `cargo test --workspace` + the gate.
+* **Gate**: `just cov-check` (`scripts/coverage.sh`) must stay at 100% of the
+  *included* lcov `DA:` lines outside `docs/coverage.md`: every measured line runs,
+  is a closing-delimiter artifact, or carries an explicit `// LCOV_EXCL_LINE`
+  opt-out (both counted separately; the summary prints the measured percentage and
+  the included-line percentage the gate enforces). CI runs fmt +
+  `clippy -D warnings` + `cargo test --workspace` + the gate.
 * **Exclusions are a budget, not a habit**: `aria-agent-ffigen`, cloud `main.rs`,
-  `store/pg.rs`, `store/pg_orchestration.rs`, `context/pg.rs`. Adding business logic to that
-  list requires editing `docs/coverage.md` with a reason that is not "hard".
+  `store/pg.rs`, `store/pg_orchestration.rs`, `context/pg.rs`,
+  `store/governance.rs`, the `pty`/`web` tool providers, `agent-dsh`
+  `transport.rs`, the egress-proxy `main.rs` and `sandbox/egress_net.rs`. Prefer a
+  per-line opt-out; whole-file exclusion requires editing `docs/coverage.md` with
+  a reason that is not "hard".
 * **No live dependencies**: `wiremock`/loopback for HTTP, an in-crate TCP stub for
   the Docker Engine API (`DockerSandbox::with_client`), `store/memory.rs` for the
   metadata store. `DATABASE_URL` tests and the memo `cli-interop` tests stay gated
@@ -295,7 +301,7 @@ config, unknown}`，`api`/`auth` 带 HTTP `status`。401/403 → `auth`，其他
 
 * `just build` — build all crates
 * `just test` — `cargo test --workspace`
-* `just cov-check` — coverage gate: 100% of lcov line records outside the
+* `just cov-check` — coverage gate: no uncovered included line outside the
   exclusions in `docs/coverage.md` (CI job `coverage`)
 * `just cov` — report only (writes `lcov.info`)
 * `just sdk-js-test` / `just sdk-py-test` — SDK tests

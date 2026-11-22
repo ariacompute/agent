@@ -533,6 +533,48 @@ mod tests {
         client.shutdown().await.expect("close succeeds");
     }
 
+    /// A torn-down reader drops the pending sender: the in-flight call must
+    /// report a closed channel instead of hanging until the timeout.
+    #[tokio::test]
+    async fn a_dropped_response_channel_fails_the_call() {
+        let (transport, mut written, _inbound) = FakeTransport::pair();
+        let client = Arc::new(RpcClient::new(transport));
+        // No reader task: nobody will resolve the call.
+        let caller = client.clone();
+        let call = tokio::spawn(async move {
+            caller
+                .call("initialize", json!({}), Duration::from_secs(5))
+                .await
+        });
+        let _ = written.recv().await.expect("frame");
+        // `clear` drops the oneshot sender, exactly like a reader shutdown.
+        client.inner.pending.lock().await.clear();
+        let err = call.await.expect("join").unwrap_err();
+        assert!(err.to_string().contains("response channel closed"), "{err}");
+    }
+
+    /// The test doubles' remaining arms: a helper whose peer is gone, a
+    /// transport that is never read, and `close` on a read-only failure. They
+    /// are called here so `rpc.rs` stays inside the coverage gate instead of
+    /// being excluded file-wide.
+    #[tokio::test]
+    async fn the_test_transports_cover_their_unused_arms() {
+        let (transport, out_rx, inbound) = FakeTransport::pair();
+        drop(out_rx);
+        drop(inbound);
+        let err = RpcTransport::send_line(transport.as_ref(), "{}")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("fake closed"), "{err}");
+
+        assert!(RpcTransport::recv_line(&DeadTransport)
+            .await
+            .expect("dead transport never yields a line")
+            .is_none());
+        RpcTransport::close(&DeadTransport).await.expect("close");
+        RpcTransport::close(&BrokenTransport).await.expect("close");
+    }
+
     #[tokio::test]
     async fn unknown_ids_and_error_objects_without_messages_are_tolerated() {
         let (transport, mut written, inbound) = FakeTransport::pair();
