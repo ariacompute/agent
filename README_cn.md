@@ -240,6 +240,7 @@ cp .env.example .env
 | `DSH_HOME_ROOT` | `.aria/dsh` | 每租户/每会话 `DSH_HOME` 的根目录。 |
 | `DSH_POOL_MAX` | `8` | 每租户保留的活跃运行时上限。 |
 | `DSH_IDLE_TTL_SEC` | `900` | 池化运行时被回收前的空闲窗口（会话可凭 `DSH_HOME` 续用）。 |
+| `DSH_THINKING_FILTER` | `enable` | `enable` 让 dsh 经本地回环代理访问网关，双向剥离 Anthropic `redacted_thinking` 块（内置 adapter 无法回放该块，第二轮会报 `UNSUPPORTED_CONTENT`），`thinking` 块保留；`disable` 直连网关。其它取值启动即失败。 |
 | `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(空)_ / `ariacompute/ariamodel` | **两种运行时（`dsh` 与 `native`）共用**的模型网关配置。该值是网关根地址；`native` 追加 `/v1/chat/completions`，`dsh` 追加 `/anthropic/v1/messages`。不再回退 `OPENAI_*`。`dsh` 通过子进程白名单接收这些值。仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
 | `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
@@ -474,6 +475,14 @@ turn 循环本身就是 `agent_loop` 接缝，默认提供方是 **DeepSeek Harn
 `harness = "dsh"` 下 aria 的 sandbox/工具管线不再参与本轮；aria 仍负责 recall、记忆落库、
 会话事件与标题、审批/提问桥接以及对外信封。`AGENT_HARNESS=native` 可显式切回
 内置 Rust 循环；未知取值，或选了 `dsh` 却没有可用运行时，都直接报错，绝不静默降级。
+
+默认（`DSH_THINKING_FILTER=enable`）dsh 经本地回环过滤代理访问网关：内置
+`deepseek-official` adapter 首轮接受 Anthropic `redacted_thinking` 块并持久化，第二轮回放
+历史时抛 `UNSUPPORTED_CONTENT`；代理在请求体与 JSON/SSE 响应两侧剥离该块（并重排
+content-block 序号），dsh 因此永远看不到它。`thinking` 块**刻意保留**——DeepSeek 的
+Anthropic 兼容层要求 thinking 模式下原样回传，剥离会把该错误换成 400。代价是思考内容
+仅作展示、从不回放（与 OpenCode 同样的取舍）。只有确认所用 dsh build 的 adapter 能处理
+redacted thinking 时，才应设为 `DSH_THINKING_FILTER=disable`。
 
 <div align="right">
 

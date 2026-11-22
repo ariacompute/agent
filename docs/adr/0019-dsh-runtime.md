@@ -145,11 +145,32 @@ pipelines together would double-execute side effects and is not supported.
 - **`SessionEvent` payloads are mapped defensively.** Unknown frames are ignored;
   a terminal frame missing `reason.kind` is a protocol error rather than an
   invented finish reason.
-- **Provider compatibility is not abstracted away.** The bundled
-  `deepseek-official` adapter rejects `redacted_thinking` blocks emitted by some
-  gateway reasoning models with `UNSUPPORTED_CONTENT`. Use `AGENT_HARNESS=native`
-  for those models, or a dsh build whose adapter supports them; the enriched
-  error reports the provider failure instead of masking it.
+- **Provider compatibility is handled at one boundary, not in the adapter.**
+  The bundled `deepseek-official` adapter cannot translate an Anthropic
+  `redacted_thinking` block: it accepts one in the first turn, persists it in
+  session history, then throws `UNSUPPORTED_CONTENT` when replaying that history
+  in turn two. Rather than fall back to `native`, boot starts a single loopback
+  reverse proxy (`aria_agent_dsh::ThinkingFilterProxy`, `127.0.0.1:0`) and points
+  dsh's `DEEPSEEK_BASE_URL` at it. The proxy forwards to the real gateway with
+  the original credential headers and strips `redacted_thinking` from both
+  request bodies and responses (JSON and SSE, with content-block indices
+  renumbered so dsh sees a contiguous sequence). This is a deliberate downgrade
+  for Anthropic-compatible gateways: thinking is display-only and never
+  replayed, the same trade-off OpenCode makes. `thinking` blocks are preserved —
+  DeepSeek's Anthropic-compatible layer requires `content[].thinking` to be
+  passed back verbatim in thinking mode, so stripping it would trade this error
+  for a 400. The enriched error still reports provider failures instead of
+  masking them.
+- **The filter is a switch, not a hidden default.** `DSH_THINKING_FILTER`
+  (`.env`, default `enable`) takes `enable` or `disable`; `disable` connects dsh
+  straight to the gateway and is only correct for a dsh build whose adapter
+  understands redacted thinking. An unset/empty value means `enable`; any other
+  value is a boot-time configuration error, never a silent default. Because the
+  adapter fails on replay rather than on receipt, the request direction is
+  filtered too: history written before the switch existed is scrubbed on the way
+  out. Loopback is forced into the child's `NO_PROXY` so an enforced egress proxy
+  cannot swallow the hop, and the proxy refuses compressed responses (it asks for
+  `identity`) rather than forward a body it cannot inspect.
 - **`AGENT_LOOP` keeps its historical key name**; dsh's `agentLoop` spelling is
   accepted via `ALIASES` (`approval`, `terminals`, `spillStore`, …), and new
   dsh seam keys/service roles were added to the manifest instead of renaming.

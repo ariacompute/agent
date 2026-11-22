@@ -216,8 +216,12 @@ kept as an explicit `native` fallback (ADR-0019).
      question bridging, and the frozen wire envelope. Approvals and questions use
      the installed seams and fail closed. Each session gets its own `DSH_HOME` and
      workspace (`DshConfig::for_session`), the child environment is an allow-list,
-     and `~/.dsh` is never discovered. On a dsh upgrade only
-     `aria-agent-dsh/src/event_map.rs` should need changes. See ADR-0019.
+     and `~/.dsh` is never discovered. By default (`DSH_THINKING_FILTER=enable`,
+     set in `.env`) dsh reaches the gateway through the loopback
+     `ThinkingFilterProxy`, which strips Anthropic `redacted_thinking` blocks in
+     both directions (the bundled adapter cannot replay them) while keeping
+     `thinking`; loopback is forced into the child's `NO_PROXY`. On a dsh upgrade
+     only `aria-agent-dsh/src/event_map.rs` should need changes. See ADR-0019.
 
 ## SDK（js / python）
 

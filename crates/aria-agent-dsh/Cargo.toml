@@ -19,6 +19,11 @@ uuid.workspace = true
 tracing.workspace = true
 futures = "0.3"
 async-stream = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# eMudhra/emSign CA key compromise (2026-10): 1.0.10+ drops the compromised
+# emSign roots. The thinking-filter proxy talks TLS to the model gateway, so it
+# must use the compiled-in store rather than the host bundle.
+webpki-roots = "1.0.10"
 
 [dev-dependencies]
 tempfile = "3"

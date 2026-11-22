@@ -39,7 +39,7 @@ fn provider_from_env(value: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_DSH_PROVIDER.to_string())
 }
 
-fn dsh_base_url(base_url: &str) -> String {
+pub(crate) fn dsh_base_url(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return String::new();

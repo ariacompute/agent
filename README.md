@@ -245,6 +245,7 @@ cp .env.example .env
 | `DSH_HOME_ROOT` | `.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories. |
 | `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
 | `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
+| `DSH_THINKING_FILTER` | `enable` | `enable` routes dsh through a loopback proxy that strips Anthropic `redacted_thinking` blocks in both directions (the bundled adapter cannot replay them and fails turn two with `UNSUPPORTED_CONTENT`); `thinking` blocks are preserved. `disable` connects dsh straight to the gateway. Any other value fails at boot. |
 | `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(empty)_ / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. The value is the gateway root; `native` appends `/v1/chat/completions` and `dsh` appends `/anthropic/v1/messages`. No `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
@@ -508,6 +509,17 @@ memory writes, session events/titles, approval + question bridging and the wire
 envelope. `AGENT_HARNESS=native` selects the built-in Rust loop instead;
 an unknown value — or `dsh` without an installed runtime — is a hard error, never
 a silent fallback.
+
+By default (`DSH_THINKING_FILTER=enable`) dsh reaches the gateway through a
+loopback filter proxy: the bundled `deepseek-official` adapter accepts an
+Anthropic `redacted_thinking` block in the first turn, persists it, then throws
+`UNSUPPORTED_CONTENT` when replaying history. The proxy strips that block from
+request bodies and from JSON/SSE responses (renumbering content-block indices),
+so dsh never sees it. `thinking` blocks are deliberately **kept** — DeepSeek's
+Anthropic-compatible layer requires them to be passed back — which makes thinking
+display-only and never replayed, the same trade-off OpenCode makes. Set
+`DSH_THINKING_FILTER=disable` only for a dsh build whose adapter handles redacted
+thinking.
 
 <div align="right">
 

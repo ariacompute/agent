@@ -20,7 +20,9 @@ use aria_agent_cloud::cli_config;
 use aria_agent_cloud::context::PgContextStore;
 use aria_agent_cloud::store::{ensure_schema, PgStore};
 use aria_agent_cloud::{build_router, upgrade, KeyCache};
-use aria_agent_dsh::{DshAgentLoop, DshConfig, DshPool, SeamApprovalBridge};
+use aria_agent_dsh::{
+    parse_filter_mode, DshAgentLoop, DshConfig, DshPool, SeamApprovalBridge, ThinkingFilterProxy,
+};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 
@@ -279,6 +281,43 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let model_override = gateway_model();
         let gateway_base = gateway_base_url();
         let gateway_key = gateway_api_key();
+        // `deepseek-official` cannot replay an Anthropic `redacted_thinking`
+        // block (second turn => UNSUPPORTED_CONTENT). With
+        // `DSH_THINKING_FILTER=enable` (the default) dsh talks to a loopback
+        // proxy that strips the block in both directions; `disable` connects
+        // straight to the gateway, for a dsh build whose adapter handles it.
+        let thinking_filter =
+            parse_filter_mode(std::env::var("DSH_THINKING_FILTER").ok().as_deref())?;
+        let thinking_proxy = if thinking_filter {
+            match gateway_base.as_deref().map(str::trim) {
+                Some(base) if !base.is_empty() => {
+                    let proxy = ThinkingFilterProxy::start(base).await?;
+                    tracing::info!(
+                        local = %proxy.local_base_url(),
+                        "thinking filter proxy enabled (strips redacted_thinking)"
+                    );
+                    Some(proxy)
+                }
+                _ => {
+                    // Nothing to proxy in stub/offline runs: keep the direct
+                    // (empty) base instead of failing a boot that never calls a
+                    // model.
+                    tracing::info!(
+                        "GATEWAY_BASE_URL is empty; dsh connects directly (no thinking filter)"
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::info!("DSH_THINKING_FILTER=disable: dsh connects to the gateway directly");
+            None
+        };
+        // The proxy's accept loop runs in its own task, so the handle may be
+        // dropped after the base URL is derived.
+        let dsh_gateway_base = thinking_proxy
+            .as_ref()
+            .map(ThinkingFilterProxy::local_base_url)
+            .or_else(|| gateway_base.clone());
         // One pool per tenant: session homes never cross tenants (AGENTS rule 7).
         let pools: Arc<std::sync::Mutex<HashMap<String, Arc<DshPool>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -315,7 +354,7 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 // GATEWAY_* values into the names dsh reads, never inheriting
                 // the parent environment.
                 dsh = dsh.with_gateway_env(
-                    gateway_base.as_deref().unwrap_or_default(),
+                    dsh_gateway_base.as_deref().unwrap_or_default(),
                     gateway_key.as_str(),
                 );
                 Arc::new(DshPool::new(dsh, pool_max, idle, bridge))

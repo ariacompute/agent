@@ -73,11 +73,19 @@ impl StdioTransport {
         // variables explicitly (they are part of the allow-list, not an
         // inheritance leak) so an external harness cannot silently bypass the
         // egress gateway that governs the native loop (ADR-0020).
-        for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+        for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
             if let Ok(value) = std::env::var(var) {
                 cmd.env(var, value);
             }
         }
+        // Loopback is always exempt: the thinking-filter proxy (ADR-0019) is a
+        // `127.0.0.1` listener, and routing it through an external egress proxy
+        // would break every turn.
+        let explicit_no_proxy = std::env::var("NO_PROXY")
+            .ok()
+            .or_else(|| std::env::var("no_proxy").ok());
+        let no_proxy = no_proxy_with_loopback(explicit_no_proxy.as_deref());
+        cmd.env("NO_PROXY", &no_proxy).env("no_proxy", &no_proxy);
         let mut child = cmd.spawn().map_err(|e| {
             CoreError::Config(format!(
                 "cannot start DeepSeek Harness `{bin}`: {e} \
@@ -176,3 +184,45 @@ impl RpcTransport for StdioTransport {
 
 /// Shared handle so the reader task and the client agree on the transport.
 pub type Transport = Arc<dyn RpcTransport>;
+
+/// Hosts the harness must reach without an egress proxy.
+const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+
+/// Keep the operator's `NO_PROXY` and always add loopback, so the local
+/// thinking-filter proxy stays reachable. Duplicates are folded case-insensitively.
+fn no_proxy_with_loopback(explicit: Option<&str>) -> String {
+    let mut parts: Vec<String> = explicit
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    for host in LOOPBACK_HOSTS {
+        if !parts.iter().any(|part| part.eq_ignore_ascii_case(host)) {
+            parts.push(host.to_string());
+        }
+    }
+    parts.join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_proxy_always_exempts_loopback() {
+        let value = no_proxy_with_loopback(None);
+        for host in LOOPBACK_HOSTS {
+            assert!(value.split(',').any(|part| part == host), "{value}");
+        }
+    }
+
+    #[test]
+    fn no_proxy_preserves_operator_entries_and_folds_duplicates() {
+        let value = no_proxy_with_loopback(Some(".internal, 127.0.0.1 ,, LocalHost"));
+        assert_eq!(value, ".internal,127.0.0.1,LocalHost,::1");
+        let blank = no_proxy_with_loopback(Some("   "));
+        assert_eq!(blank, "127.0.0.1,localhost,::1");
+    }
+}

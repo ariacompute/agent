@@ -36,6 +36,7 @@ pub mod approval;
 pub mod event_map;
 pub mod rpc;
 pub mod runtime;
+pub mod thinking_proxy;
 pub mod transport;
 
 pub use approval::SeamApprovalBridge;
@@ -48,6 +49,10 @@ pub use rpc::{
 pub use runtime::{
     no_bridge, session_dir_name, DshConfig, DshConnector, DshPool, DshRuntime, HarnessRuntime,
     RuntimeConnector, PERMISSION_MODES, SDK_PROFILE,
+};
+pub use thinking_proxy::{
+    parse_filter_mode, strip_redacted_from_messages_json, strip_redacted_from_response_json,
+    SseRedactedFilter, ThinkingFilterProxy, FILTER_DISABLE, FILTER_ENABLE,
 };
 pub use transport::{RpcTransport, StdioTransport, DEFAULT_MAX_FRAME_BYTES};
 

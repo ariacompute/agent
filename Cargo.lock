@@ -208,6 +208,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -215,6 +216,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

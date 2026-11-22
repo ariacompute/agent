@@ -95,6 +95,10 @@ services:
       DSH_HOME_ROOT: ${DSH_HOME_ROOT:-/app/.aria/dsh}
       DSH_POOL_MAX: ${DSH_POOL_MAX:-8}
       DSH_IDLE_TTL_SEC: ${DSH_IDLE_TTL_SEC:-900}
+      # `enable` (default) strips Anthropic `redacted_thinking` blocks through a
+      # loopback proxy before the dsh adapter can replay them; `disable` connects
+      # dsh straight to the gateway. Any other value fails at boot.
+      DSH_THINKING_FILTER: ${DSH_THINKING_FILTER:-enable}
       # GATEWAY_BASE_URL / GATEWAY_API_KEY / GATEWAY_MODEL come from `env_file`
       # above and configure BOTH harnesses (`dsh` and `native`). The dsh
       # child-process bridge maps them to the names dsh expects; nothing is
