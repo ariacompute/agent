@@ -1,7 +1,7 @@
 //! Governance API: egress policy revisions, audit export, usage summaries,
 //! credential metadata and checkpoint records.
 //!
-//! Design constraints taken from the plan (ADR-0020..0022):
+//! Design constraints taken from the plan (ADR-0021..0025):
 //! * a policy write **must** carry the revision it was based on, so a concurrent
 //!   writer loses with `409 Conflict` instead of silently overwriting;
 //! * reads are always filtered by `principal_id`;

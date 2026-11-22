@@ -693,7 +693,7 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     ] {
         pool.execute(stmt).await?;
     }
-    // --- governance (ADR-0020..0022): one row set, all principal-scoped ---
+    // --- governance (ADR-0021..0025): one row set, all principal-scoped ---
     for stmt in [
         "CREATE TABLE IF NOT EXISTS egress_policies (\
             principal_id TEXT PRIMARY KEY, \

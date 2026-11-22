@@ -3,7 +3,7 @@
 //!
 //! The placeholder spelling is a **contract**, not a convention: it is exactly
 //! `"${credential}"` and it is only ever replaced inside header values at the
-//! egress boundary (ADR-0020). Nothing on the agent side — process env, logs,
+//! egress boundary (ADR-0025). Nothing on the agent side — process env, logs,
 //! session events, audit payloads — ever sees the plaintext.
 
 use super::egress::HostPattern;

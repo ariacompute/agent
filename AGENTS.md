@@ -89,7 +89,7 @@ kept as an explicit `native` fallback (ADR-0019).
 5. **Secrets/logging.** Use `tracing`. Never log the OpenAI key, raw user content,
    or embedding vectors. Credentials travel as the literal `${credential}`
    placeholder from the agent side; the plaintext only exists inside the egress
-   boundary (ADR-0020). Audit payloads are redacted by key whitelist before they
+   boundary (ADR-0025). Audit payloads are redacted by key whitelist before they
    are written (ADR-0021).
 5b. **Governance defaults are closed, and there is exactly one source of them.**
    Egress is deny-by-default; `allowlist` with no hosts fails boot. `AgentConfig`
@@ -101,7 +101,7 @@ kept as an explicit `native` fallback (ADR-0019).
    `409 Conflict`, never a last-writer-wins overwrite. `SandboxLifecycle` and task
    state are orthogonal — never report one as the other. Credential rotation has
    no cache window. Idle detection uses five signals (HTTP, exec, processes,
-   connections, jobs), never inbound HTTP alone. See ADR-0020..0023.
+   connections, jobs), never inbound HTTP alone. See ADR-0021..0025.
 5c. **Egress enforcement modes are not interchangeable.** `proxy` sets
    `HTTP_PROXY`; `network` removes the default route (Docker `internal` network +
    `aria-agent-egress-proxy` sidecar, ADR-0024) and **fails boot** if the network,

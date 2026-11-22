@@ -180,7 +180,7 @@ pub const DIRECTORY_PICKER: SeamKey = SeamKey("directory_picker");
 pub const WORKFLOW_ENGINE: SeamKey = SeamKey("workflow_engine");
 /// Language-server queries (`ctx.lsp`).
 pub const LSP: SeamKey = SeamKey("lsp");
-/// Outbound network policy (`ctx.egress`). Deny-by-default (ADR-0020).
+/// Outbound network policy (`ctx.egress`). Deny-by-default (ADR-0025).
 pub const EGRESS: SeamKey = SeamKey("egress");
 /// Audit sink for actions that actually happened (`ctx.audit`, ADR-0021).
 pub const AUDIT: SeamKey = SeamKey("audit");

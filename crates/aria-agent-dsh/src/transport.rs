@@ -72,7 +72,7 @@ impl StdioTransport {
         // Governance: the harness makes outbound calls too. Forward the proxy
         // variables explicitly (they are part of the allow-list, not an
         // inheritance leak) so an external harness cannot silently bypass the
-        // egress gateway that governs the native loop (ADR-0020).
+        // egress gateway that governs the native loop (ADR-0025).
         for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
             if let Ok(value) = std::env::var(var) {
                 cmd.env(var, value);

@@ -5,7 +5,7 @@
 
 ## Context
 
-ADR-0020 defined three enforcement modes. `proxy` injects `HTTP_PROXY` into the
+ADR-0025 defined three enforcement modes. `proxy` injects `HTTP_PROXY` into the
 sandbox, which is only a convention: a binary that ignores the variable — or a
 tool that speaks raw sockets — still has a default route. `network` existed as a
 validated configuration value with no implementation behind it.
@@ -81,7 +81,7 @@ is exactly the failure this mode exists to prevent.
 * The plaintext hop between the control plane and the proxy is inside the control
   network. `CONTROL_PLANE_URL` supports `https://` with a custom CA for deployments
   that do not trust that network; the trade-off is documented rather than hidden.
-* `CONNECT` tunnels are decided and then blind-forwarded (ADR-0020): the proxy
+* `CONNECT` tunnels are decided and then blind-forwarded (ADR-0025): the proxy
   cannot see inside TLS, so `${credential}` substitution applies to plaintext HTTP.
 * Cube (`CliSandbox`) refuses a custom network — it has no network flag, and
   pretending would leave a default route. It refuses identity labels for the same

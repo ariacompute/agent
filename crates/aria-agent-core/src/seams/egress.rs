@@ -1,7 +1,7 @@
 //! Egress seam: the single boundary that decides whether an outbound
 //! connection is allowed to happen.
 //!
-//! **Deny-by-default is the only default** (ADR-0020). A deployment that wants
+//! **Deny-by-default is the only default** (ADR-0025). A deployment that wants
 //! network access must name the hosts it wants; an `allowlist` policy that names
 //! no hosts is a configuration error, never a silent "allow everything".
 //!
@@ -170,7 +170,7 @@ impl EgressDecision {
 ///
 /// Every mutation produces a new `revision`; callers hand the revision they read
 /// back when patching, so a concurrent writer cannot be silently overwritten
-/// (ADR-0020 §禁静默覆盖).
+/// (ADR-0025 §禁静默覆盖).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressPolicy {
     pub revision: u64,

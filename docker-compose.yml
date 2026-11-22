@@ -103,7 +103,7 @@ services:
       # above and configure BOTH harnesses (`dsh` and `native`). The dsh
       # child-process bridge maps them to the names dsh expects; nothing is
       # inherited from the rest of the environment.
-      # Governed egress (ADR-0020/0024). `network` is the enforced mode: on boot
+      # Governed egress (ADR-0025/0024). `network` is the enforced mode: on boot
       # this service creates the `aria-egress` internal network and starts the
       # proxy container itself (so the proxy is NOT a compose service), then runs
       # every sandbox on that network. The proxy image must exist locally:

@@ -1,4 +1,4 @@
-# ADR-0020 — One governed egress boundary: policy, credentials, projection
+# ADR-0025 — One governed egress boundary: policy, credentials, projection
 
 - Status: accepted
 - Date: 2026-11-19

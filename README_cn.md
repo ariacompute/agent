@@ -110,7 +110,7 @@ provider；云端与原生前端共享同一套 `recall → runtime → memorize
 | **aria-agent-dsh** | `agent_loop` 接缝的 DeepSeek Harness 提供方：stdio JSON-RPC 传输、按会话复用的运行时池、审批/提问桥接、通知 → `AgentEvent` 映射。 |
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
-| **aria-agent-governance** | 出站判定与 `${credential}` 替换、JSONL 审计、用量计量、工具输出投影、加密凭据库、空闲检测、配额守卫与检查点（ADR-0020 … 0024）。 |
+| **aria-agent-governance** | 出站判定与 `${credential}` 替换、JSONL 审计、用量计量、工具输出投影、加密凭据库、空闲检测、配额守卫与检查点（ADR-0021 … 0025）。 |
 | **aria-agent-egress-proxy** | `network` 强制模式下的无密钥 sidecar：经 `/internal/egress/*` 回控制面，用来源 IP 解析租户，批量上报审计。 |
 | **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：云端 API 客户端 —— `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`。 |
@@ -1099,7 +1099,7 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 
 ## 🛡️ 受控执行
 
-每个出站请求都经过同一条边界：判定、替换、记录（ADR-0020）。默认值一律收紧，且只来自
+每个出站请求都经过同一条边界：判定、替换、记录（ADR-0025）。默认值一律收紧，且只来自
 `AgentConfig`，因此 CLI 与云端部署不会对「默认是什么」产生分歧。
 
 | 变量 | 默认值 | 含义 |

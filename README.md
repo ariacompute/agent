@@ -113,7 +113,7 @@ of truth for both persistence and SSE streaming.
 | **aria-agent-dsh** | The `agent_loop` seam's DeepSeek Harness provider: stdio JSON-RPC transport, per-session runtime pool, approval/question bridge, notification → `AgentEvent` mapping. |
 | **aria-agent-plugin** | Plugin registry: manifests, seam keys/roles, dependency topo-sort, cycle + core-uniqueness checks, frozen snapshot. |
 | **aria-agent-tools** | Built-in tool families: fs, shell, jobs, terminal (`pty`), skills, web (`web`), ask_user, plan, todo, memo. |
-| **aria-agent-governance** | Egress decision + `${credential}` substitution, JSONL audit sink, usage metering, tool-output projection, encrypted credential store, idle detection, quota guard and checkpoints (ADR-0020 … 0024). |
+| **aria-agent-governance** | Egress decision + `${credential}` substitution, JSONL audit sink, usage metering, tool-output projection, encrypted credential store, idle detection, quota guard and checkpoints (ADR-0021 … 0025). |
 | **aria-agent-egress-proxy** | Secretless sidecar for `network` enforcement: speaks `/internal/egress/*` to the control plane, resolves the tenant from the peer IP, batches audit uploads. |
 | **aria-agent-orchestrator** | Sub-agents (in-process fork), agent teams (task DAG), scheduled jobs (single-flight ticker). |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): cloud API client — `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`. |
@@ -1169,7 +1169,7 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 ## 🛡️ Governed execution
 
 Every outbound request crosses one boundary that decides, substitutes and records
-(ADR-0020). Defaults are closed and come from `AgentConfig` only, so a CLI and a
+(ADR-0025). Defaults are closed and come from `AgentConfig` only, so a CLI and a
 cloud deployment cannot disagree about what the default is.
 
 | Variable | Default | Meaning |

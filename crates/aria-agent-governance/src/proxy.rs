@@ -1,7 +1,7 @@
 //! The single outbound interception point: policy → credential substitution →
 //! audit.
 //!
-//! This is the "one boundary, three jobs" decision (ADR-0020). Two transport
+//! This is the "one boundary, three jobs" decision (ADR-0025). Two transport
 //! shapes are supported:
 //!
 //! * **absolute-URI** (`GET http://host/path`) — plaintext HTTP, so headers can

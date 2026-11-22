@@ -1038,7 +1038,7 @@ pub struct AgentConfig {
     #[serde(default = "default_tool_max_bytes")]
     pub tool_result_max_bytes: usize,
 
-    // ---- governance (ADR-0020..0023) -------------------------------------
+    // ---- governance (ADR-0021..0025) -------------------------------------
     // These are the **single source of defaults**: CLI flags, environment
     // variables and cloud presets all derive from these values, so two entry
     // points can never disagree about what the default is.

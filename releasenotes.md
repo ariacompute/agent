@@ -12,7 +12,7 @@ when set.
 ## Governed execution: one egress boundary, audit, metering and credentials
 
 Every outbound request now crosses a single boundary that decides, substitutes and
-records (ADR-0020). `AGENT_EGRESS_ENFORCEMENT=network` makes that boundary the
+records (ADR-0025). `AGENT_EGRESS_ENFORCEMENT=network` makes that boundary the
 *only* route out: sandboxes run on an `internal` Docker network whose sole
 reachable peer is a secretless proxy (ADR-0024).
 
@@ -95,7 +95,7 @@ documented `// LCOV_EXCL_LINE` opt-out or a closing-delimiter artifact) all pass
 The UniFFI surface no longer embeds the runtime: `ariacompute-agent` is now a
 thin HTTP client for the beta Agents API, with the same vocabulary as the
 JS/Python SDKs. Device binaries carry no loop, sandbox, tool family or model key
-(ADR-0020).
+(ADR-0025).
 
 ### Highlights
 
