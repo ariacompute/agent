@@ -12,10 +12,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::auth::{ApiKeyScopes, Principal, PrincipalKind};
+use crate::auth::{ApiKeyScopes, Principal};
 use crate::store::{
-    AgentStore, ApiKeyRow, ApiKeyStore, ItemRow, NewApiKeyRow, ResolvedKey, SessionRow,
-    SessionStore, TitleRow, TitleStore, TurnRow,
+    AgentStore, ApiKeyRow, ApiKeyStore, ItemRow, NewApiKeyRow, ReportRow, ResolvedKey, RsiStore,
+    SessionRow, SessionStore, TitleRow, TitleStore, TurnRow,
 };
 use crate::types::{Agent, AGENT_OBJECT};
 use crate::AppError;
@@ -32,6 +32,8 @@ struct Inner {
     keys: Vec<(NewApiKeyRow, Option<String>)>,
     /// `(principal_id, row)` pairs: one title per session per tenant.
     titles: Vec<(String, TitleRow)>,
+    /// RSI diagnoses (the owning principal is inside the row).
+    reports: Vec<ReportRow>,
 }
 
 /// One lock-backed store implementing [`AgentStore`], [`SessionStore`],
@@ -42,9 +44,7 @@ pub struct MemoryStore {
     inner: Mutex<Inner>,
 }
 
-fn can_see(principal: &Principal, owner: &str) -> bool {
-    principal.kind == PrincipalKind::Admin || principal.id == owner
-}
+use crate::store::can_see;
 
 impl MemoryStore {
     pub fn new() -> Self {
@@ -334,6 +334,48 @@ impl ApiKeyStore for MemoryStore {
                 principal_id: k.principal_id.clone(),
                 scopes: ApiKeyScopes::from_tokens(&k.scopes),
             }))
+    }
+}
+
+#[async_trait]
+impl RsiStore for MemoryStore {
+    async fn insert_report(&self, row: &ReportRow) -> Result<(), AppError> {
+        self.inner.lock().unwrap().reports.push(row.clone());
+        Ok(())
+    }
+
+    async fn list_reports(
+        &self,
+        principal: &Principal,
+        limit: i64,
+    ) -> Result<Vec<ReportRow>, AppError> {
+        let g = self.inner.lock().unwrap();
+        let mut visible: Vec<&ReportRow> = g
+            .reports
+            .iter()
+            .filter(|row| can_see(principal, &row.principal_id))
+            .collect();
+        // Newest first; the id breaks ties so two reports written in the same
+        // millisecond still have a stable order.
+        visible.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(visible
+            .into_iter()
+            .take(limit.max(0) as usize)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_report(&self, principal: &Principal, id: &str) -> Result<ReportRow, AppError> {
+        let g = self.inner.lock().unwrap();
+        g.reports
+            .iter()
+            .find(|row| row.id == id && can_see(principal, &row.principal_id))
+            .cloned()
+            .ok_or(AppError::NotFound)
     }
 }
 
@@ -699,5 +741,157 @@ pub mod faulty {
             assert!(ApiKeyStore::revoke_key(&store, "k1").await.is_err());
             assert!(ApiKeyStore::resolve_key(&store, "hash").await.is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod rsi_store_tests {
+    use super::*;
+    use crate::store::StoreReportSink;
+    use agent_core::seams::{RsiScope, SeamError};
+    use agent_core::session::insight::EfficiencyReport;
+    use aria_agent_rsi::ReportSink;
+    use std::sync::Arc;
+
+    fn report(id: &str, principal: &str, created_at_ms: i64) -> ReportRow {
+        ReportRow {
+            id: id.into(),
+            principal_id: principal.into(),
+            session: "s1".into(),
+            score: 70,
+            truncated: false,
+            findings: Vec::new(),
+            created_at_ms,
+        }
+    }
+
+    fn user(id: &str) -> Principal {
+        Principal {
+            id: id.into(),
+            kind: crate::auth::PrincipalKind::User,
+            scopes: crate::auth::ApiKeyScopes::read_write(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_are_newest_first_and_tenant_scoped() {
+        let store = MemoryStore::new();
+        store
+            .insert_report(&report("a", "tenant-a", 10))
+            .await
+            .unwrap();
+        store
+            .insert_report(&report("b", "tenant-a", 30))
+            .await
+            .unwrap();
+        store
+            .insert_report(&report("c", "tenant-b", 20))
+            .await
+            .unwrap();
+        // Same millisecond: the id breaks the tie so the order stays stable.
+        store
+            .insert_report(&report("d", "tenant-a", 30))
+            .await
+            .unwrap();
+
+        let listed = store.list_reports(&user("tenant-a"), 10).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0].id, "d", "same millisecond, descending id");
+        assert_eq!(listed[1].id, "b", "newest first");
+        assert_eq!(listed[2].id, "a");
+        assert_eq!(
+            store
+                .list_reports(&user("tenant-a"), 1)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .list_reports(&user("tenant-a"), 0)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Admin sees every tenant, still newest first.
+        let all = store.list_reports(&Principal::admin(), 10).await.unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].id, "d");
+        assert_eq!(all[3].id, "a");
+    }
+
+    #[tokio::test]
+    async fn another_tenants_report_is_indistinguishable_from_a_missing_one() {
+        let store = MemoryStore::new();
+        store
+            .insert_report(&report("a", "tenant-a", 10))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_report(&user("tenant-a"), "a").await.unwrap().id,
+            "a"
+        );
+        assert!(matches!(
+            store.get_report(&user("tenant-b"), "a").await,
+            Err(AppError::NotFound)
+        ));
+        assert!(matches!(
+            store.get_report(&user("tenant-a"), "zzz").await,
+            Err(AppError::NotFound)
+        ));
+    }
+
+    /// A store that fails every write, to prove the sink reports it.
+    struct BrokenReports;
+
+    #[async_trait]
+    impl RsiStore for BrokenReports {
+        async fn insert_report(&self, _row: &ReportRow) -> Result<(), AppError> {
+            Err(AppError::BadRequest("nope".into()))
+        }
+        async fn list_reports(
+            &self,
+            _principal: &Principal,
+            _limit: i64,
+        ) -> Result<Vec<ReportRow>, AppError> {
+            Err(AppError::NotFound)
+        }
+        async fn get_report(
+            &self,
+            _principal: &Principal,
+            _id: &str,
+        ) -> Result<ReportRow, AppError> {
+            Err(AppError::NotFound)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sink_stores_a_report_and_reports_a_storage_failure() {
+        let store: Arc<dyn RsiStore> = Arc::new(MemoryStore::new());
+        let sink = StoreReportSink::new(store.clone());
+        let scope = RsiScope::new("tenant-a", "orders");
+        let report = EfficiencyReport {
+            session: "s1".into(),
+            folded_records: 4,
+            truncated: true,
+            turns: Vec::new(),
+            findings: Vec::new(),
+            score: 55,
+        };
+        sink.record(&scope, "s1", &report).await.unwrap();
+        let stored = store.list_reports(&user("tenant-a"), 10).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].score, 55);
+        assert!(stored[0].truncated);
+
+        let failing = Arc::new(BrokenReports);
+        let broken = StoreReportSink::new(failing.clone());
+        assert!(matches!(
+            broken.record(&scope, "s1", &report).await,
+            Err(SeamError::Io(_))
+        ));
+        // The reader half is equally explicit rather than silently empty.
+        assert!(failing.list_reports(&user("tenant-a"), 10).await.is_err());
+        assert!(failing.get_report(&user("tenant-a"), "a").await.is_err());
     }
 }

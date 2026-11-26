@@ -19,6 +19,7 @@ pub mod llm;
 pub mod metering;
 pub mod policy;
 pub mod questions;
+pub mod rsi;
 pub mod schedule;
 pub mod session;
 pub mod shell;
@@ -50,6 +51,10 @@ pub use metering::{
 };
 pub use policy::{PermissionPreset, PolicyError, SandboxPolicy};
 pub use questions::{NoQuestions, UserQuestions};
+pub use rsi::{
+    Adaptation, NoPlaybooks, NoReflection, Playbook, PlaybookCandidate, PlaybookStore, Proposal,
+    ReflectionEngine, ReplayStats, RerunProbe, RsiConfig, RsiScope, ValidationOutcome,
+};
 pub use schedule::{ScheduleEntry, ScheduleSeam};
 pub use shell::{SandboxShell, ShellOutput, ShellSeam};
 pub use skills::{EmptySkills, FilesystemSkills, Skill, SkillMeta, SkillsSeam};
@@ -82,10 +87,21 @@ pub enum SeamError {
     Io(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// A revision guard refused the write (the caller's view of "current" is
+    /// stale). Never resolved by last-writer-wins.
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// Cross-tenant reuse without a complete [`rsi::Adaptation`] record.
+    #[error("adaptation required: {0}")]
+    Unadapted(String),
 }
 
 impl SeamError {
     /// Stable error code used by tools when feeding the failure back to the model.
+    ///
+    /// `conflict` and `unadapted` are part of the public machine-readable
+    /// contract (ADR-0026): the cloud maps them to `409` and `422`, and audit
+    /// records keep them verbatim.
     pub fn code(&self) -> &'static str {
         match self {
             SeamError::Unavailable(_) => "unavailable",
@@ -94,9 +110,34 @@ impl SeamError {
             SeamError::Invalid(_) => "invalid",
             SeamError::Io(_) => "io",
             SeamError::Unsupported(_) => "unsupported",
+            SeamError::Conflict(_) => "conflict",
+            SeamError::Unadapted(_) => "unadapted",
         }
     }
 }
 
 /// Result alias for seam calls.
 pub type SeamResult<T> = Result<T, SeamError>;
+#[cfg(test)]
+mod error_code_tests {
+    use super::SeamError;
+
+    /// The codes are a wire contract (tool failure text, HTTP mapping, audit
+    /// records): renaming one silently would break every consumer.
+    #[test]
+    fn every_error_has_a_stable_machine_readable_code() {
+        let cases = [
+            (SeamError::Unavailable("x".into()), "unavailable"),
+            (SeamError::Denied("x".into()), "denied"),
+            (SeamError::NotFound("x".into()), "not_found"),
+            (SeamError::Invalid("x".into()), "invalid"),
+            (SeamError::Io("x".into()), "io"),
+            (SeamError::Unsupported("x".into()), "unsupported"),
+            (SeamError::Conflict("x".into()), "conflict"),
+            (SeamError::Unadapted("x".into()), "unadapted"),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code, "{}", error);
+        }
+    }
+}

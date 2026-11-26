@@ -10,6 +10,7 @@ members = [
     "crates/aria-agent-dsh",
     "crates/aria-agent-tools",
     "crates/aria-agent-orchestrator",
+    "crates/aria-agent-rsi",
     "crates/aria-agent-browser",
     "crates/ariacompute-agent",
     "crates/aria-agent-cloud",
@@ -39,6 +40,7 @@ aria-agent-sandbox = { path = "crates/aria-agent-sandbox" }
 aria-agent-core = { path = "crates/aria-agent-core" }
 aria-agent-tools = { path = "crates/aria-agent-tools", version = "0.1.0" }
 aria-agent-orchestrator = { path = "crates/aria-agent-orchestrator" }
+aria-agent-rsi = { path = "crates/aria-agent-rsi" }
 aria-agent-browser = { path = "crates/aria-agent-browser", version = "0.1.0" }
 
 [profile.release]

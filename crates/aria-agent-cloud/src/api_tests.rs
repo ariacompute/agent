@@ -19,7 +19,9 @@ use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::app::{build_router, AppState, MakeContext, MakeModel, MakeSandbox, HEALTH_PATH};
+use crate::app::{
+    build_router, AppState, MakeContext, MakeModel, MakeSandbox, RsiState, HEALTH_PATH,
+};
 use crate::auth::{ApiKeyScopes, KeyCache, Principal, PrincipalKind};
 use crate::store::MemoryStore;
 
@@ -155,6 +157,7 @@ pub fn harness_with(
         make_sandbox,
         make_context,
         harness: None,
+        rsi: RsiState::disabled(),
     };
     Harness {
         app: build_router(state.clone()),
@@ -164,6 +167,32 @@ pub fn harness_with(
 
 pub fn harness() -> Harness {
     harness_with(|| Box::new(StubModel::new("agent")))
+}
+
+/// Same harness, with an explicitly configured RSI surface.
+pub fn harness_with_rsi(rsi: RsiState) -> Harness {
+    let mem = Arc::new(MemoryStore::new());
+    let contexts = Contexts::default();
+    let ctx = contexts.clone();
+    let make_context: MakeContext = Arc::new(move |p: &Principal| ctx.store_for(p));
+    let state = AppState {
+        agents: mem.clone(),
+        sessions: mem.clone(),
+        keys: mem.clone(),
+        teams: Arc::new(aria_agent_orchestrator::MemoryTeams::new()),
+        schedule: Arc::new(aria_agent_orchestrator::MemorySchedule::new()),
+        titles: mem.clone(),
+        key_cache: KeyCache::new(Duration::from_secs(60)),
+        make_model: Arc::new(|| Box::new(StubModel::new("agent"))),
+        make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
+        make_context,
+        harness: None,
+        rsi,
+    };
+    Harness {
+        app: build_router(state.clone()),
+        state,
+    }
 }
 
 /// A schedule provider that keeps returning a job even after `remove` reports
@@ -206,6 +235,7 @@ pub fn harness_with_schedule(schedule: Arc<dyn agent_core::seams::ScheduleSeam>)
         make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
         make_context,
         harness: None,
+        rsi: RsiState::disabled(),
     };
     Harness {
         app: build_router(state.clone()),
@@ -240,6 +270,7 @@ pub fn harness_with_context(fail_recall: bool, fail_relations: bool) -> Harness 
         make_sandbox,
         make_context,
         harness: None,
+        rsi: RsiState::disabled(),
     };
     Harness {
         app: build_router(state.clone()),
@@ -2008,6 +2039,7 @@ pub fn harness_with_context_failing_all() -> Harness {
         make_sandbox,
         make_context,
         harness: None,
+        rsi: RsiState::disabled(),
     };
     Harness {
         app: build_router(state.clone()),
@@ -2085,6 +2117,7 @@ mod faulty {
             make_sandbox,
             make_context,
             harness: None,
+            rsi: RsiState::disabled(),
         };
         Harness {
             app: build_router(state.clone()),
@@ -2188,6 +2221,7 @@ pub fn harness_with_session_failure(fail: &'static [&'static str]) -> Harness {
         make_sandbox: Arc::new(|| Arc::new(StubSandbox) as Arc<dyn Sandbox>),
         make_context,
         harness: None,
+        rsi: RsiState::disabled(),
     };
     Harness {
         app: build_router(state.clone()),

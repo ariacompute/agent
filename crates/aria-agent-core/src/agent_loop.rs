@@ -671,6 +671,10 @@ async fn native_run(
                         "arguments": call.arguments,
                     }),
                 });
+                // Measured around authorization + execution so a rejected call
+                // still reports how long the decision took; the RSI ledger uses
+                // this to tell "slow tool" apart from "wrong tool".
+                let started = std::time::Instant::now();
 
                 let outcome = match pipeline.authorize(call, &session).await {
                     Authz::Denied { decision, reason } => {
@@ -742,6 +746,7 @@ async fn native_run(
                         "projection": projection,
                     }),
                     is_error: result.is_error,
+                    latency_ms: Some(started.elapsed().as_millis() as u64),
                 });
                 yield Ok(AgentEvent::ToolCall {
                     id: call.id.clone(),

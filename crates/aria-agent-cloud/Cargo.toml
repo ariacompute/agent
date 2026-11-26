@@ -28,6 +28,8 @@ aria-agent-dsh = { path = "../aria-agent-dsh" }
 aria-agent-plugin.workspace = true
 aria-agent-tools.workspace = true
 aria-agent-orchestrator.workspace = true
+# Recursive self-improvement: ledger, proposals, versioned playbooks (ADR-0026).
+aria-agent-rsi.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 # eMudhra/emSign CA key compromise (2026-10): webpki-roots 1.0.10+ removes the

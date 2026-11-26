@@ -236,3 +236,64 @@ Tracked in `docs/followups/`:
 * Verification: offline fake-transport/scripted-runtime tests, a scripted real
   child process (`just dsh-smoke`), and one env-gated live turn (`just dsh-e2e`)
   that skips loudly instead of fabricating a result.
+
+## 11. Recursive self-improvement (RSI)
+* RSI closes the loop *execution ledger → diagnosis → proposal → validation →
+  versioned asset → reuse*. It is **off by default**: with `AGENT_RSI_ENABLED`
+  unset no record is buffered, no sweep exists and the session-log chain keeps its
+  single sink, so the turn path costs one empty chain step and nothing else.
+* The ledger is the existing `SessionEvent` stream, not a second one. `ItemDone`
+  gains an optional `latency_ms` (serde default) for tool timing; **no event
+  variant is added**, so JSONL written before this feature still parses and the
+  frozen SSE envelope is untouched.
+* Accounting runs on `SessionPersistence`: `ChainPersistence` fans one record out
+  to the authoritative audit sink and then to the RSI ledger, in order. The first
+  sink stays authoritative (its failure fails the append so `SessionRecorder`
+  retries); later sinks are best effort, so a ledger problem is logged and never
+  turns a completed turn into a failed one.
+* Diagnosis is a pure fold in `aria-agent-core::session::insight`
+  (`EfficiencyReport` / `TurnInsight` / `Pathology`). It is deterministic, makes
+  no model call, keeps per-finding evidence (`seq`, tool, turn) and truncates at
+  `max_records` / `max_turns` with an explicit `truncated` flag instead of
+  failing on long histories.
+* Proposals come from the `ReflectionEngine` seam; the default provider is a
+  deterministic rule table (pathology → playbook/skill candidate with scope and
+  a parameter list), never a model call. Each candidate states the `RsiScope`
+  (principal + domain + params) it was learned in.
+* Two validation tiers. (1) Offline replay scores the candidate against the same
+  ledger with zero model calls and zero sandbox; a gain below `min_score_gain`
+  discards it. (2) Real re-run A/B is a separate switch (`AGENT_RSI_REAL_RERUN`)
+  with its own timeout; **this build ships no re-run probe, so enabling it is a
+  startup error** rather than a silent pretend check.
+* The gate is human by default. A validated proposal is stored as *pending* and
+  published only by `POST /v1/rsi/proposals/{id}/promote`, which carries the
+  revision the approver believes is current. A mismatch is `409`, never
+  last-writer-wins. An unanswered gate is a refusal; `AGENT_RSI_AUTO_PROMOTE`
+  exists for trusted deployments only.
+* Cross-tenant reuse requires an `Adaptation` record (source, target, rewritten
+  parameters, rationale). `POST /v1/rsi/playbooks/{key}/adapt` without one
+  answers `422` and creates nothing.
+* Playbooks are versioned linearly (`current` / `propose` / `promote` /
+  `list_versions`); bodies and metadata are stored separately and a unique
+  `(principal_id, domain, key, revision)` index backs the guard.
+* Reuse is explicit asset injection, not a hot swap: published skills land in the
+  skills catalog (`AGENT_RSI_SKILLS_DIR`, default `.aria/skills`) and are offered
+  to the next turn's assembly; playbooks are read per domain. A running session's
+  system prompt is never rewritten (the removed Reef design, §7).
+* Under `harness = "dsh"` the same catalog is mounted into each session workspace,
+  because dsh runs its own tools and does not consult aria's skills tool.
+* Endpoints: `GET /v1/rsi/status`, `POST /v1/rsi/sweep`, `GET /v1/rsi/reports[/{id}]`,
+  `GET /v1/rsi/proposals`, `POST /v1/rsi/proposals/{id}/promote|discard`,
+  `GET /v1/rsi/playbooks/{key}[/versions]`, `POST /v1/rsi/playbooks/{key}/adapt`.
+  Sweeps are driven externally (cron) or by the optional in-process timer
+  (`AGENT_RSI_SWEEP_SECS`, default `0` = off).
+* Storage is `principal_id`-scoped: `rsi_reports` / `rsi_proposals` /
+  `rsi_playbooks` (migration `0009_rsi.sql`, idempotent). Batch writes use one
+  transaction; no per-row round trips.
+* Logs carry counts and identifiers only (reports, proposals, revision, conflict
+  code) — never a playbook body, tool arguments or user input.
+* Verification: inline unit tests per new file (normal + failure path), memory
+  provider tests for the store ports, and router-driven scenarios for
+  `503` when disabled, stale-revision `409`, unadapted `422`, admin-only
+  adaptation `403` and the auto-gate happy path. ADR:
+  `docs/adr/0026-recursive-self-improvement.md`.

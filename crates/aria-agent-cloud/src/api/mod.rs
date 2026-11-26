@@ -11,6 +11,7 @@
 pub mod agents;
 pub mod keys;
 pub mod orchestration;
+pub mod rsi;
 pub mod sessions;
 pub mod stubs;
 
@@ -41,6 +42,8 @@ impl IntoResponse for AppError {
             AppError::Forbidden(e) => (StatusCode::FORBIDDEN, e),
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             AppError::Conflict(e) => (StatusCode::CONFLICT, e),
+            AppError::Unprocessable(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
+            AppError::Unavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
         };
         error_response(status, msg)
     }
@@ -76,6 +79,14 @@ mod tests {
             (AppError::Forbidden("no".into()), StatusCode::FORBIDDEN),
             (AppError::NotFound, StatusCode::NOT_FOUND),
             (AppError::Conflict("stale".into()), StatusCode::CONFLICT),
+            (
+                AppError::Unprocessable("unadapted".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                AppError::Unavailable("rsi off".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
             (
                 AppError::Core(CoreError::Config("boom".into())),
                 StatusCode::INTERNAL_SERVER_ERROR,

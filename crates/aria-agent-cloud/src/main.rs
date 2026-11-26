@@ -12,7 +12,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::seams::{ApprovalBroker, AutoAllow, DenyAll, NoQuestions, PermissionPreset};
+use agent_core::seams::{
+    ApprovalBroker, AutoAllow, DenyAll, NoQuestions, PermissionPreset, PlaybookStore, RsiConfig,
+    RsiScope,
+};
 use agent_core::{gateway_api_key, gateway_base_url, gateway_model, ModelClient, OpenAiModel};
 use agent_sandbox::Sandbox;
 use aria_agent_cloud::app::{AppState, DEFAULT_MODEL};
@@ -23,6 +26,7 @@ use aria_agent_cloud::{build_router, upgrade, KeyCache};
 use aria_agent_dsh::{
     parse_filter_mode, DshAgentLoop, DshConfig, DshPool, SeamApprovalBridge, ThinkingFilterProxy,
 };
+use aria_agent_rsi::{DeterministicReflection, FilesystemSkillSink, RsiLedger, RsiSweep};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 
@@ -200,6 +204,17 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(default)
+}
+
+/// Parse a boolean environment value (`1`/`true`/`yes`/`on`), else `default`.
+fn env_flag(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(raw) => matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
 }
 
 /// Map the shared permission preset onto dsh's `sdk` profile presets.
@@ -391,6 +406,92 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let teams: Arc<dyn aria_agent_orchestrator::teams::TeamStore> = pg.clone();
     let schedule: Arc<dyn agent_core::seams::ScheduleSeam> = pg.clone();
     let titles: Arc<dyn aria_agent_cloud::store::TitleStore> = pg.clone();
+
+    // --- Recursive self-improvement (ADR-0026) ---
+    // Off unless asked for: with `AGENT_RSI_ENABLED` unset nothing is buffered,
+    // no sweep exists and the session-log chain keeps its single sink.
+    let rsi_config = RsiConfig {
+        enabled: env_flag("AGENT_RSI_ENABLED", false),
+        auto_promote: env_flag("AGENT_RSI_AUTO_PROMOTE", false),
+        real_rerun: env_flag("AGENT_RSI_REAL_RERUN", false),
+        sweep_threshold: env_u64("AGENT_RSI_SWEEP_THRESHOLD", 3).max(1) as usize,
+        ..RsiConfig::default()
+    };
+    rsi_config.validate()?;
+    if rsi_config.real_rerun {
+        // No re-run probe ships with this binary: enabling the second gate
+        // without one would make every validation fail closed, so refuse to
+        // start rather than appear to double-check.
+        return Err("AGENT_RSI_REAL_RERUN is not supported by this build: \
+                    it requires a wired re-run probe"
+            .into());
+    }
+    let rsi_ledger = if rsi_config.enabled {
+        Some(Arc::new(RsiLedger::new(&rsi_config)))
+    } else {
+        None
+    };
+    let rsi_store: Arc<dyn aria_agent_cloud::store::RsiStore> = pg.clone();
+    let playbooks: Arc<dyn PlaybookStore> = pg.clone();
+    let rsi_sweep = match (&rsi_ledger, rsi_config.enabled) {
+        (Some(ledger), true) => {
+            let mut sweep = RsiSweep::new(
+                ledger.clone(),
+                Arc::new(DeterministicReflection::new(rsi_config.clone())),
+                playbooks.clone(),
+                rsi_config.clone(),
+            )
+            .with_reports(Arc::new(aria_agent_cloud::store::StoreReportSink::new(
+                rsi_store.clone(),
+            )));
+            // Distilled skills land in the same catalog `FilesystemSkills` reads.
+            let skills_dir = std::env::var("AGENT_RSI_SKILLS_DIR")
+                .unwrap_or_else(|_| ".aria/skills".to_string());
+            sweep = sweep.with_skills(Arc::new(FilesystemSkillSink::new(skills_dir)));
+            Some(Arc::new(sweep))
+        }
+        _ => None,
+    };
+    // Optional periodic sweep. Default 0 = the deployment drives sweeps through
+    // `POST /v1/rsi/sweep` from its own scheduler; the in-process timer exists for
+    // single-binary installs that have no scheduler at all.
+    let sweep_secs = env_u64("AGENT_RSI_SWEEP_SECS", 0);
+    if let (Some(sweep), true) = (rsi_sweep.clone(), sweep_secs > 0) {
+        let domain = std::env::var("AGENT_RSI_DOMAIN").unwrap_or_else(|_| "default".into());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(sweep_secs.max(5)));
+            loop {
+                tick.tick().await;
+                for principal in sweep.ledger().principals() {
+                    let scope = RsiScope::new(principal, domain.clone());
+                    match sweep.sweep_principal(&scope).await {
+                        Ok(outcome) if outcome.busy => {}
+                        Ok(outcome) => tracing::info!(
+                            sessions = outcome.sessions,
+                            reports = outcome.reports,
+                            promoted = outcome.promoted,
+                            "rsi sweep finished"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "rsi sweep failed"),
+                    }
+                }
+            }
+        });
+    }
+    tracing::info!(
+        enabled = rsi_config.enabled,
+        auto_promote = rsi_config.auto_promote,
+        sweep_secs,
+        "rsi: {}",
+        if rsi_config.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    let rsi =
+        aria_agent_cloud::RsiState::new(rsi_store, playbooks, rsi_sweep, rsi_ledger, rsi_config);
+
     let state = AppState {
         agents: pg.clone(),
         sessions: pg.clone(),
@@ -403,6 +504,7 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         make_sandbox,
         make_context,
         harness: make_harness,
+        rsi,
     };
 
     let app = build_router(state);

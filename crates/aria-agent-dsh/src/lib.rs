@@ -176,6 +176,10 @@ impl AgentLoop for DshAgentLoop {
                                     item_id: id.clone(),
                                     is_error,
                                     result: json!({"content": content, "spill": content.len()}),
+                                    // dsh does not report per-call timing; the
+                                    // report degrades to step/retry dimensions
+                                    // rather than inventing a number.
+                                    latency_ms: None,
                                 });
                             }
                             yield Ok(AgentEvent::ToolCall {

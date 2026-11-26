@@ -186,6 +186,11 @@ pub const EGRESS: SeamKey = SeamKey("egress");
 pub const AUDIT: SeamKey = SeamKey("audit");
 /// Resource usage accounting by lifecycle state (`ctx.metering`, ADR-0022).
 pub const METERING: SeamKey = SeamKey("metering");
+/// Recursive self-improvement diagnosis: ledger → proposal → validation
+/// (`ctx.rsi`, ADR-0026).
+pub const RSI: SeamKey = SeamKey("rsi");
+/// Versioned playbook storage with a revision guard (`ctx.playbook`, ADR-0026).
+pub const PLAYBOOK: SeamKey = SeamKey("playbook");
 
 /// OpenTelemetry export (`ctx.otel`) — a **service**, not a swappable seam.
 pub const OTEL: SeamKey = SeamKey("otel");
@@ -245,6 +250,8 @@ pub const ALL: &[SeamKey] = &[
     EGRESS,
     AUDIT,
     METERING,
+    RSI,
+    PLAYBOOK,
     OTEL,
     PRODUCT_TELEMETRY,
     DEEPSEEK_AUTH,
@@ -421,6 +428,21 @@ mod tests {
         }
         assert_eq!(SeamKey::parse("nope"), None);
         assert_eq!(SeamKey::parse(""), None);
+    }
+
+    #[test]
+    fn rsi_and_playbook_are_swappable_seams() {
+        // A plugin that declares either key must deserialize: forgetting the
+        // `ALL` entry used to be an `UnknownSeam` at boot (ADR-0026).
+        assert_eq!(SeamKey::parse("rsi"), Some(RSI));
+        assert_eq!(SeamKey::parse("playbook"), Some(PLAYBOOK));
+        assert_eq!(RSI.role(), SeamRole::Seam);
+        assert_eq!(PLAYBOOK.role(), SeamRole::Seam);
+        let raw = r#"{"id":"aria-rsi","role":"seam","provides":["rsi","playbook"],"requires":["session"]}"#;
+        let manifest = PluginManifest::from_json(raw).unwrap();
+        assert_eq!(manifest.provides, vec![RSI, PLAYBOOK]);
+        assert_eq!(manifest.requires, vec![SESSION]);
+        manifest.validate().unwrap();
     }
 
     #[test]

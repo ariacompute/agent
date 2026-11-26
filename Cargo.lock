@@ -151,6 +151,7 @@ dependencies = [
  "aria-agent-governance",
  "aria-agent-orchestrator",
  "aria-agent-plugin",
+ "aria-agent-rsi",
  "aria-agent-sandbox",
  "aria-agent-tools",
  "async-stream",
@@ -299,6 +300,20 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "aria-agent-rsi"
+version = "0.1.0"
+dependencies = [
+ "aria-agent-core",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

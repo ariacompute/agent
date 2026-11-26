@@ -19,7 +19,9 @@ kept as an explicit `native` fallback (ADR-0019).
   `aria-agent-memo` (aria memo), `ariacompute-agent` (UniFFI cloud API client
   for Swift/Kotlin — no embedded runtime), `aria-agent-cloud`,
   `aria-agent-ffigen`, `aria-agent-browser` (browser sandbox: six-image
-  `BrowserCatalog` + `BrowserSandbox` + browser tool family)
+  `BrowserCatalog` + `BrowserSandbox` + browser tool family),
+  `aria-agent-rsi` (`publish = false`: event ledger, deterministic proposer,
+  replay validation, versioned playbooks, skill sink, sweep)
 * `bindings/swift` (`Package.swift` SwiftPM + `AriaComputeAgent.podspec` CocoaPods),
   `bindings/kotlin` (Android `build.gradle.kts` with vanniktech Maven publish).
   Generated Swift/Kotlin *sources* are committed and must not be edited by hand —
@@ -222,6 +224,23 @@ kept as an explicit `native` fallback (ADR-0019).
      both directions (the bundled adapter cannot replay them) while keeping
      `thinking`; loopback is forced into the child's `NO_PROXY`. On a dsh upgrade
      only `aria-agent-dsh/src/event_map.rs` should need changes. See ADR-0019.
+
+     17. **Recursive self-improvement is off by default and never publishes
+     implicitly.** `aria-agent-rsi` turns the session event ledger into capability
+     in four contract steps (`ReflectionEngine::analyze` → `propose` → `validate`
+     → `PlaybookStore::promote`). Hard rules: (a) no new `SessionEvent` variant —
+     only `ItemDone::latency_ms` with `#[serde(default)]`, so old JSONL and the
+     frozen SSE envelope keep working; (b) diagnosis and the default proposer are
+     deterministic and call no model; (c) offline replay is the only always-on
+     validation — real re-run A/B is a separate switch and this build refuses to
+     start with it on rather than pretend to check; (d) promotion carries the
+     expected revision and a mismatch is `409`, never last-writer-wins; (e) an
+     unanswered gate is a refusal (`ApprovalBroker` `Unavailable` == `Deny`);
+     (f) cross-tenant reuse without a complete `Adaptation` record is `422` and
+     creates nothing; (g) promotion produces a versioned asset read at the next
+     turn — **no hot swap, no system-prompt rewrite** (the removed Reef design);
+     (h) `AGENT_RSI_ENABLED` unset = no ledger, no sweep, no timer. See
+     `docs/adr/0026-recursive-self-improvement.md`.
 
 ## SDK（js / python）
 

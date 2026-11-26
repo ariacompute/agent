@@ -12,12 +12,18 @@ pub mod governance;
 pub mod memory;
 pub mod pg;
 pub mod pg_orchestration;
+pub mod pg_rsi;
 
 pub use governance::PgGovernanceStore;
 pub use memory::MemoryStore;
 pub use pg::{ensure_schema, PgStore};
+pub use pg_rsi::ensure_rsi_schema;
 
+use agent_core::session::insight::Finding;
 use async_trait::async_trait;
+use std::sync::Arc;
+
+use crate::auth::PrincipalKind;
 use serde_json::Value;
 
 use crate::auth::{ApiKeyScopes, Principal};
@@ -173,6 +179,82 @@ pub trait TitleStore: Send + Sync {
         principal: &Principal,
         session: &str,
     ) -> Result<Option<TitleRow>, AppError>;
+}
+
+/// Tenant visibility rule shared by every store: an admin sees everything, any
+/// other principal sees only its own rows. One definition, so a new store cannot
+/// quietly invent a laxer one.
+pub(crate) fn can_see(principal: &Principal, owner: &str) -> bool {
+    principal.kind == PrincipalKind::Admin || principal.id == owner
+}
+
+/// One persisted RSI report.
+///
+/// The *ledger* stays where it already lives (the session event stream); what is
+/// stored here is the diagnosis — score, truncation flag and the evidence chain
+/// — because that is the artifact a reviewer has to be able to find later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportRow {
+    pub id: String,
+    pub principal_id: String,
+    pub session: String,
+    pub score: i32,
+    pub truncated: bool,
+    pub findings: Vec<Finding>,
+    /// Epoch milliseconds.
+    pub created_at_ms: i64,
+}
+
+/// RSI diagnoses, scoped by `principal_id`.
+#[async_trait]
+pub trait RsiStore: Send + Sync {
+    async fn insert_report(&self, row: &ReportRow) -> Result<(), AppError>;
+    /// Newest first. Admins see every tenant, users only their own.
+    async fn list_reports(
+        &self,
+        principal: &Principal,
+        limit: i64,
+    ) -> Result<Vec<ReportRow>, AppError>;
+    async fn get_report(&self, principal: &Principal, id: &str) -> Result<ReportRow, AppError>;
+}
+
+/// Adapts [`RsiStore`] to the sweep's best-effort report sink.
+///
+/// The sweep only knows `SeamResult`; the API only knows `AppError`. This is the
+/// one adapter between them, so a storage failure is reported as an `io` seam
+/// error and the sweep logs it without aborting a diagnosis it already produced.
+pub struct StoreReportSink {
+    store: Arc<dyn RsiStore>,
+}
+
+impl StoreReportSink {
+    pub fn new(store: Arc<dyn RsiStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl aria_agent_rsi::ReportSink for StoreReportSink {
+    async fn record(
+        &self,
+        scope: &agent_core::seams::RsiScope,
+        session: &str,
+        report: &agent_core::session::insight::EfficiencyReport,
+    ) -> Result<(), agent_core::seams::SeamError> {
+        let row = ReportRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            principal_id: scope.principal.clone(),
+            session: session.to_string(),
+            score: report.score,
+            truncated: report.truncated,
+            findings: report.findings.clone(),
+            created_at_ms: agent_core::context::now_ms(),
+        };
+        self.store
+            .insert_report(&row)
+            .await
+            .map_err(|e| agent_core::seams::SeamError::Io(format!("report store: {e:?}")))
+    }
 }
 
 /// Self-serve API keys (admin-managed) plus the resolution path used by auth.

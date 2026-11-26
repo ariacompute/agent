@@ -160,6 +160,18 @@ impl DshConfig {
         Ok(())
     }
 
+    /// The shared skill catalog this session should see.
+    ///
+    /// The catalog is `<root>/.aria/skills` — the same directory
+    /// `FilesystemSkills` reads — while the session workspace sits at
+    /// `<root>/.aria/dsh-workspaces/<leaf>`. Deriving it from `cwd` keeps the
+    /// layout knowledge in one place and avoids a second config field that every
+    /// constructor would have to fill in (ADR-0026).
+    pub fn skill_catalog(&self) -> PathBuf {
+        let root = self.cwd.ancestors().nth(3).unwrap_or(&self.cwd);
+        root.join(".aria/skills")
+    }
+
     /// The child environment: an allow-list, never the whole process env.
     ///
     /// Only `DSH_HOME`, `PATH` (so a bare `dsh` resolves) and the explicit
@@ -184,6 +196,60 @@ impl DshConfig {
         env.extend(self.extra_env.iter().cloned());
         env
     }
+}
+
+/// Mirror the shared skill catalog into a session workspace.
+///
+/// Best effort by design: a session must still start when the catalog cannot be
+/// linked, because a missing skill degrades capability rather than invalidating a
+/// turn. `<cwd>/.aria/skills` is the location both `FilesystemSkills` and dsh
+/// resolve skills from, so linking is the whole integration.
+fn link_skill_catalog(cfg: &DshConfig) {
+    let catalog = cfg.skill_catalog();
+    if !catalog.is_dir() {
+        // Nothing distilled yet: an empty directory would only make
+        // `skill_list` look configured when it is not.
+        return;
+    }
+    let parent = cfg.cwd.join(".aria");
+    let link = parent.join("skills");
+    if std::fs::symlink_metadata(&link).is_ok() {
+        return;
+    }
+    if let Err(e) = prepare_link(&catalog, &parent, &link) {
+        tracing::warn!(catalog = %catalog.display(), error = %e, "cannot share the skill catalog with dsh");
+    }
+}
+
+/// Create the parent directory and then the link itself.
+fn prepare_link(catalog: &Path, parent: &Path, link: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(parent)?;
+    link_dir(catalog, link)
+}
+
+#[cfg(unix)]
+fn link_dir(catalog: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(catalog, link)
+}
+
+#[cfg(not(unix))]
+fn link_dir(catalog: &Path, link: &Path) -> std::io::Result<()> {
+    copy_tree(catalog, link)
+}
+
+#[cfg(not(unix))]
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// A live harness runtime the loop can prompt.
@@ -220,6 +286,9 @@ impl DshRuntime {
                 cfg.cwd.display()
             ))
         })?;
+        // dsh runs tools in its own workspace, so a skill distilled by RSI has to
+        // be visible *there*, not only in the aria sandbox root.
+        link_skill_catalog(&cfg);
         let args = vec!["--profile".to_string(), SDK_PROFILE.to_string()];
         let transport = StdioTransport::spawn(
             &cfg.bin,
@@ -453,6 +522,59 @@ mod tests {
         assert_ne!(cfg.home, cfg.cwd);
         assert_eq!(cfg.permission_mode, "workspace-write");
         cfg.validate().expect("valid");
+    }
+
+    #[test]
+    fn the_skill_catalog_is_derived_from_the_workspace_layout() {
+        let cfg = DshConfig::for_session(Path::new("/srv"), "s1", "m");
+        assert_eq!(cfg.skill_catalog(), PathBuf::from("/srv/.aria/skills"));
+        // A workspace without enough components falls back to its own directory
+        // rather than inventing a path outside the deployment root.
+        let shallow = DshConfig {
+            cwd: PathBuf::from("leaf"),
+            ..DshConfig::for_session(Path::new("/srv"), "s1", "m")
+        };
+        assert_eq!(shallow.skill_catalog(), PathBuf::from("leaf/.aria/skills"));
+    }
+
+    #[test]
+    fn a_distilled_skill_reaches_the_dsh_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join(".aria/skills/rsi-retry-storm-shell");
+        std::fs::create_dir_all(&catalog).unwrap();
+        std::fs::write(catalog.join("SKILL.md"), "# stop retrying").unwrap();
+
+        let cfg = DshConfig::for_session(dir.path(), "s1", "m");
+        std::fs::create_dir_all(&cfg.cwd).unwrap();
+        link_skill_catalog(&cfg);
+        let shared = cfg.cwd.join(".aria/skills");
+        assert!(shared.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(shared.join("rsi-retry-storm-shell/SKILL.md")).unwrap(),
+            "# stop retrying"
+        );
+
+        // Re-linking is a no-op rather than an error.
+        link_skill_catalog(&cfg);
+        assert!(shared.is_dir());
+    }
+
+    #[test]
+    fn linking_without_a_catalog_or_without_a_parent_is_silent() {
+        let empty = tempfile::tempdir().unwrap();
+        let cfg = DshConfig::for_session(empty.path(), "s1", "m");
+        std::fs::create_dir_all(&cfg.cwd).unwrap();
+        link_skill_catalog(&cfg);
+        assert!(!cfg.cwd.join(".aria/skills").exists());
+
+        // A `.aria` file blocks the directory: the failure is logged, not fatal.
+        let blocked = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(blocked.path().join(".aria/skills")).unwrap();
+        let cfg = DshConfig::for_session(blocked.path(), "s1", "m");
+        std::fs::create_dir_all(&cfg.cwd).unwrap();
+        std::fs::write(cfg.cwd.join(".aria"), "not a directory").unwrap();
+        link_skill_catalog(&cfg);
+        assert!(cfg.cwd.join(".aria").is_file());
     }
 
     #[test]

@@ -429,6 +429,63 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
 - [x] `just e2e` now runs 9 real-socket scenarios (was 5); fmt, clippy
       `-D warnings`, `cargo test --workspace` and `just cov-check` stay green.
 
+## Milestone 19 — Recursive self-improvement (ADR-0026)
+- [x] Core kernel, no I/O: `session::insight` folds the existing record stream
+      into `EfficiencyReport` / `TurnInsight` / `Pathology` with per-finding
+      evidence (`seq`, tool, turn), `max_records` / `max_turns` caps and an
+      explicit `truncated` flag; `RsiConfig` (default `enabled = false`) and
+      `session::ChainPersistence` (authoritative first sink, best-effort rest).
+- [x] Event contract stayed additive: `ItemDone` gained
+      `latency_ms: Option<u64>` with `#[serde(default)]`; **no** new
+      `SessionEvent` variant, so old JSONL and the frozen SSE envelope are
+      unaffected.
+- [x] New `aria-agent-rsi` crate (`publish = false`, depends on
+      `aria-agent-core` only): `RsiLedger` (per `(principal, session, seq)`
+      dedupe + window queries), `DeterministicReflection` (pathology → candidate
+      rule table with scope + parameter list, zero model calls),
+      replay `validate` (score vs baseline, discard below `min_score_gain`),
+      `PlaybookEngine` (revision-guarded `current` / `propose` / `promote` /
+      `list_versions`), `FilesystemSkillSink`, `RsiSweep` (single-flight).
+- [x] New seams `rsi` and `playbook` (`PlaybookStore`, `ReflectionEngine`,
+      `RsiScope`, `Adaptation`, `ValidationOutcome`) registered in
+      `aria-agent-plugin`'s `SeamKey::ALL`; an unregistered key still fails at
+      boot with `UnknownSeam`.
+- [x] Cloud storage: migration `0009_rsi.sql` (`rsi_reports`, `rsi_proposals`,
+      `rsi_playbooks`; unique `(principal_id, domain, key, revision)`),
+      `store::RsiStore` / `PlaybookStore` ports, `PgStore` implementation with
+      `principal_id` filtering and single-transaction batches, and an in-memory
+      provider so the same semantics are covered offline.
+- [x] HTTP surface `api/rsi.rs`: `GET /v1/rsi/status`, `POST /v1/rsi/sweep`,
+      `GET /v1/rsi/reports[/{id}]`, `GET /v1/rsi/proposals`,
+      `POST /v1/rsi/proposals/{id}/promote|discard`,
+      `GET /v1/rsi/playbooks/{key}[/versions]`,
+      `POST /v1/rsi/playbooks/{key}/adapt`. Views never expose `principal_id`;
+      errors reuse `AppError`.
+- [x] Gate semantics: RSI off → `503`; promote with stale `expected_revision`
+      → `409` (never last-writer-wins, and the pending row survives so the
+      approver can retry); unadapted cross-tenant adapt → `422`;
+      non-admin adaptation → `403`; unknown proposal/playbook → `404`.
+      With `AGENT_RSI_AUTO_PROMOTE` off the human gate is the only path.
+- [x] Real re-run A/B is a separate switch (`AGENT_RSI_REAL_RERUN`); this build
+      ships no re-run probe, so enabling it is a **startup error** instead of a
+      pretend second gate.
+- [x] Startup wiring: `RsiState` in `AppState`, ledger appended through the
+      session-persistence chain, `AGENT_RSI_SWEEP_THRESHOLD` / `_SECS`
+      (default `0` = external cron drives `POST /v1/rsi/sweep`) and
+      `AGENT_RSI_SKILLS_DIR` (default `.aria/skills`).
+- [x] dsh reuse: `DshConfig::for_session` links `<workspace>/.aria/skills` to the
+      shared catalog (symlink on Unix, copy elsewhere), skipped when nothing has
+      been distilled and best-effort on failure — a missing skill degrades
+      capability, it never fails a turn.
+- [x] Tests: inline normal + failure cases in every new core/rsi file, memory
+      provider coverage for the store ports, and 8 HTTP scenarios over the real
+      router (`rsi_tests.rs`) covering disabled/409/422/403 and the happy path.
+      `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace` and
+      `just cov-check` stay green.
+- [x] Docs: ADR-0026, `requirements.md §11`, this milestone, architecture
+      layering + storage boundary, and an AGENTS.md rule (off by default,
+      additive events, explicit gate, no hot swap, adaptation before reuse).
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

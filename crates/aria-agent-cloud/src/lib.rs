@@ -25,6 +25,8 @@ pub mod context;
 pub mod event_envelope;
 pub mod governance;
 pub mod internal_egress;
+#[cfg(test)]
+mod rsi_tests;
 pub mod store;
 pub mod types;
 pub mod upgrade;
@@ -32,7 +34,7 @@ pub mod util;
 
 pub use app::{
     agent_config, agent_tools, build_agent, build_router, build_sse_stream, AppState, MakeContext,
-    MakeModel, MakeSandbox, DEFAULT_MODEL, HEALTH_PATH,
+    MakeModel, MakeSandbox, RsiState, DEFAULT_MODEL, HEALTH_PATH,
 };
 pub use auth::{
     generate_key, hash_key, presented_token, require_auth, resolve_principal, ApiKeyScopes,
@@ -56,6 +58,12 @@ pub enum AppError {
     NotFound,
     /// The caller's revision is stale (optimistic concurrency).
     Conflict(String),
+    /// The request is well formed but cannot be applied as-is — for RSI, a
+    /// cross-tenant playbook promotion without an adaptation record (ADR-0026).
+    Unprocessable(String),
+    /// The capability exists in the API but is not configured in this
+    /// deployment (RSI disabled, no playbook provider).
+    Unavailable(String),
 }
 
 /// Result alias used by the API layer.

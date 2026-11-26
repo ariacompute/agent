@@ -15,11 +15,13 @@ aria-agent-core          Agent loop · seams · SessionEvent stream · prompt ·
         │                      ├── seams: llm sandbox fs shell jobs storage
         │                      │          sessionPersistence sessionQuery approvals
         │                      │          skills web userQuestions subagents schedule
+        │                      │          agent_loop playbook rsi
         ▼                      ▼
 providers                aria-agent-tools        (fs / shell / jobs / terminal /
    │                     aria-agent-orchestrator   skills / web / ask / plan / todo / memo)
    │                     aria-agent-sandbox     (docker / kata / cube / browser)
    │                     aria-agent-memo        (aria memo, SQLite)
+   │                     aria-agent-rsi        (ledger / propose / replay / playbook / skills)
    ▼
 aria-agent-cloud (axum, Postgres + pgvector)  ──►  ariacompute-agent (UniFFI)
                                                      ├── bindings/swift
@@ -35,6 +37,7 @@ aria-agent-cloud (axum, Postgres + pgvector)  ──►  ariacompute-agent (UniF
 | `aria-agent-sandbox` | Pluggable `Sandbox`: `DockerSandbox` (default), `KataSandbox`, `CubeSandbox`. |
 | `aria-agent-memo` | On-device context store (aria memo / SQLite) implementing `ContextStore`. |
 | `aria-agent-browser` | Browser sandbox + browser tool family (reuses the Docker/Kata path). |
+| `aria-agent-rsi` | `publish = false`. Ledger accounting, deterministic proposer, offline replay validation, versioned playbooks, skill sink, sweep. Depends on `aria-agent-core` only. |
 | `aria-agent-cloud` | axum service: beta Agents resource, SSE envelope, Postgres + pgvector, teams/jobs routes. |
 | `ariacompute-agent` | UniFFI `cdylib` (`libaria-agent_ffi`): `SdkAgent`, `SdkSession`, `create_agent`. |
 | `aria-agent-ffigen` | Regenerates the Swift/Kotlin bindings from the cdylib. |
@@ -45,7 +48,8 @@ aria-agent-cloud (axum, Postgres + pgvector)  ──►  ariacompute-agent (UniF
   (`context_fragments`, sharded by `principal_id`). pgvector is required — boot
   fails without it (ADR-0010). Metadata (`agents`, `agent_sessions`,
   `session_turns`, `session_items`, `agent_teams`, `scheduled_jobs`,
-  `session_titles`) is `principal_id`-scoped too.
+  `session_titles`) is `principal_id`-scoped too, as are the RSI tables
+  (`rsi_reports`, `rsi_proposals`, `rsi_playbooks`, migration `0009`).
 * **Local**: `aria-agent-memo` (SQLite, aria memo) — the only on-device format.
 * The shared contract is `aria-agent-core::context`; `aria-agent-core` never
   depends on a store implementation. SDKs pick `cloud` / `local` / `both` per call
@@ -71,7 +75,8 @@ records (ADR-0019).
    retries **once**.
 5. Every event goes to the SSE envelope *and* to `sessionPersistence` (JSONL
    locally; in the cloud a title projection into `session_titles`, read back via
-   `GET /v1/agents/sessions/{id}/title`).
+   `GET /v1/agents/sessions/{id}/title`). The cloud sink is a `ChainPersistence`:
+   audit projection first, then the RSI ledger when RSI is on.
 
 ### Harness boundary
 
@@ -83,6 +88,41 @@ session. aria keeps: recall injection, memory writes, graph relations,
 compaction, session events and titles, approval/question bridging, and the frozen
 wire envelope. `just dsh-smoke` covers the protocol offline; `just dsh-e2e` runs
 one real turn when `ARIA_DSH_E2E=1` and a provider key are present.
+
+## Recursive self-improvement (ADR-0026)
+
+Off by default (`AGENT_RSI_ENABLED`). When on, the session event ledger is also
+buffered per `(principal, session, seq)` and folded on demand:
+
+```
+TurnCompleted/Failed → ChainPersistence (audit → ledger)
+  → sweep (external POST /v1/rsi/sweep, or AGENT_RSI_SWEEP_SECS timer)
+    → core::session::insight  (pure fold → EfficiencyReport + evidence)
+    → ReflectionEngine::propose  (deterministic rule table)
+    → validate  (offline replay vs baseline; real A/B is a separate switch)
+    → rsi_proposals (pending)  → promote (revision-guarded) → rsi_playbooks
+    → skill catalog (.aria/skills) → next turn's assembly / dsh workspace
+```
+
+* `EfficiencyReport` / `TurnInsight` / `Pathology` live in
+  `aria-agent-core::session::insight`; they are a pure fold over records the
+  session already produces, with `max_records` / `max_turns` caps and a
+  `truncated` flag.
+* `aria-agent-rsi` owns the engine: `RsiLedger`, `DeterministicReflection`,
+  `PlaybookEngine`, `FilesystemSkillSink`, `RsiSweep`. It depends on
+  `aria-agent-core` only — no Postgres, no cloud types.
+* Seams: `playbook` (`PlaybookStore`) and `rsi` (`ReflectionEngine`). Adding a
+  seam requires registering the key in `aria-agent-plugin`'s `ALL`, otherwise
+  boot fails with `UnknownSeam`.
+* Publishing is explicit: `promote` takes `expected_revision`; a stale value is
+  `409`. Cross-tenant reuse needs an `Adaptation` record or it is `422`. With
+  `auto_promote` off (the default) an unanswered gate is a refusal.
+* Reuse is asset injection, never a hot swap: a published skill is a new entry in
+  the catalog, a playbook is a new *version* read at the next turn. A running
+  session's system prompt is not rewritten.
+* HTTP surface: `/v1/rsi/status|sweep|reports|proposals|playbooks` — thin
+  handlers, tenant filtering in `PgStore`, View structs that never expose
+  `principal_id`.
 
 ## Tool pipeline & approvals
 

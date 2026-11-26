@@ -7,7 +7,9 @@
 //! and derives read models as [`projection`]s instead of storing them twice
 //! (ADR-0015).
 
+pub mod chain;
 pub mod compaction;
+pub mod insight;
 pub mod jsonl;
 pub mod projection;
 pub mod query;
@@ -17,7 +19,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use chain::ChainPersistence;
 pub use compaction::{CompactDecision, CompactReason, CompactionPolicy};
+pub use insight::{
+    analyze, EfficiencyReport, Evidence, Finding, InsightLimits, Pathology, TurnInsight,
+};
 pub use jsonl::JsonlPersistence;
 pub use projection::{ItemView, SessionProjection, TodoItem, TurnStatus, TurnView};
 pub use query::{query, search_text, SessionFilter};
@@ -49,6 +55,15 @@ pub enum SessionEvent {
         result: Value,
         #[serde(default)]
         is_error: bool,
+        /// Wall-clock duration of the call, when the runtime measured it.
+        ///
+        /// Deliberately **optional and additive**: the event vocabulary is a
+        /// frozen contract shared by both harnesses, so a new *variant* would
+        /// break SSE consumers while a defaulted field does not. Records written
+        /// before this field existed simply carry `None`, and the efficiency
+        /// report then falls back to step/retry dimensions instead of failing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latency_ms: Option<u64>,
     },
     TextDelta {
         text: String,
@@ -311,6 +326,7 @@ mod tests {
                 item_id: "i1".into(),
                 result: json!({"exit": 0}),
                 is_error: false,
+                latency_ms: Some(4),
             },
             SessionEvent::TextDelta { text: "a".into() },
             SessionEvent::TextDone { text: "a".into() },
@@ -365,6 +381,7 @@ mod tests {
                 item_id: "i".into(),
                 result: json!("y"),
                 is_error: true,
+                latency_ms: None,
             },
             SessionEvent::Approval {
                 id: "a".into(),
@@ -390,6 +407,48 @@ mod tests {
         for ev in cases {
             assert!(!ev.text().is_empty(), "{ev:?}");
         }
+    }
+
+    #[test]
+    fn item_done_latency_is_additive_and_optional() {
+        // A record written before the field existed still parses.
+        let raw = json!({
+            "seq": 3,
+            "at_ms": 5,
+            "event": {
+                "type": "item_done",
+                "item_id": "i1",
+                "result": {"ok": true},
+                "is_error": false
+            }
+        });
+        let record: SessionRecord = serde_json::from_value(raw).unwrap();
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["event"]["type"], "item_done");
+        assert!(value["event"].get("latency_ms").is_none());
+
+        let timed = SessionEvent::ItemDone {
+            item_id: "i1".into(),
+            result: json!({"ok": true}),
+            is_error: false,
+            latency_ms: Some(17),
+        };
+        let value = serde_json::to_value(&timed).unwrap();
+        assert_eq!(value["latency_ms"], 17);
+        let back: SessionEvent = serde_json::from_value(value).unwrap();
+        assert_eq!(back, timed);
+
+        // An unmeasured call omits the key entirely instead of writing null.
+        let untimed = SessionEvent::ItemDone {
+            item_id: "i1".into(),
+            result: json!({"ok": true}),
+            is_error: false,
+            latency_ms: None,
+        };
+        assert!(serde_json::to_value(&untimed)
+            .unwrap()
+            .get("latency_ms")
+            .is_none());
     }
 
     #[tokio::test]

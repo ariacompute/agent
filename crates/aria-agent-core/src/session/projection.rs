@@ -35,6 +35,9 @@ pub struct ItemView {
     pub result: Option<Value>,
     #[serde(default)]
     pub is_error: bool,
+    /// Measured duration of the call, when the runtime reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +132,7 @@ impl SessionProjection {
                         payload: payload.clone(),
                         result: None,
                         is_error: false,
+                        latency_ms: None,
                     });
                 }
             }
@@ -136,6 +140,7 @@ impl SessionProjection {
                 item_id,
                 result,
                 is_error,
+                latency_ms,
             } => {
                 if let Some(item) = self
                     .turns
@@ -145,6 +150,7 @@ impl SessionProjection {
                 {
                     item.result = Some(result.clone());
                     item.is_error = *is_error;
+                    item.latency_ms = *latency_ms;
                 }
             }
             SessionEvent::TextDelta { text } => self.partial_text.push_str(text),
@@ -281,6 +287,7 @@ mod tests {
                     item_id: "i1".into(),
                     result: json!({"exit": 0}),
                     is_error: false,
+                    latency_ms: Some(9),
                 },
             ),
             rec(4, SessionEvent::TextDelta { text: "he".into() }),
@@ -338,6 +345,7 @@ mod tests {
         assert_eq!(turn.steps, vec!["model"]);
         assert_eq!(turn.items.len(), 1);
         assert_eq!(turn.items[0].result, Some(json!({"exit": 0})));
+        assert_eq!(turn.items[0].latency_ms, Some(9));
         assert_eq!(p.usage.total(), 14);
         assert_eq!(p.compactions, 1);
         assert_eq!(p.title.as_deref(), Some("File listing"));
@@ -440,6 +448,7 @@ mod tests {
                     item_id: "orphan".into(),
                     result: "x".into(),
                     is_error: false,
+                    latency_ms: None,
                 },
             ),
             rec(

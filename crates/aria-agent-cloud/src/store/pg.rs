@@ -46,7 +46,7 @@ const SCOPE: &str = "/*scope*/";
 /// to clone (the pool is an `Arc` internally).
 #[derive(Clone)]
 pub struct PgStore {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PgStore {
@@ -758,6 +758,9 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
          ON CONFLICT (id) DO NOTHING",
     )
     .await?;
+    // Recursive self-improvement tables (ADR-0026). Kept in their own module so
+    // the RSI DDL lives next to the queries that use it.
+    super::pg_rsi::ensure_rsi_schema(pool).await?;
     Ok(())
 }
 

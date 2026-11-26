@@ -9,14 +9,16 @@ use std::sync::Arc;
 
 use agent_browser::{BrowserCatalog, BrowserSandbox, BrowserToolHandler};
 use agent_core::context::ContextStore;
+use agent_core::seams::{PlaybookStore, RsiConfig};
 use agent_core::seams::{SeamError, SeamResult, SubagentRequest, Subagents};
 use agent_core::session::{
-    SessionError, SessionEvent, SessionPersistence, SessionRecord, SessionResult,
+    ChainPersistence, SessionError, SessionEvent, SessionPersistence, SessionRecord, SessionResult,
     SOURCE_FIRST_PROMPT,
 };
 use agent_core::{Agent, AgentConfig, CoreError, ModelClient, Tool};
 use agent_sandbox::{Sandbox, SandboxProvider};
 use aria_agent_orchestrator::{InProcessSubagents, SubagentFactory};
+use aria_agent_rsi::{RsiLedger, RsiSweep};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
@@ -29,7 +31,7 @@ use serde_json::{json, Value};
 
 use crate::api;
 use crate::auth::{require_auth, KeyCache, Principal};
-use crate::store::{AgentStore, ApiKeyStore, SessionStore, TitleRow, TitleStore};
+use crate::store::{AgentStore, ApiKeyStore, RsiStore, SessionStore, TitleRow, TitleStore};
 use crate::AppError;
 
 /// Model used when neither the request nor deployment overrides it.
@@ -71,6 +73,73 @@ pub struct AppState {
     pub make_context: MakeContext,
     /// External harness factory (`None` in tests / native-only deployments).
     pub harness: Option<MakeHarness>,
+    /// Recursive self-improvement: reports, playbook versions, optional sweep.
+    pub rsi: RsiState,
+}
+
+/// Everything the RSI endpoints and the session-log chain need, in one field.
+///
+/// Grouped rather than spread across `AppState` so a deployment that does not
+/// want RSI touches exactly one line, and so every existing test state literal
+/// stays a one-liner (`RsiState::disabled()`).
+#[derive(Clone)]
+pub struct RsiState {
+    pub store: Arc<dyn RsiStore>,
+    pub playbooks: Arc<dyn PlaybookStore>,
+    /// `None` when the sweep is not configured; every sweep endpoint then
+    /// answers `503` instead of pretending to run.
+    pub sweep: Option<Arc<RsiSweep>>,
+    /// `None` keeps the ledger out of the session-log chain entirely.
+    pub ledger: Option<Arc<RsiLedger>>,
+    pub config: RsiConfig,
+}
+
+impl RsiState {
+    pub fn new(
+        store: Arc<dyn RsiStore>,
+        playbooks: Arc<dyn PlaybookStore>,
+        sweep: Option<Arc<RsiSweep>>,
+        ledger: Option<Arc<RsiLedger>>,
+        config: RsiConfig,
+    ) -> Self {
+        Self {
+            store,
+            playbooks,
+            sweep,
+            ledger,
+            config,
+        }
+    }
+
+    /// Off, with empty in-memory providers: reads answer "nothing yet" and the
+    /// sweep is unavailable. No ledger, so no turn pays for the feature.
+    pub fn disabled() -> Self {
+        Self::new(
+            Arc::new(crate::store::MemoryStore::new()),
+            Arc::new(aria_agent_rsi::MemoryPlaybooks::new()),
+            None,
+            None,
+            RsiConfig::default(),
+        )
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.config.enabled
+    }
+}
+
+/// The session-log sink for one run: titles (authoritative) plus, when RSI is on,
+/// the tenant-scoped ledger (best effort).
+pub(crate) fn rsi_session_log(state: &AppState, principal: &Principal) -> ChainPersistence {
+    let mut sinks: Vec<Arc<dyn SessionPersistence>> = Vec::with_capacity(2);
+    sinks.push(Arc::new(TitleProjection {
+        store: state.titles.clone(),
+        principal: principal.clone(),
+    }));
+    if let Some(ledger) = state.rsi.ledger.as_ref() {
+        sinks.push(Arc::new(ledger.sink(principal.id.clone())));
+    }
+    ChainPersistence::new(sinks)
 }
 
 impl AppState {
@@ -324,10 +393,7 @@ pub(crate) async fn build_agent_inner(
             agent
                 .with_projector(projector)
                 .with_tools(tools)
-                .with_session_log(Arc::new(TitleProjection {
-                    store: state.titles.clone(),
-                    principal: principal.clone(),
-                }))
+                .with_session_log(Arc::new(rsi_session_log(state, principal)))
         })
         .map_err(AppError::Core)
 }
@@ -643,6 +709,26 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id",
             get(api::sessions::get_subagent_turn),
         )
+        // --- recursive self-improvement (ADR-0026) ---
+        .route("/v1/rsi/status", get(api::rsi::status))
+        .route("/v1/rsi/sweep", post(api::rsi::sweep))
+        .route("/v1/rsi/reports", get(api::rsi::list_reports))
+        .route("/v1/rsi/reports/:report_id", get(api::rsi::get_report))
+        .route("/v1/rsi/proposals", get(api::rsi::list_proposals))
+        .route(
+            "/v1/rsi/proposals/:proposal_id/promote",
+            post(api::rsi::promote),
+        )
+        .route(
+            "/v1/rsi/proposals/:proposal_id/discard",
+            post(api::rsi::discard),
+        )
+        .route("/v1/rsi/playbooks/:key", get(api::rsi::current_playbook))
+        .route(
+            "/v1/rsi/playbooks/:key/versions",
+            get(api::rsi::list_versions),
+        )
+        .route("/v1/rsi/playbooks/:key/adapt", post(api::rsi::adapt))
         // --- recognised but unimplemented (501) ---
         .route(
             "/v1/vaults",

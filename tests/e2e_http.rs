@@ -231,6 +231,7 @@ async fn memory_harness(model: MakeModel, sandbox: MakeSandbox) -> MemoryHarness
         make_sandbox: sandbox,
         make_context,
         harness: None,
+        rsi: aria_agent_cloud::RsiState::disabled(),
     };
     let (api, server) = serve(build_router(state)).await;
     MemoryHarness {
@@ -715,6 +716,7 @@ async fn postgres_backed_routes_persist_across_servers() {
             make_sandbox: stub_sandbox(),
             make_context,
             harness: None,
+            rsi: aria_agent_cloud::RsiState::disabled(),
         }
     };
 

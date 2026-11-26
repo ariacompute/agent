@@ -36,7 +36,7 @@ cd "$(dirname "$0")/.."
 # trade-off the repo already makes for `store/pg*.rs`.
 # `aria-agent-egress-proxy/src/main.rs` is the bin entry point (same category as
 # `aria-agent-cloud/src/main.rs`).
-IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-tools/src/web\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs|crates/aria-agent-sandbox/src/egress_net\.rs'
+IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/pg_rsi\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-tools/src/web\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs|crates/aria-agent-sandbox/src/egress_net\.rs'
 
 # Hermetic environment: the sandbox socket probes and the Docker client
 # constructor are environment-dependent. Give both a stable, local target so
