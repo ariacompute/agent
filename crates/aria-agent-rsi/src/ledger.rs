@@ -193,6 +193,20 @@ impl RsiLedger {
             .collect()
     }
 
+    /// Every session buffered for one tenant, sorted by id.
+    ///
+    /// The re-run probe uses this to locate the ledger a proposal's evidence
+    /// came from; it is never exposed over HTTP (that would leak session names
+    /// across tenants if the filter were ever forgotten).
+    pub fn sessions(&self, principal: &str) -> Vec<String> {
+        let buffers = self.lock();
+        buffers
+            .keys()
+            .filter(|(owner, _)| owner == principal)
+            .map(|(_, session)| session.clone())
+            .collect()
+    }
+
     /// Tenants with at least one retained session, sorted.
     ///
     /// The periodic sweep uses this to find work; the API sweep is always scoped
@@ -379,6 +393,25 @@ mod tests {
             ledger.principals(),
             vec!["tenant-a".to_string(), "tenant-b".to_string()]
         );
+    }
+
+    #[test]
+    fn sessions_are_scoped_to_one_tenant_and_sorted() {
+        let ledger = RsiLedger::with_capacity(16, 8, 1);
+        ledger
+            .append("tenant-a", "s2", &[error_record(0, 1)])
+            .unwrap();
+        ledger
+            .append("tenant-a", "s1", &[error_record(0, 1)])
+            .unwrap();
+        ledger
+            .append("tenant-b", "s9", &[error_record(0, 1)])
+            .unwrap();
+        assert_eq!(
+            ledger.sessions("tenant-a"),
+            vec!["s1".to_string(), "s2".to_string()]
+        );
+        assert!(ledger.sessions("nobody").is_empty());
     }
 
     #[test]

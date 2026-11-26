@@ -40,6 +40,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 - [🐋 本轮运行时（turn runtime）](#-本轮运行时turn-runtime)
 - [🌐 浏览器 sandbox](#-浏览器-sandbox)
 - [🧠 记忆图与 memo 工具族](#-记忆图与-memo-工具族)
+- [♻️ 递归自我改进](#-递归自我改进)
 - [🔌 OpenAI Agents API 兼容性](#-openai-agents-api-兼容性)
 
 **SDK**
@@ -70,6 +71,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 - 🌐 **五语言 SDK** —— JS / Python / Rust / Swift / Kotlin 全部是云端 API 的薄客户端；不内嵌运行时，移动端只需网络与一个 API Key。
 - 🧭 **可插拔 sandbox** —— 每个工具容器都受 `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` 限制，并经由 `DOCKER_HOST` / `ARIA_DOCKER_SOCKET` 访问守护进程。
 - 🛡️ **受控执行** —— 每次出站调用都经过同一条边界：判定、替换 `${credential}`、留痕；审计、计量、空闲挂起、输出投影与检查点挂在同一组接缝上，`AGENT_EGRESS_ENFORCEMENT=network` 更是直接去掉 sandbox 的默认路由，而不是指望 `HTTP_PROXY` 被遵守（`aria-agent-governance`）。
+- ♻️ **递归自我改进** —— 会话事件账本同时是诊断输入：`aria-agent-rsi` 把它折成带证据的具名病症，生成手册或技能候选，用历史重放给候选打分，再停在人工闸门之前；只有批准后才会成为新版本，可选的真实重跑会真调一轮模型（无工具），成本落 `rsi_reruns`。默认开启（`AGENT_RSI_ENABLED=false` 才会撤掉账本与 sweep），跨租户复制在没有适配记录时仍一律拒绝。
 
 <div align="right">
 
@@ -111,6 +113,7 @@ provider；云端与原生前端共享同一套 `recall → runtime → memorize
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
 | **aria-agent-governance** | 出站判定与 `${credential}` 替换、JSONL 审计、用量计量、工具输出投影、加密凭据库、空闲检测、配额守卫与检查点（ADR-0021 … 0025）。 |
+| **aria-agent-rsi** | 递归自我改进：账本入账、确定性提案器、重放评分、带版本号的手册、有回执的真实重跑、共享技能目录与 sweep（ADR-0026）。 |
 | **aria-agent-egress-proxy** | `network` 强制模式下的无密钥 sidecar：经 `/internal/egress/*` 回控制面，用来源 IP 解析租户，批量上报审计。 |
 | **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：云端 API 客户端 —— `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`。 |
@@ -236,15 +239,20 @@ cp .env.example .env
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres（pgvector）账号与库：元数据 **与** 上下文记忆。 |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
 | `AGENT_HARNESS` | `dsh` | 本轮运行时：`dsh`（DeepSeek Harness）或 `native`（内置 Rust 循环）；未知取值启动即失败。 |
-| `DSH_BIN` | `PATH` 上的 `dsh` | 运行时可执行文件（镜像内为 `/opt/dsh/bin/dsh`）。缺失即给出可操作报错，绝不降级。 |
-| `DSH_HOME_ROOT` | `.aria/dsh` | 每租户/每会话 `DSH_HOME` 的根目录。 |
+| `DSH_BIN` | `/opt/dsh/bin/dsh` | 运行时可执行文件（未设置时取 `PATH` 上的 `dsh`）。缺失即给出可操作报错，绝不降级。 |
+| `DSH_PROVIDER` | `deepseek-official` | dsh 内部的 provider 路由。aria 原样透传；未知路由会在 harness 内失败，而不是被改写。 |
+| `DSH_HOME_ROOT` | `/app/.aria/dsh` | 每租户/每会话 `DSH_HOME` 的根目录（未设置时取 `.aria/dsh`）。 |
 | `DSH_POOL_MAX` | `8` | 每租户保留的活跃运行时上限。 |
 | `DSH_IDLE_TTL_SEC` | `900` | 池化运行时被回收前的空闲窗口（会话可凭 `DSH_HOME` 续用）。 |
 | `DSH_THINKING_FILTER` | `enable` | `enable` 让 dsh 经本地回环代理访问网关，双向剥离 Anthropic `redacted_thinking` 块（内置 adapter 无法回放该块，第二轮会报 `UNSUPPORTED_CONTENT`），`thinking` 块保留；`disable` 直连网关。其它取值启动即失败。 |
 | `DSH_PERMISSION_MODE` | `workspace-write` | dsh 在沙箱内应用的权限上限（`read-only` \| `workspace-write` \| `danger-full-access`）。不要设得比沙箱本身更宽。 |
-| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(空)_ / `ariacompute/ariamodel` | **两种运行时（`dsh` 与 `native`）共用**的模型网关配置。该值是网关根地址；`native` 追加 `/v1/chat/completions`，`dsh` 追加 `/anthropic/v1/messages`。不再回退 `OPENAI_*`。`dsh` 通过子进程白名单接收这些值。仅 stub/离线可留空。 |
-| `AGENT_CLOUD_API_KEY` | _(空)_ | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。留空则为开放模式（`default` 租户）。 |
+| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / `your-api-key`（占位） / `ariacompute/ariamodel` | **两种运行时（`dsh` 与 `native`）共用**的模型网关配置。该值是网关根地址；`native` 追加 `/v1/chat/completions`，`dsh` 追加 `/anthropic/v1/messages`。不再回退 `OPENAI_*`。`dsh` 通过子进程白名单接收这些值。仅 stub/离线可留空。 |
+| `AGENT_CLOUD_API_KEY` | `your-api-key`（占位） | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。模板里是占位值，务必替换；留空则为开放模式（`default` 租户）。 |
 | `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
+| `AGENT_RSI_ENABLED` / `AGENT_RSI_AUTO_PROMOTE` | `true` / `false` | 递归自我改进总开关与受控部署用的自动放行闸门。设 `AGENT_RSI_ENABLED=false` 时：不入账、不建 sweep，一轮对话只保留单个持久化 sink。 |
+| `AGENT_RSI_SWEEP_SECS` / `AGENT_RSI_SWEEP_THRESHOLD` / `AGENT_RSI_DOMAIN` | `0` / `3` / `default` | 进程内 sweep 间隔（`0` 表示由外部 cron 调 `POST /v1/rsi/sweep`）、触发一次 sweep 所需的累计不健康轮次、以及进程内定时器 sweep 所用的业务域。 |
+| `AGENT_RSI_SKILLS_DIR` | _(空)_ → `~/.ariacompute/skills` | 唯一的共享技能目录：晋升写入、`FilesystemSkills` 扫描、dsh 工作区链入都用它。留空时先取 `$ARIA_COMPUTE_HOME/skills`，否则取 `$HOME/.ariacompute/skills`。 |
+| `AGENT_RSI_REAL_RERUN` / `AGENT_RSI_RERUN_TIMEOUT_MS` | `false` / `600000` | 第二道验证闸门：把一条历史任务在候选手册下真实跑一轮模型。因为花钱所以默认关闭；每次尝试都会把 token、步数、耗时与结论写进 `rsi_reruns`，探针不挂工具，因此没有沙箱副作用。超时按 inconclusive 处理，绝不放行。 |
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
 | `CLOUD_PORT` | `3000` | 对 `cloud` 服务**直连**暴露的主机端口（容器内始终监听 3000）。 |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | sandbox 使用的 Docker Engine API 端点（DooD）。可改为远程 / DinD 守护进程。 |
@@ -561,6 +569,61 @@ agent 不只是读/写 `aria-agent-memo` 存储——它会在**运行过程中�
 关闭以保证其单测封闭；SDK 默认开启）。`aria-agent-core` 只依赖 `ContextStore` trait、
 绝不依赖 `aria-agent-memo`，因此本地（aria memo / SQLite）与云端（pgvector）后端可互换。
 详见 `docs/adr/0013-agent-memo-integration.md`。
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## ♻️ 递归自我改进
+
+每次任务本来就会留下 `SessionEvent` 账本。RSI 默认开启，把同一份账本折成诊断，
+让「某个会话踩过的坑」变成「下一个会话可复用的版本化资产」——不新增事件流、
+不起后台守护、也不热替换任何运行中的提示词。只有可选的真实重跑默认关闭：
+
+```
+TurnCompleted / TurnFailed
+  → 入账     （ChainPersistence：审计 sink 在前，账本在后）
+  → sweep    （POST /v1/rsi/sweep，或 AGENT_RSI_SWEEP_SECS > 0）
+  → 折叠诊断 → EfficiencyReport + 病症 + 证据（seq / 工具 / 轮次）
+  → 提案     → 确定性规则表，绑定租户 + 业务域
+  → 重放评分 → 低于 min_score_gain 即丢弃，不产出任何东西
+  → 真实重跑 → 可选的一次无工具模型调用，回执落 rsi_reruns
+  → 待审     → 人工 promote（带版本号）→ 手册新版本
+                                  └→ 技能落到 ~/.ariacompute/skills（同时链入 dsh）
+```
+
+`EfficiencyReport` 给出的是具名病症，而不只是一个分数——同一工具反复失败、重试风暴、审批被拒循环、
+上下文压缩抖动、步数预算耗尽、工具参数反复修补——每条都保留推导它的事件序号。
+
+| 端点 | 作用 |
+|---|---|
+| `GET /v1/rsi/status` | 开关状态、生效的闸门、缓冲的记录数与不健康会话数 |
+| `POST /v1/rsi/sweep` | 立即跑一次 sweep（外部 cron 的入口）；可指定单个会话或整个租户 |
+| `GET /v1/rsi/reports` | 诊断与证据链，按时间倒序 |
+| `GET /v1/rsi/reports/{id}` | 单条诊断 |
+| `GET /v1/rsi/proposals` | 调用方作用域内的待审候选 |
+| `POST /v1/rsi/proposals/{id}/promote` | 人工闸门；请求体携带 `expected_revision` |
+| `POST /v1/rsi/proposals/{id}/discard` | 丢弃候选，不做发布 |
+| `GET /v1/rsi/playbooks/{key}` | 该业务域当前手册 |
+| `GET /v1/rsi/playbooks/{key}/versions` | 版本历史，供审计回溯 |
+| `POST /v1/rsi/playbooks/{key}/adapt` | 生成跨租户适配后的候选 |
+
+接口强制以下语义：
+
+- **关闭就是关闭** —— `AGENT_RSI_ENABLED=false` 时没有账本、没有 sweep、没有定时器，
+  `POST /v1/rsi/sweep` 返回 `503`，一轮对话仍只有单个持久化 sink。
+- **不会隐式发布** —— `expected_revision` 过期时 `promote` 返回 `409`，候选留在待审；
+  无人应答一律按拒绝处理，绝不隐式放行。
+- **先适配再复用** —— 缺少完整适配记录（来源、目标、改写了哪些参数、依据）的跨租户复制
+  返回 `422` 且不产生任何资产。
+- **花钱必留回执** —— 可选的真实重跑是一次无工具的模型调用，token、步数、耗时全部落
+  `rsi_reruns`；回执写不进去就 fail-closed，什么都不晋升。
+- **不热替换** —— 晋升只产生「下一轮读取」的新版本，运行中会话的系统提示词不会被改写。
+
+`AGENT_RSI_AUTO_PROMOTE` 仅供受控部署使用。详见
+`docs/adr/0026-recursive-self-improvement.md` 与 `requirements.md §11`。
 
 <div align="right">
 
@@ -1109,7 +1172,7 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 | `AGENT_EGRESS_ALLOW` | *（空）* | 模式为 `allowlist` 时可访问的主机（`*.` 表示子域） |
 | `AGENT_EGRESS_DENY` | *（空）* | 始终拒绝的主机 |
 | `AGENT_EGRESS_ENFORCEMENT` | `proxy` | `proxy` \| `network` \| `off`（需 `AGENT_ALLOW_UNENFORCED_EGRESS=1`） |
-| `AGENT_AUDIT_DIR` | `<workspace>/.aria/audit` | JSONL sink；`/v1/governance/audit/export` 返回 NDJSON |
+| `AGENT_AUDIT_DIR` | _(空)_ → `<workspace>/.aria/audit` | JSONL sink；`/v1/governance/audit/export` 返回 NDJSON |
 | `AGENT_AUDIT_RETENTION_DAYS` | `30` | `0` 表示永久保留 |
 | `AGENT_METERING` | `on` | 按生命周期状态计量的用量账本 |
 | `AGENT_COMPRESSION` | `on` | 面向模型的规则化工具输出投影 |
@@ -1201,12 +1264,13 @@ docker compose up
 | [浏览器 sandbox](./docs/adr/0012-browser-sandbox.md) | 六镜像 `BrowserCatalog` 与 `BrowserSandbox` |
 | [Agent–memo 集成](./docs/adr/0013-agent-memo-integration.md) | 记忆图、自动压缩、memo 工具族 |
 | [DeepSeek Harness 运行时](./docs/adr/0019-dsh-runtime.md) | `dsh` 作为默认 `agent_loop` 提供方 |
-| [受控出站](./docs/adr/0020-governed-egress-single-boundary.md) | 单一判定/替换/审计边界，默认拒绝 |
+| [受控出站](./docs/adr/0025-governed-egress-single-boundary.md) | 单一判定/替换/审计边界，默认拒绝 |
 | [SDK 云端客户端](./docs/adr/0020-sdk-cloud-client.md) | 原生 SDK 为何不内嵌运行时 |
 | [审计结构与保留](./docs/adr/0021-audit-event-schema-and-retention.md) | 审计事件字段、JSONL sink、保留期 |
 | [检查点与计量](./docs/adr/0022-sandbox-checkpoint-and-metering.md) | sandbox 快照与按状态计量 |
 | [空闲与轮换](./docs/adr/0023-idle-detection-and-credential-rotation.md) | 五信号空闲检测、凭据轮换 |
 | [网络强制](./docs/adr/0024-network-enforcement-sidecar.md) | internal 网络 + 无密钥出站代理 |
+| [递归自我改进](./docs/adr/0026-recursive-self-improvement.md) | 账本诊断、确定性提案、重放验证、带版本号的手册、有回执的真实重跑 |
 
 <div align="right">
 

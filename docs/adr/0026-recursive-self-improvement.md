@@ -53,7 +53,7 @@ aria-agent-cloud       只有 HTTP + Postgres + 装配
 
 - `propose` 是**确定性规则表**：病理 → 可执行步骤，模板里带工具名与出现次数，不带任何租户特定阈值（否则无法跨租户适配）。模型改写可以藏在同一个 `ReflectionEngine` seam 后面，默认不启用。
 - `validate` 是**离线重放**：用同一份 `health_score` 重算「把该病理解决掉之后的历史」，增益不达 `min_score_gain` 即 `BelowThreshold`，提案作废。因为评分函数只有一份，「已验证」不是自说自话。
-- 真实重跑 (`RerunProbe`) 是**第二个可选闸门**：它花模型调用、有副作用，所以独立开关；开关打开但没有接线时 `validate` 返回 `Unavailable`，**绝不**静默降级成只做离线校验。
+- 真实重跑 (`RerunProbe`) 是**第二个可选闸门**：它花模型调用，所以独立开关；云端默认装配 `ModelRerunProbe`（无工具，因此没有沙箱副作用），未接线的引擎在开关打开时返回 `Unavailable`，**绝不**静默降级成只做离线校验。
 
 ### 5. 闸门默认是人，且是现有审批抽象
 
@@ -74,7 +74,7 @@ aria-agent-cloud       只有 HTTP + Postgres + 装配
 发布产出的是**下一轮读取的资产**：
 
 - 手册正文按 `key` 线性版本化，`Playbook::as_prompt_section()` 带 `rN` 版本戳；
-- 工具相关的手册额外蒸馏成 `<workspace>/.aria/skills/rsi-<pathology>-<tool>/SKILL.md`，由既有 `FilesystemSkills` 在下次 `skill_list` 时看到。
+- 工具相关的手册额外蒸馏成 `<skills>/rsi-<pathology>-<tool>/SKILL.md`（`<skills>` 即共享目录 `AGENT_RSI_SKILLS_DIR`，默认 `$HOME/.ariacompute/skills`），由既有 `FilesystemSkills` 在下次 `skill_list` 时看到。
 
 **不替换正在运行的系统提示词**。这与 Reef 的 hot-serve 是本质区别：RSI 增加可选资产，不改变已加载的 prompt。
 
@@ -94,18 +94,33 @@ aria-agent-cloud       只有 HTTP + Postgres + 装配
 - 复盘：`TurnCompleted` 之后按阈值累积信号；`RsiSweep` 单飞（并发调用返回 `busy`），单条会话失败只记录不中断。
 - 周期兜底：进程内定时器默认关闭（`AGENT_RSI_SWEEP_SECS=0`），由 `POST /v1/rsi/sweep` 交给外部调度器驱动；仓库里**没有**现成的 tick 守护进程，不假装有。
 
-### 9. 默认关闭
+### 9. 默认开启，唯一花钱的步骤默认关闭
 
-`RsiConfig::enabled = false`。关闭时：不建账本（`RsiState.ledger = None` → 链上只有一个 sink）、不启动定时器、`/v1/rsi/sweep` 返回 `503`。既有执行路径与成本零变化。
+`RsiConfig::enabled = true`，二进制读 `AGENT_RSI_ENABLED` 也以 `true` 为默认。关闭是显式且被测试的状态：`RsiState::disabled()` 把 `enabled` 钉成 `false`，`AGENT_RSI_ENABLED=false` 同样生效——不建账本（链上只有一个 sink）、不启动定时器、`/v1/rsi/sweep` 返回 `503`，成本回到 RSI 之前。
+
+账本只多一层空链、诊断是纯折叠，而一个没人打开的开关产生不了任何资产，所以默认开。真实重跑是唯一有外部成本的动作，`real_rerun` 默认 `false`，并有独立超时 `AGENT_RSI_RERUN_TIMEOUT_MS`。
+
+### 10. 真实重跑：真调模型、无工具、必留回执
+
+`ModelRerunProbe`（`aria-agent-cloud/src/rsi_rerun.rs`）实现 `RerunProbe`：以候选手册为 system，重放证据所指向那一轮的输入，调用一次 `ModelClient::complete`；找不到输入就 `Inconclusive`，完全不调模型。
+
+- **无工具**：验证不能变成第二次生产事故，探针不挂任何工具，`tool_calls` 恒为 0（作为事实写进回执，而不是沉默）。
+- **不造分**：通过时沿用重放分数，只确认「这一轮能跑通」。空回答、模型报错、超时、回执写不进去，一律不是通过。
+- **必留痕**：每次尝试写一条 insert-only 的 `rsi_reruns`（prompt/completion token、模型步数、工具调用、耗时、结论）。回执写不进去时 fail-closed：没有账本记录就不允许晋升。
+- **默认关闭**：`AGENT_RSI_REAL_RERUN=false`，因为它是唯一按次计费的动作。
+
+### 11. 一个技能目录，三个消费方
+
+`agent_core::seams::shared_skill_catalog()` 按 `AGENT_RSI_SKILLS_DIR` → `$ARIA_COMPUTE_HOME/skills` → `$HOME/.ariacompute/skills` 解析。RSI 的 `FilesystemSkillSink`、`ToolSet::local` 的 `FilesystemSkills` 与 `DshConfig::skill_catalog()` 全部走它；dsh 仍把结果链到 `<cwd>/.aria/skills`（harness 只认那里）。`DshConfig` 新增显式 `skills` 覆盖，供测试与非标准安装使用。
 
 ## Consequences
 
 - **新增两个 seam key**：`rsi`（`ReflectionEngine`）与 `playbook`（`PlaybookStore`）。二者必须同时登记进 `plugin/manifest.rs` 的 `SeamKey::ALL`，否则插件声明会在启动期 `UnknownSeam`。未接线时 `NoReflection` / `NoPlaybooks` **失败关闭**：`analyze` 返回空报告，`propose`/`validate`/`submit`/`promote` 返回 `Unavailable`。
 - **新增两个稳定错误码**：`conflict`（409）与 `unadapted`（422），进入 `SeamError::code()` 的公开契约（工具失败文本、HTTP 映射、审计记录共用）。
 - **报告是持久事实，账本是缓存**：`rsi_reports` 存诊断与证据链（可追溯到 `seq`），`RsiLedger` 只是有界的内存窗口（每会话 `max_records`、全局 `max_sessions`，按最近写入淘汰）。重启后账本为空，报告与手册仍在——这是有意的取舍：账本的权威副本一直是既有的事件流。
-- **dsh 会话能用到沉淀出的技能**：`DshConfig::skill_catalog()` 从 workspace 布局推导 `<root>/.aria/skills`，`Runtime::connect` 把它链进 `<cwd>/.aria/skills`（Unix symlink，其他平台递归复制）。失败只告警：缺一个技能是能力降级，不是回合失败。
+- **dsh 会话能用到沉淀出的技能**：`DshConfig::skill_catalog()` 取共享目录（可被 `with_skills_catalog` 覆盖），`Runtime::connect` 把它链进 `<cwd>/.aria/skills`（Unix symlink，其他平台递归复制）。失败只告警：缺一个技能是能力降级，不是回合失败。
 - **可观测但不泄漏**：日志只记录计数、标识与版本号；手册正文、工具参数、用户输入一律不进日志。`ReportView`/`PlaybookView` 不出现 `principal`。
-- **成本边界**：离线重放零成本，可在请求路径内同步完成；真实重跑是唯一有外部成本的动作，独立开关 + 独立超时。
+- **成本边界**：离线重放零成本，可在请求路径内同步完成；真实重跑是唯一有外部成本的动作，独立开关 + 独立超时 + 每次尝试一条 `rsi_reruns` 回执。
 - **覆盖率**：`pg_rsi.rs` 与其余 `store/pg*.rs` 同类排除（需要真库），其语义由 `MemoryStore`/`MemoryPlaybooks` 在 `rsi_tests.rs` 里覆盖，包括 `409`、`422`、`403` 三条规则。
 
 ## Alternatives considered

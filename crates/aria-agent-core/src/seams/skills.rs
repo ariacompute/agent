@@ -50,6 +50,53 @@ impl SkillsSeam for EmptySkills {
     }
 }
 
+/// Environment variable that pins the shared skill catalog.
+pub const SKILLS_DIR_ENV: &str = "AGENT_RSI_SKILLS_DIR";
+
+/// Home directory of the sidecar CLI (`ARIA_COMPUTE_HOME`).
+pub const ARIA_HOME_ENV: &str = "ARIA_COMPUTE_HOME";
+
+/// The one catalog every consumer reads.
+///
+/// RSI writes promoted skills here, the `skills` tool family lists/loads them
+/// here, and every dsh session workspace links to it. One resolution order for
+/// all three is what keeps a distilled skill from being written where nothing
+/// looks for it.
+///
+/// Order: `AGENT_RSI_SKILLS_DIR` → `$ARIA_COMPUTE_HOME/skills` →
+/// `$HOME/.ariacompute/skills` → `.ariacompute/skills` when no home is known.
+pub fn shared_skill_catalog() -> PathBuf {
+    skill_catalog_from(
+        std::env::var_os(SKILLS_DIR_ENV),
+        std::env::var_os(ARIA_HOME_ENV),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Pure resolution behind [`shared_skill_catalog`], testable without touching
+/// the process environment.
+pub fn skill_catalog_from(
+    explicit: Option<std::ffi::OsString>,
+    aria_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    fn usable(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+        value
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+    }
+    if let Some(explicit) = usable(explicit) {
+        return explicit;
+    }
+    if let Some(home) = usable(aria_home) {
+        return home.join("skills");
+    }
+    if let Some(home) = usable(home) {
+        return home.join(".ariacompute/skills");
+    }
+    PathBuf::from(".ariacompute/skills")
+}
+
 /// Provider that reads `<root>/<name>/SKILL.md` from each root.
 #[derive(Debug, Clone, Default)]
 pub struct FilesystemSkills {
@@ -214,5 +261,44 @@ mod tests {
         let skills = FilesystemSkills::new([a.path().to_path_buf(), b.path().to_path_buf()]);
         let err = skills.list().await.unwrap_err();
         assert!(matches!(err, SeamError::Invalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_shared_catalog_prefers_the_explicit_override() {
+        let resolved = skill_catalog_from(
+            Some("/srv/catalog".into()),
+            Some("/home/u/.ariacompute".into()),
+            Some("/home/u".into()),
+        );
+        assert_eq!(resolved, PathBuf::from("/srv/catalog"));
+    }
+
+    #[test]
+    fn the_shared_catalog_falls_back_to_the_aria_home_then_home() {
+        assert_eq!(
+            skill_catalog_from(None, Some("/srv/aria".into()), Some("/home/u".into())),
+            PathBuf::from("/srv/aria/skills")
+        );
+        assert_eq!(
+            skill_catalog_from(None, None, Some("/home/u".into())),
+            PathBuf::from("/home/u/.ariacompute/skills")
+        );
+        // An empty value is "unset", not "the current directory".
+        assert_eq!(
+            skill_catalog_from(Some("".into()), Some("".into()), Some("/home/u".into())),
+            PathBuf::from("/home/u/.ariacompute/skills")
+        );
+        // No home at all still yields a relative, writable location.
+        assert_eq!(
+            skill_catalog_from(None, None, None),
+            PathBuf::from(".ariacompute/skills")
+        );
+    }
+
+    #[test]
+    fn the_environment_backed_catalog_never_resolves_to_nothing() {
+        // Only "it resolves" is asserted: the test must not depend on the host's
+        // `HOME` or on an `AGENT_RSI_SKILLS_DIR` the runner may have exported.
+        assert!(!shared_skill_catalog().as_os_str().is_empty());
     }
 }

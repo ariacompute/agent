@@ -239,9 +239,10 @@ Tracked in `docs/followups/`:
 
 ## 11. Recursive self-improvement (RSI)
 * RSI closes the loop *execution ledger → diagnosis → proposal → validation →
-  versioned asset → reuse*. It is **off by default**: with `AGENT_RSI_ENABLED`
-  unset no record is buffered, no sweep exists and the session-log chain keeps its
-  single sink, so the turn path costs one empty chain step and nothing else.
+  versioned asset → reuse*. The ledger and diagnosis are **on by default**; the
+  only paid step (the real re-run) is off. `AGENT_RSI_ENABLED=false` restores the
+  pre-RSI cost profile exactly: no record is buffered, no sweep exists and the
+  session-log chain keeps its single sink.
 * The ledger is the existing `SessionEvent` stream, not a second one. `ItemDone`
   gains an optional `latency_ms` (serde default) for tool timing; **no event
   variant is added**, so JSONL written before this feature still parses and the
@@ -262,9 +263,13 @@ Tracked in `docs/followups/`:
   (principal + domain + params) it was learned in.
 * Two validation tiers. (1) Offline replay scores the candidate against the same
   ledger with zero model calls and zero sandbox; a gain below `min_score_gain`
-  discards it. (2) Real re-run A/B is a separate switch (`AGENT_RSI_REAL_RERUN`)
-  with its own timeout; **this build ships no re-run probe, so enabling it is a
-  startup error** rather than a silent pretend check.
+  discards it. (2) The real re-run (`AGENT_RSI_REAL_RERUN`, off by default) replays
+  one recorded task through a real model call under the candidate playbook. The
+  probe is tool-free, so it cannot turn validation into a second incident, and it
+  cannot invent a gain: a pass keeps the replay score. An empty answer, model
+  error, timeout (`AGENT_RSI_RERUN_TIMEOUT_MS`) or unwritable receipt is never a
+  pass. Every attempt writes an insert-only `rsi_reruns` receipt (tokens, steps,
+  tool calls, duration, verdict).
 * The gate is human by default. A validated proposal is stored as *pending* and
   published only by `POST /v1/rsi/proposals/{id}/promote`, which carries the
   revision the approver believes is current. A mismatch is `409`, never
@@ -277,9 +282,10 @@ Tracked in `docs/followups/`:
   `list_versions`); bodies and metadata are stored separately and a unique
   `(principal_id, domain, key, revision)` index backs the guard.
 * Reuse is explicit asset injection, not a hot swap: published skills land in the
-  skills catalog (`AGENT_RSI_SKILLS_DIR`, default `.aria/skills`) and are offered
-  to the next turn's assembly; playbooks are read per domain. A running session's
-  system prompt is never rewritten (the removed Reef design, §7).
+  one shared catalog (`AGENT_RSI_SKILLS_DIR` → `$ARIA_COMPUTE_HOME/skills` →
+  `$HOME/.ariacompute/skills`) that `FilesystemSkills` scans and dsh links, and are
+  offered to the next turn's assembly; playbooks are read per domain. A running
+  session's system prompt is never rewritten (the removed Reef design, §7).
 * Under `harness = "dsh"` the same catalog is mounted into each session workspace,
   because dsh runs its own tools and does not consult aria's skills tool.
 * Endpoints: `GET /v1/rsi/status`, `POST /v1/rsi/sweep`, `GET /v1/rsi/reports[/{id}]`,

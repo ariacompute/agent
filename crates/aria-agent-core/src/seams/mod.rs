@@ -57,7 +57,10 @@ pub use rsi::{
 };
 pub use schedule::{ScheduleEntry, ScheduleSeam};
 pub use shell::{SandboxShell, ShellOutput, ShellSeam};
-pub use skills::{EmptySkills, FilesystemSkills, Skill, SkillMeta, SkillsSeam};
+pub use skills::{
+    shared_skill_catalog, skill_catalog_from, EmptySkills, FilesystemSkills, Skill, SkillMeta,
+    SkillsSeam, ARIA_HOME_ENV, SKILLS_DIR_ENV,
+};
 pub use storage::Storage;
 pub use subagents::{
     child_session, is_child_session, parent_session, NoSubagents, SubagentHandle, SubagentRequest,

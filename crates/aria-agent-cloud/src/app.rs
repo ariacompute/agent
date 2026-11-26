@@ -114,12 +114,18 @@ impl RsiState {
     /// Off, with empty in-memory providers: reads answer "nothing yet" and the
     /// sweep is unavailable. No ledger, so no turn pays for the feature.
     pub fn disabled() -> Self {
+        // `RsiConfig::default()` is on; this constructor is the explicit off
+        // switch that the API tests and the `503` path rely on.
+        let config = RsiConfig {
+            enabled: false,
+            ..RsiConfig::default()
+        };
         Self::new(
             Arc::new(crate::store::MemoryStore::new()),
             Arc::new(aria_agent_rsi::MemoryPlaybooks::new()),
             None,
             None,
-            RsiConfig::default(),
+            config,
         )
     }
 

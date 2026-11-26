@@ -81,6 +81,11 @@ pub struct DshConfig {
     pub max_frame_bytes: usize,
     /// Extra environment entries (allow-listed; the child never inherits).
     pub extra_env: Vec<(String, String)>,
+    /// Shared skill catalog to mirror into the workspace. `None` resolves
+    /// [`agent_core::seams::shared_skill_catalog`] (the same directory the
+    /// `skills` tool family and RSI's sink use); tests and non-standard
+    /// deployments pin it explicitly.
+    pub skills: Option<PathBuf>,
 }
 
 impl DshConfig {
@@ -103,6 +108,7 @@ impl DshConfig {
             request_timeout: Duration::from_secs(120),
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             extra_env: Vec::new(),
+            skills: None,
         }
     }
 
@@ -160,16 +166,24 @@ impl DshConfig {
         Ok(())
     }
 
+    /// Pin the shared skill catalog instead of resolving it from the process
+    /// environment (tests, non-standard installs).
+    pub fn with_skills_catalog(mut self, catalog: impl Into<PathBuf>) -> Self {
+        self.skills = Some(catalog.into());
+        self
+    }
+
     /// The shared skill catalog this session should see.
     ///
-    /// The catalog is `<root>/.aria/skills` — the same directory
-    /// `FilesystemSkills` reads — while the session workspace sits at
-    /// `<root>/.aria/dsh-workspaces/<leaf>`. Deriving it from `cwd` keeps the
-    /// layout knowledge in one place and avoids a second config field that every
-    /// constructor would have to fill in (ADR-0026).
+    /// One catalog for every consumer: `FilesystemSkills` reads it, RSI's sink
+    /// writes it, and [`link_skill_catalog`] mirrors it into the workspace at
+    /// `<cwd>/.aria/skills` where dsh looks. Resolution lives in
+    /// [`agent_core::seams::shared_skill_catalog`] so the three cannot drift
+    /// apart (ADR-0026).
     pub fn skill_catalog(&self) -> PathBuf {
-        let root = self.cwd.ancestors().nth(3).unwrap_or(&self.cwd);
-        root.join(".aria/skills")
+        self.skills
+            .clone()
+            .unwrap_or_else(agent_core::seams::shared_skill_catalog)
     }
 
     /// The child environment: an allow-list, never the whole process env.
@@ -202,8 +216,9 @@ impl DshConfig {
 ///
 /// Best effort by design: a session must still start when the catalog cannot be
 /// linked, because a missing skill degrades capability rather than invalidating a
-/// turn. `<cwd>/.aria/skills` is the location both `FilesystemSkills` and dsh
-/// resolve skills from, so linking is the whole integration.
+/// turn. dsh resolves skills from `<cwd>/.aria/skills`, so mirroring the shared
+/// catalog there is the whole integration — aria's own tool family reads the
+/// catalog directly and needs no link.
 fn link_skill_catalog(cfg: &DshConfig) {
     let catalog = cfg.skill_catalog();
     if !catalog.is_dir() {
@@ -525,16 +540,15 @@ mod tests {
     }
 
     #[test]
-    fn the_skill_catalog_is_derived_from_the_workspace_layout() {
+    fn the_skill_catalog_defaults_to_the_shared_catalog_and_can_be_pinned() {
         let cfg = DshConfig::for_session(Path::new("/srv"), "s1", "m");
-        assert_eq!(cfg.skill_catalog(), PathBuf::from("/srv/.aria/skills"));
-        // A workspace without enough components falls back to its own directory
-        // rather than inventing a path outside the deployment root.
-        let shallow = DshConfig {
-            cwd: PathBuf::from("leaf"),
-            ..DshConfig::for_session(Path::new("/srv"), "s1", "m")
-        };
-        assert_eq!(shallow.skill_catalog(), PathBuf::from("leaf/.aria/skills"));
+        assert!(cfg.skills.is_none(), "unpinned resolves at call time");
+        assert_eq!(
+            cfg.skill_catalog(),
+            agent_core::seams::shared_skill_catalog()
+        );
+        let pinned = cfg.with_skills_catalog("/srv/shared/skills");
+        assert_eq!(pinned.skill_catalog(), PathBuf::from("/srv/shared/skills"));
     }
 
     #[test]
@@ -544,7 +558,8 @@ mod tests {
         std::fs::create_dir_all(&catalog).unwrap();
         std::fs::write(catalog.join("SKILL.md"), "# stop retrying").unwrap();
 
-        let cfg = DshConfig::for_session(dir.path(), "s1", "m");
+        let cfg = DshConfig::for_session(dir.path(), "s1", "m")
+            .with_skills_catalog(dir.path().join(".aria/skills"));
         std::fs::create_dir_all(&cfg.cwd).unwrap();
         link_skill_catalog(&cfg);
         let shared = cfg.cwd.join(".aria/skills");
@@ -562,7 +577,8 @@ mod tests {
     #[test]
     fn linking_without_a_catalog_or_without_a_parent_is_silent() {
         let empty = tempfile::tempdir().unwrap();
-        let cfg = DshConfig::for_session(empty.path(), "s1", "m");
+        let cfg = DshConfig::for_session(empty.path(), "s1", "m")
+            .with_skills_catalog(empty.path().join("missing"));
         std::fs::create_dir_all(&cfg.cwd).unwrap();
         link_skill_catalog(&cfg);
         assert!(!cfg.cwd.join(".aria/skills").exists());
@@ -570,7 +586,8 @@ mod tests {
         // A `.aria` file blocks the directory: the failure is logged, not fatal.
         let blocked = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(blocked.path().join(".aria/skills")).unwrap();
-        let cfg = DshConfig::for_session(blocked.path(), "s1", "m");
+        let cfg = DshConfig::for_session(blocked.path(), "s1", "m")
+            .with_skills_catalog(blocked.path().join(".aria/skills"));
         std::fs::create_dir_all(&cfg.cwd).unwrap();
         std::fs::write(cfg.cwd.join(".aria"), "not a directory").unwrap();
         link_skill_catalog(&cfg);

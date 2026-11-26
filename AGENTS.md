@@ -225,21 +225,28 @@ kept as an explicit `native` fallback (ADR-0019).
      `thinking`; loopback is forced into the child's `NO_PROXY`. On a dsh upgrade
      only `aria-agent-dsh/src/event_map.rs` should need changes. See ADR-0019.
 
-     17. **Recursive self-improvement is off by default and never publishes
-     implicitly.** `aria-agent-rsi` turns the session event ledger into capability
-     in four contract steps (`ReflectionEngine::analyze` → `propose` → `validate`
-     → `PlaybookStore::promote`). Hard rules: (a) no new `SessionEvent` variant —
+     17. **Recursive self-improvement is on by default, but only the paid step is
+     opt-in, and nothing publishes implicitly.** `aria-agent-rsi` turns the session
+     event ledger into capability in four contract steps
+     (`ReflectionEngine::analyze` → `propose` → `validate` →
+     `PlaybookStore::promote`). Hard rules: (a) no new `SessionEvent` variant —
      only `ItemDone::latency_ms` with `#[serde(default)]`, so old JSONL and the
      frozen SSE envelope keep working; (b) diagnosis and the default proposer are
-     deterministic and call no model; (c) offline replay is the only always-on
-     validation — real re-run A/B is a separate switch and this build refuses to
-     start with it on rather than pretend to check; (d) promotion carries the
+     deterministic and call no model; (c) offline replay is always on, the real
+     re-run is a separate switch (`AGENT_RSI_REAL_RERUN`, off because it spends
+     model calls), it must stay tool-free, it may never invent a gain (a pass
+     keeps the replay score), and an empty answer, model error, timeout or
+     unwritable `rsi_reruns` receipt is never a pass; (d) promotion carries the
      expected revision and a mismatch is `409`, never last-writer-wins; (e) an
      unanswered gate is a refusal (`ApprovalBroker` `Unavailable` == `Deny`);
      (f) cross-tenant reuse without a complete `Adaptation` record is `422` and
      creates nothing; (g) promotion produces a versioned asset read at the next
      turn — **no hot swap, no system-prompt rewrite** (the removed Reef design);
-     (h) `AGENT_RSI_ENABLED` unset = no ledger, no sweep, no timer. See
+     (h) `AGENT_RSI_ENABLED=false` (and `RsiState::disabled()`, which must keep
+     pinning `false` despite the default) = no ledger, no sweep, no timer;
+     (i) one skill catalog only: `shared_skill_catalog()` is the single resolver
+     used by the RSI sink, `FilesystemSkills` and `DshConfig::skill_catalog()` —
+     never re-add a per-crate `<root>/.aria/skills` derivation. See
      `docs/adr/0026-recursive-self-improvement.md`.
 
 ## SDK（js / python）

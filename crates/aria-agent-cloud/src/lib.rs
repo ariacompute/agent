@@ -25,6 +25,7 @@ pub mod context;
 pub mod event_envelope;
 pub mod governance;
 pub mod internal_egress;
+pub mod rsi_rerun;
 #[cfg(test)]
 mod rsi_tests;
 pub mod store;

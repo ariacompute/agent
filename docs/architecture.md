@@ -49,7 +49,8 @@ aria-agent-cloud (axum, Postgres + pgvector)  ──►  ariacompute-agent (UniF
   fails without it (ADR-0010). Metadata (`agents`, `agent_sessions`,
   `session_turns`, `session_items`, `agent_teams`, `scheduled_jobs`,
   `session_titles`) is `principal_id`-scoped too, as are the RSI tables
-  (`rsi_reports`, `rsi_proposals`, `rsi_playbooks`, migration `0009`).
+  (`rsi_reports`, `rsi_proposals`, `rsi_playbooks`, `rsi_reruns`, migration
+  `0009`).
 * **Local**: `aria-agent-memo` (SQLite, aria memo) — the only on-device format.
 * The shared contract is `aria-agent-core::context`; `aria-agent-core` never
   depends on a store implementation. SDKs pick `cloud` / `local` / `both` per call
@@ -91,17 +92,18 @@ one real turn when `ARIA_DSH_E2E=1` and a provider key are present.
 
 ## Recursive self-improvement (ADR-0026)
 
-Off by default (`AGENT_RSI_ENABLED`). When on, the session event ledger is also
-buffered per `(principal, session, seq)` and folded on demand:
+On by default (`AGENT_RSI_ENABLED=false` disables it). The session event ledger is
+also buffered per `(principal, session, seq)` and folded on demand:
 
 ```
 TurnCompleted/Failed → ChainPersistence (audit → ledger)
   → sweep (external POST /v1/rsi/sweep, or AGENT_RSI_SWEEP_SECS timer)
     → core::session::insight  (pure fold → EfficiencyReport + evidence)
     → ReflectionEngine::propose  (deterministic rule table)
-    → validate  (offline replay vs baseline; real A/B is a separate switch)
+    → validate  (offline replay vs baseline; the real re-run is opt-in)
+    → rerun     (ModelRerunProbe: one tool-free model call → rsi_reruns receipt)
     → rsi_proposals (pending)  → promote (revision-guarded) → rsi_playbooks
-    → skill catalog (.aria/skills) → next turn's assembly / dsh workspace
+    → shared catalog (~/.ariacompute/skills) → next turn / dsh workspace
 ```
 
 * `EfficiencyReport` / `TurnInsight` / `Pathology` live in
@@ -111,12 +113,24 @@ TurnCompleted/Failed → ChainPersistence (audit → ledger)
 * `aria-agent-rsi` owns the engine: `RsiLedger`, `DeterministicReflection`,
   `PlaybookEngine`, `FilesystemSkillSink`, `RsiSweep`. It depends on
   `aria-agent-core` only — no Postgres, no cloud types.
+* The real re-run is the one paid step: `ModelRerunProbe`
+  (`aria-agent-cloud::rsi_rerun`) replays one recorded task through a real model
+  call under the candidate playbook. It is tool-free, keeps the replay score on a
+  pass, and writes an insert-only `rsi_reruns` receipt (tokens, steps, tool calls,
+  duration, verdict) before returning; an unwritable receipt fails closed.
+* One skill catalog: `seams::shared_skill_catalog()` resolves
+  `AGENT_RSI_SKILLS_DIR` → `$ARIA_COMPUTE_HOME/skills` → `$HOME/.ariacompute/skills`
+  for the RSI sink, `FilesystemSkills` and `DshConfig::skill_catalog()`; dsh links
+  it into `<cwd>/.aria/skills`, which is all the harness reads.
 * Seams: `playbook` (`PlaybookStore`) and `rsi` (`ReflectionEngine`). Adding a
   seam requires registering the key in `aria-agent-plugin`'s `ALL`, otherwise
   boot fails with `UnknownSeam`.
 * Publishing is explicit: `promote` takes `expected_revision`; a stale value is
   `409`. Cross-tenant reuse needs an `Adaptation` record or it is `422`. With
   `auto_promote` off (the default) an unanswered gate is a refusal.
+* Storage is tenant-scoped: `rsi_reports` / `rsi_proposals` / `rsi_playbooks` /
+  `rsi_reruns` (migration `0009`), every query filtered by `principal_id`, and
+  promotion runs in one transaction backed by a unique revision index.
 * Reuse is asset injection, never a hot swap: a published skill is a new entry in
   the catalog, a playbook is a new *version* read at the next turn. A running
   session's system prompt is not rewritten.

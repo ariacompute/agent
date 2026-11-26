@@ -466,25 +466,39 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       approver can retry); unadapted cross-tenant adapt → `422`;
       non-admin adaptation → `403`; unknown proposal/playbook → `404`.
       With `AGENT_RSI_AUTO_PROMOTE` off the human gate is the only path.
-- [x] Real re-run A/B is a separate switch (`AGENT_RSI_REAL_RERUN`); this build
-      ships no re-run probe, so enabling it is a **startup error** instead of a
-      pretend second gate.
-- [x] Startup wiring: `RsiState` in `AppState`, ledger appended through the
-      session-persistence chain, `AGENT_RSI_SWEEP_THRESHOLD` / `_SECS`
-      (default `0` = external cron drives `POST /v1/rsi/sweep`) and
-      `AGENT_RSI_SKILLS_DIR` (default `.aria/skills`).
-- [x] dsh reuse: `DshConfig::for_session` links `<workspace>/.aria/skills` to the
-      shared catalog (symlink on Unix, copy elsewhere), skipped when nothing has
-      been distilled and best-effort on failure — a missing skill degrades
-      capability, it never fails a turn.
-- [x] Tests: inline normal + failure cases in every new core/rsi file, memory
-      provider coverage for the store ports, and 8 HTTP scenarios over the real
-      router (`rsi_tests.rs`) covering disabled/409/422/403 and the happy path.
-      `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace` and
-      `just cov-check` stay green.
+- [x] Real re-run gate (`ModelRerunProbe`): `RerunProbe` replays one recorded
+      task through a real `ModelClient::complete` call under the candidate
+      playbook. Tool-free by design (no sandbox side effects), with the replay
+      score kept on a pass, and timeouts / model errors / empty answers /
+      unwritable receipts all failing closed. Off by default
+      (`AGENT_RSI_REAL_RERUN`), bounded by `AGENT_RSI_RERUN_TIMEOUT_MS`.
+- [x] Re-run receipts: `rsi_reruns` (migration `0009` + `ensure_rsi_schema`),
+      inserted through `RsiStore::insert_rerun` with the memory provider
+      mirroring it. Each row records tokens, model steps, tool calls (0), duration
+      and verdict, so cost and the absence of side effects are auditable.
+- [x] Startup wiring: `RsiState` in `AppState`, `enabled` defaulting to `true`
+      (`RsiState::disabled()` is the tested off switch), ledger appended through
+      the session-persistence chain, `AGENT_RSI_SWEEP_THRESHOLD` / `_SECS`
+      (default `0` = external cron drives `POST /v1/rsi/sweep`) and the probe
+      injected into the reflection engine when the real re-run is on.
+- [x] One skill catalog: `agent_core::seams::shared_skill_catalog()` resolves
+      `AGENT_RSI_SKILLS_DIR` → `$ARIA_COMPUTE_HOME/skills` →
+      `$HOME/.ariacompute/skills`, and the RSI sink, `ToolSet::local` and
+      `DshConfig::skill_catalog()` all use it; dsh still links the result into
+      `<cwd>/.aria/skills` (symlink on Unix, copy elsewhere), skipped when empty
+      and best-effort on failure — a missing skill degrades capability, it never
+      fails a turn.
+- [x] Tests: inline normal + failure cases in every new core/rsi file, 8 re-run
+      probe cases (pass, empty answer, no gain, model error, timeout, no history,
+      turn fallback, rejected receipt), memory provider coverage for the store
+      ports, and 8 HTTP scenarios over the real router (`rsi_tests.rs`) covering
+      disabled/409/422/403 and the happy path. `cargo fmt --check`,
+      `clippy -D warnings`, `cargo test --workspace` and `just cov-check` stay
+      green.
 - [x] Docs: ADR-0026, `requirements.md §11`, this milestone, architecture
-      layering + storage boundary, and an AGENTS.md rule (off by default,
-      additive events, explicit gate, no hot swap, adaptation before reuse).
+      layering + storage boundary, release notes and an AGENTS.md rule (default
+      on with the paid step off, additive events, explicit gate, receipted
+      re-runs, one catalog, no hot swap, adaptation before reuse).
 
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process

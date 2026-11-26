@@ -1,5 +1,33 @@
 # 发布说明 ✨
 
+## ♻️ 递归自我改进：账本变成能力 🧠
+
+每次任务留下的 `SessionEvent` 账本，现在还会被折成诊断：病症 → 候选 → 重放打分 → 人工闸门 → 新版本。没有第二套事件流、没有后台守护、也不热替换。账本与诊断**默认开启**，唯一花钱的真实重跑默认关闭。
+
+### 🧠 诊断
+
+- 📒 `session::insight` 纯折叠出 `EfficiencyReport` / `TurnInsight` / `Pathology`，每条结论都带 `seq` / 工具 / 轮次证据。
+- 🔍 六类具名病症：同一工具反复失败、重试风暴、审批被拒循环、压缩抖动、步数预算耗尽、工具参数反复修补。
+- 🧱 `ChainPersistence`：审计 sink 权威、账本尽力而为，账本故障不会把已完成的回合变成失败。
+- ➕ `ItemDone` 只加可选 `latency_ms`，不加事件变体 —— 旧 JSONL 与冻结的 SSE 信封都不受影响。
+
+### 🧪 验证与闸门
+
+- 🧩 新增 `aria-agent-rsi`：账本去重、规则表提案（零模型调用）、重放打分、带版本号的手册引擎、技能落盘与单飞 sweep。
+- 📉 重放增益低于 `min_score_gain` 直接丢弃；没人批准就不发布，`expected_revision` 过期返回 `409`。
+- 🌍 跨租户复制缺少适配记录返回 `422` 且不产出资产；非管理员适配返回 `403`。
+- 🧾 可选真实重跑：`ModelRerunProbe` 真的调一轮模型（无工具、无沙箱副作用），每次尝试都把 token / 步数 / 耗时 / 结论写进 `rsi_reruns`；超时、报错、空回答、回执写不进去都不算通过。
+
+### ☁️ 云端与复用
+
+- 🛰️ `/v1/rsi/*`：status、sweep、reports、proposals（promote / discard）、playbooks（versions / adapt）；关闭时只有 `POST /v1/rsi/sweep` 返回 `503`，只读查询仍可用。
+- 🗄️ `0009_rsi.sql` 建四张按租户分片的表（含重跑回执），晋升在单事务内完成，唯一索引兜住并发发布。
+- 🧰 晋升技能落到共享目录 `~/.ariacompute/skills`（`FilesystemSkills` 与 dsh 读的是同一份），手册只是下一轮读取的新版本，绝不热替换运行中的提示词。
+
+### ✅ 验证
+
+`cargo test --workspace`（1150 ✅）、`fmt`、`clippy -D warnings` 与覆盖率闸门（计入统计的行 31650/31650，100%）全部通过。
+
 ## 🛡️ 受控执行：出站、审计、计量与凭据 🔐
 
 每个出站请求都经过同一条边界：判定 → 替换 `${credential}` → 审计。开启 `AGENT_EGRESS_ENFORCEMENT=network` 后，这条边界成为唯一出口：sandbox 在 `internal` 网络上运行，唯一可达的对端是不持任何密钥的代理。

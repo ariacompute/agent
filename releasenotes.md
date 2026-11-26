@@ -1,5 +1,102 @@
 # Release notes
 
+## Recursive self-improvement: the ledger becomes capability
+
+Every task already leaves a `SessionEvent` ledger. RSI (ADR-0026) folds that
+same ledger into diagnosis, turns a diagnosed pathology into a playbook or skill
+candidate, scores the candidate by replaying its own history, and publishes it
+through a revision-guarded human gate. No second event stream, no background
+daemon and no hot swap. The ledger and diagnosis are **on by default**; the one
+step that spends money (the real re-run) stays off until asked for.
+
+### Highlights
+
+- **Pure kernel in `aria-agent-core`** — `session::insight` folds records into
+  `EfficiencyReport` / `TurnInsight` / `Pathology` with per-finding evidence
+  (`seq`, tool, turn). Six named pathologies (repeated tool failure, retry storm,
+  approval-denied loop, compaction churn, step-budget exhaustion, repeated
+  tool-argument repair) are reported instead of a bare score, and one report is
+  capped by `max_records` / `max_turns` with an explicit `truncated` flag.
+- **Additive event contract** — `SessionEvent::ItemDone` gained
+  `latency_ms: Option<u64>` with `#[serde(default)]`; no variant was added, so
+  JSONL written earlier still parses and the frozen SSE envelope is unchanged.
+  When a harness does not measure timing, the report simply uses its step/retry
+  dimensions instead of failing.
+- **`ChainPersistence`** — one append fans out to several sinks in order: the
+  first is authoritative (its failure fails the append so `SessionRecorder`
+  retries), later sinks are best effort. In the cloud the title projection stays
+  first and the RSI ledger is the optional second sink, so a ledger problem never
+  turns a completed turn into a failed one.
+- **New crate `aria-agent-rsi`** (`publish = false`, depends on
+  `aria-agent-core` only) — `RsiLedger` (dedupe per `(principal, session, seq)`,
+  bounded window), `DeterministicReflection` (pathology → candidate rule table
+  with scope and parameter list, **zero model calls**), replay `validate` (a gain
+  below `min_score_gain` discards the candidate), `PlaybookEngine`
+  (`current` / `propose` / `promote` / `list_versions`), `FilesystemSkillSink`
+  and single-flight `RsiSweep` (a concurrent call reports `busy`).
+- **Two new seams** — `rsi` (`ReflectionEngine`) and `playbook`
+  (`PlaybookStore`), registered in `SeamKey::ALL`; unregistered keys still fail
+  at boot with `UnknownSeam`, and `NoReflection` / `NoPlaybooks` fail closed.
+- **Cloud surface** — `GET /v1/rsi/status`, `POST /v1/rsi/sweep`,
+  `GET /v1/rsi/reports` + `/{id}`, `GET /v1/rsi/proposals`,
+  `POST /v1/rsi/proposals/{id}/promote|discard`,
+  `GET /v1/rsi/playbooks/{key}` + `/versions`,
+  `POST /v1/rsi/playbooks/{key}/adapt`. With RSI off,
+  `POST /v1/rsi/sweep` answers `503` (reads stay available); a stale
+  `expected_revision` is `409` (the candidate stays pending); an unadapted
+  cross-tenant copy is `422` and creates nothing; non-admin adaptation is `403`;
+  unknown ids are `404`. Wire views never carry `principal_id`.
+- **Storage** — `migrations/0009_rsi.sql` adds `rsi_reports`, `rsi_proposals`,
+  `rsi_playbooks` and `rsi_reruns` (idempotent, `principal_id`-scoped). Every query filters on the
+  tenant, promotion runs in one transaction, and
+  `UNIQUE (principal_id, domain, key, revision)` makes a racing promotion fail on
+  the constraint instead of overwriting a reviewer's work. An in-memory provider
+  covers the same semantics offline.
+- **Real re-run gate** — `ModelRerunProbe` replays one recorded task through an
+  actual model call with the candidate playbook applied. It is tool-free by
+  design, so a validation cannot become a second production incident, and every
+  attempt writes a receipt to `rsi_reruns` (prompt/completion tokens, model
+  round-trips, tool calls = 0, duration, verdict). A timeout, a model error, an
+  empty answer or an unwritable receipt is never a pass. It stays off by default
+  (`AGENT_RSI_REAL_RERUN`) because it costs model calls.
+- **Reuse, not hot swap** — a promoted playbook is a new **version** read at the
+  next turn; a promoted skill lands in the shared catalog
+  (`AGENT_RSI_SKILLS_DIR`, default `~/.ariacompute/skills`), which is exactly the
+  directory `FilesystemSkills` scans and every dsh workspace links to (symlink on
+  Unix, copy elsewhere, skipped when empty). A running session's system prompt is
+  never rewritten.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AGENT_RSI_ENABLED` | `true` | Master switch. `false`: no ledger, no sweep, no timer, and turns keep a single persistence sink |
+| `AGENT_RSI_AUTO_PROMOTE` | `false` | Publish validated candidates without asking a human (trusted deployments only) |
+| `AGENT_RSI_SWEEP_SECS` | `0` | In-process sweep interval; `0` leaves sweeps to external cron via `POST /v1/rsi/sweep` |
+| `AGENT_RSI_SWEEP_THRESHOLD` | `3` | Unhealthy turns accumulated before a sweep is due |
+| `AGENT_RSI_DOMAIN` | `default` | Domain the in-process timer sweeps |
+| `AGENT_RSI_SKILLS_DIR` | `~/.ariacompute/skills` | Shared catalog: RSI writes it, `FilesystemSkills` reads it, dsh links it |
+| `AGENT_RSI_REAL_RERUN` | `false` | Real re-run gate: one tool-free model call per validation, receipted in `rsi_reruns` |
+| `AGENT_RSI_RERUN_TIMEOUT_MS` | `600000` | Deadline for one re-run; a timeout is `inconclusive`, never a pass |
+
+### Breaking changes
+
+- Out-of-tree `SessionEvent::ItemDone` struct literals must now set
+  `latency_ms` (usually `None`). The wire format stays backward compatible; only
+  the literal gains a field.
+- `RsiConfig::default().enabled` is now `true`, and the binary reads
+  `AGENT_RSI_ENABLED` with a `true` default. Deployments that relied on "unset
+  means off" must set `AGENT_RSI_ENABLED=false` to keep the old cost profile.
+- `DshConfig` gained a `skills` field; out-of-tree struct literals must add it
+  (use `DshConfig::for_session(..)` or `..Default`-style construction).
+
+### Validation
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace` (1150 passed) and
+`./scripts/coverage.sh` (every included line covered: 31650/31650; measured
+99.93% with 23 closing-delimiter artifacts, which carry no statement) all pass.
+
 ## Unified model gateway configuration
 
 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` now configure model

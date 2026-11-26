@@ -205,6 +205,38 @@ pub struct ReportRow {
     pub created_at_ms: i64,
 }
 
+/// One real re-run of a proposal — the audit trail of an action that costs money.
+///
+/// A re-run is the only RSI step with external cost and side effects, so every
+/// attempt is written down: tokens, model round-trips, tool calls it executed and
+/// how long it took. The row is not a report (nothing was diagnosed) and not a
+/// proposal (nothing is being decided); it is the receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunRow {
+    pub id: String,
+    pub principal_id: String,
+    pub domain: String,
+    pub proposal_id: String,
+    pub key: String,
+    pub baseline: i32,
+    pub score: i32,
+    /// `passed` | `below_threshold` | `inconclusive`.
+    pub verdict: String,
+    /// Prompt/completion tokens, estimated locally: a single `complete` call
+    /// carries no provider usage.
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    /// Model round-trips performed by the probe.
+    pub steps: u32,
+    /// Tool calls the re-run executed. The shipped probe is tool-free, so this
+    /// is `0` — recorded explicitly so "no side effects" is a fact, not silence.
+    pub tool_calls: u32,
+    pub duration_ms: u64,
+    /// Fixed short label when the run did not pass (`timeout`, `model_error`, …).
+    pub note: String,
+    pub created_at_ms: i64,
+}
+
 /// RSI diagnoses, scoped by `principal_id`.
 #[async_trait]
 pub trait RsiStore: Send + Sync {
@@ -216,6 +248,9 @@ pub trait RsiStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<ReportRow>, AppError>;
     async fn get_report(&self, principal: &Principal, id: &str) -> Result<ReportRow, AppError>;
+    /// Record one real re-run (cost + effects). Insert-only: a receipt is never
+    /// rewritten.
+    async fn insert_rerun(&self, row: &RerunRow) -> Result<(), AppError>;
 }
 
 /// Adapts [`RsiStore`] to the sweep's best-effort report sink.

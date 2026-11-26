@@ -1,5 +1,83 @@
 # 发布说明
 
+## 递归自我改进：让账本变成能力
+
+每次任务本来就会留下 `SessionEvent` 账本。RSI（ADR-0026）把同一份账本折成诊断，
+把诊断出的病症变成手册或技能候选，用候选自己的历史重放给它打分，再经带版本号的人工
+闸门才发布。没有第二套事件流、没有后台守护、也不热替换。账本与诊断**默认开启**；
+唯一花钱的真实重跑保持默认关闭。
+
+### 主要变更
+
+- **`aria-agent-core` 里的纯内核** —— `session::insight` 把记录折成
+  `EfficiencyReport` / `TurnInsight` / `Pathology`，每条结论都带证据（`seq`、工具、
+  轮次）。报告给的是六类具名病症（同一工具反复失败、重试风暴、审批被拒循环、上下文
+  压缩抖动、步数预算耗尽、工具参数反复修补），而不只是一个分数；单份报告受
+  `max_records` / `max_turns` 约束，并显式给出 `truncated` 标记。
+- **事件契约只做加法** —— `SessionEvent::ItemDone` 增加
+  `latency_ms: Option<u64>`（`#[serde(default)]`）；不新增变体，因此旧 JSONL 仍可解析、
+  冻结的 SSE 信封不变。harness 不测耗时时，报告退回步数/重试维度而不是报错。
+- **`ChainPersistence`** —— 一次写入按顺序扇出到多个 sink：第一个是权威（失败即整体失败，
+  `SessionRecorder` 会重试），其后为尽力而为。云端仍是标题投影在前、RSI 账本作为可选的
+  第二个 sink，因此账本出问题不会把已完成的回合变成失败回合。
+- **新增 `aria-agent-rsi`**（`publish = false`，只依赖 `aria-agent-core`）——
+  `RsiLedger`（按 `(principal, session, seq)` 去重、有界窗口）、
+  `DeterministicReflection`（病症 → 候选的规则表，带作用域与参数清单，**零模型调用**）、
+  重放 `validate`（增益低于 `min_score_gain` 即丢弃）、`PlaybookEngine`
+  （`current` / `propose` / `promote` / `list_versions`）、`FilesystemSkillSink`，
+  以及单飞的 `RsiSweep`（并发调用返回 `busy`）。
+- **两个新接缝** —— `rsi`（`ReflectionEngine`）与 `playbook`（`PlaybookStore`），已登记
+  进 `SeamKey::ALL`；未登记的键仍会在启动期 `UnknownSeam`，未接线的
+  `NoReflection` / `NoPlaybooks` 一律 fail-closed。
+- **云端接口** —— `GET /v1/rsi/status`、`POST /v1/rsi/sweep`、
+  `GET /v1/rsi/reports` 与 `/{id}`、`GET /v1/rsi/proposals`、
+  `POST /v1/rsi/proposals/{id}/promote` 与 `/discard`、
+  `GET /v1/rsi/playbooks/{key}` 与 `/versions`、
+  `POST /v1/rsi/playbooks/{key}/adapt`。RSI 关闭时 `POST /v1/rsi/sweep` 返回 `503`
+  （只读查询仍可用）；`expected_revision` 过期返回 `409`（候选留在待审）；未适配的
+  跨租户复制返回 `422` 且不产生任何资产；非管理员适配返回 `403`；未知 id 返回 `404`。
+  对外视图不含 `principal_id`。
+- **存储** —— `migrations/0009_rsi.sql` 新增 `rsi_reports`、`rsi_proposals`、
+  `rsi_playbooks`、`rsi_reruns`（幂等、按 `principal_id` 分片）。所有查询都过滤租户，晋升在单事务内
+  完成，`UNIQUE (principal_id, domain, key, revision)` 让并发发布在约束上失败，而不是
+  互相覆盖。内存 provider 覆盖同一套语义，离线可测。
+- **真实重跑闸门** —— `ModelRerunProbe` 把一条记录过的任务在候选手册下真实跑一轮模型。
+  探针按设计不挂工具，因此验证不会变成第二次生产事故；每次尝试都往 `rsi_reruns` 写回执
+  （prompt/completion token、模型轮次、工具调用 = 0、耗时、结论）。超时、模型报错、空回答、
+  回执写不进去，任何一条都不算通过。因为花钱，它保持默认关闭（`AGENT_RSI_REAL_RERUN`）。
+- **复用而非热替换** —— 晋升产出的是「下一轮读取」的新**版本**；技能落到共享目录
+  `AGENT_RSI_SKILLS_DIR`（默认 `~/.ariacompute/skills`），也就是 `FilesystemSkills`
+  扫描、每个 dsh 会话工作区链入的同一个目录（Unix 为 symlink，其他平台复制，目录为空则
+  跳过）。运行中会话的系统提示词不会被改写。
+
+### 配置
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `AGENT_RSI_ENABLED` | `true` | 总开关。设 `false` 时：不入账、不 sweep、无定时器，一轮对话只保留单个持久化 sink |
+| `AGENT_RSI_AUTO_PROMOTE` | `false` | 验证通过后无需人工审批即发布（仅限受控部署） |
+| `AGENT_RSI_SWEEP_SECS` | `0` | 进程内 sweep 间隔；`0` 表示交给外部 cron 调 `POST /v1/rsi/sweep` |
+| `AGENT_RSI_SWEEP_THRESHOLD` | `3` | 累计多少不健康轮次后触发一次 sweep |
+| `AGENT_RSI_DOMAIN` | `default` | 进程内定时器 sweep 所用的业务域 |
+| `AGENT_RSI_SKILLS_DIR` | `~/.ariacompute/skills` | 共享技能目录：RSI 写入、`FilesystemSkills` 读取、dsh 链入 |
+| `AGENT_RSI_REAL_RERUN` | `false` | 真实重跑闸门：每次验证一次无工具模型调用，回执落 `rsi_reruns` |
+| `AGENT_RSI_RERUN_TIMEOUT_MS` | `600000` | 单次重跑超时；超时按 `inconclusive` 处理，绝不放行 |
+
+### 兼容性说明
+
+- 仓库外如果直接写字面量构造 `SessionEvent::ItemDone`，需要补上 `latency_ms`
+  （通常是 `None`）。线上格式保持向后兼容，只是结构体字面量多了一个字段。
+- `RsiConfig::default().enabled` 与 `AGENT_RSI_ENABLED` 的默认值都改为 `true`；
+  依赖「不设即关闭」的部署需要显式设 `AGENT_RSI_ENABLED=false`。
+- `DshConfig` 新增 `skills` 字段，仓库外的结构体字面量需要补上
+  （或用 `DshConfig::for_session(..)` 构造）。
+
+### 验证
+
+`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo test --workspace`（1150 通过）与 `./scripts/coverage.sh`（计入统计的行
+31650/31650 全部覆盖；实测 99.93%，差的 23 行是闭合定界符假象，不含语句）全部通过。
+
 ## 统一模型网关配置
 
 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` 现在同时为

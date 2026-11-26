@@ -1,7 +1,7 @@
 -- Recursive self-improvement (RSI): diagnoses, pending proposals, versioned
 -- playbooks (ADR-0026).
 --
--- Three tables, each with one job:
+-- Four tables, each with one job:
 --
 --   rsi_reports   — the durable artifact of a diagnosis. `findings` is a JSON
 --                   array of `{pathology, tool, occurrences, evidence:[{seq,…}]}`,
@@ -12,6 +12,9 @@
 --                   (principal_id, domain, key, revision) is what makes the
 --                   revision guard real: a racing promotion fails on the
 --                   constraint instead of overwriting a reviewer's work.
+--   rsi_reruns    — one receipt per real re-run: the only RSI step that spends
+--                   model calls. Insert-only, because cost and side effects must
+--                   not be rewritable after the fact.
 --
 -- `scope` / `origin` hold the serialized RsiScope (principal, domain, params) and
 -- `principal_id` / `domain` are kept alongside as indexed projections of them.
@@ -68,3 +71,27 @@ CREATE TABLE IF NOT EXISTS rsi_playbooks (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rsi_playbooks_revision
     ON rsi_playbooks (principal_id, domain, key, revision);
+
+CREATE TABLE IF NOT EXISTS rsi_reruns (
+    id                TEXT PRIMARY KEY,
+    principal_id      TEXT NOT NULL,
+    domain            TEXT NOT NULL,
+    proposal_id       TEXT NOT NULL,
+    key               TEXT NOT NULL,
+    baseline          INTEGER NOT NULL,
+    score             INTEGER NOT NULL,
+    verdict           TEXT NOT NULL,
+    prompt_tokens     BIGINT NOT NULL,
+    completion_tokens BIGINT NOT NULL,
+    steps             INTEGER NOT NULL,
+    tool_calls        INTEGER NOT NULL,
+    duration_ms       BIGINT NOT NULL,
+    note              TEXT NOT NULL DEFAULT '',
+    created_at_ms     BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rsi_reruns_principal
+    ON rsi_reruns (principal_id, created_at_ms DESC);
+
+CREATE INDEX IF NOT EXISTS idx_rsi_reruns_proposal
+    ON rsi_reruns (proposal_id, created_at_ms DESC);

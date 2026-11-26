@@ -517,7 +517,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_disabled_or_invalid_configuration_is_refused() {
-        let cfg = RsiConfig::default();
+        // `RsiConfig::default()` is on; the explicit switch is the thing under
+        // test here.
+        let cfg = RsiConfig {
+            enabled: false,
+            ..RsiConfig::default()
+        };
         let sweep = RsiSweep::new(
             Arc::new(RsiLedger::new(&cfg)),
             Arc::new(DeterministicReflection::new(cfg.clone())),

@@ -40,6 +40,7 @@ by default, with pluggable sandboxes.
 - [🐋 Turn runtime](#-turn-runtime)
 - [🌐 Browser sandbox](#-browser-sandbox)
 - [🧠 Memory graph & memo tools](#-memory-graph--memo-tools)
+- [♻️ Recursive self-improvement](#-recursive-self-improvement)
 - [🔌 OpenAI Agents API compatibility](#-openai-agents-api-compatibility)
 
 **SDK**
@@ -71,6 +72,7 @@ where tools execute:
 - 🌐 **Five-language SDKs** — all of them (JS / Python / Rust / Swift / Kotlin) are thin clients over the cloud API; nothing is embedded, so a mobile app only needs network access plus an API key.
 - 🧭 **Pluggable sandbox** — every tool container is capped by `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_PIDS_LIMIT` and reaches the daemon through `DOCKER_HOST` / `ARIA_DOCKER_SOCKET`.
 - 🛡️ **Governed execution** — every outbound call crosses one boundary that decides, substitutes `${credential}` and records; audit, metering, idle suspension, output projection and checkpoints hang off the same seams, and `AGENT_EGRESS_ENFORCEMENT=network` removes the sandbox's default route instead of trusting `HTTP_PROXY` (`aria-agent-governance`).
+- ♻️ **Recursive self-improvement** — the session event ledger doubles as diagnosis input: `aria-agent-rsi` folds it into named pathologies with evidence, proposes a playbook or skill, scores the proposal by replaying history, parks it for a human gate, and can optionally re-run one real, tool-free model turn whose cost lands in `rsi_reruns`. On by default (`AGENT_RSI_ENABLED=false` drops the ledger and the sweep); a cross-tenant copy is still refused until it carries an adaptation record.
 
 <div align="right">
 
@@ -114,6 +116,7 @@ of truth for both persistence and SSE streaming.
 | **aria-agent-plugin** | Plugin registry: manifests, seam keys/roles, dependency topo-sort, cycle + core-uniqueness checks, frozen snapshot. |
 | **aria-agent-tools** | Built-in tool families: fs, shell, jobs, terminal (`pty`), skills, web (`web`), ask_user, plan, todo, memo. |
 | **aria-agent-governance** | Egress decision + `${credential}` substitution, JSONL audit sink, usage metering, tool-output projection, encrypted credential store, idle detection, quota guard and checkpoints (ADR-0021 … 0025). |
+| **aria-agent-rsi** | Recursive self-improvement: ledger accounting, deterministic proposer, replay validation, revision-guarded playbooks, receipted real re-run, shared skill sink and sweep (ADR-0026). |
 | **aria-agent-egress-proxy** | Secretless sidecar for `network` enforcement: speaks `/internal/egress/*` to the control plane, resolves the tenant from the peer IP, batches audit uploads. |
 | **aria-agent-orchestrator** | Sub-agents (in-process fork), agent teams (task DAG), scheduled jobs (single-flight ticker). |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): cloud API client — `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`. |
@@ -241,15 +244,20 @@ cp .env.example .env
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres (**pgvector**) credentials + database: metadata *and* context memory. |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | Connection string. The host `postgres` is the compose service name. |
 | `AGENT_HARNESS` | `dsh` | Turn runtime: `dsh` (DeepSeek Harness) or `native` (built-in Rust loop). An unknown value fails at boot. |
-| `DSH_BIN` | `dsh` on `PATH` | Harness executable (the image installs `/opt/dsh/bin/dsh`). Missing binary = actionable error, never a downgrade. |
-| `DSH_HOME_ROOT` | `.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories. |
+| `DSH_BIN` | `/opt/dsh/bin/dsh` | Harness executable (unset resolves `dsh` on `PATH`). Missing binary = actionable error, never a downgrade. |
+| `DSH_PROVIDER` | `deepseek-official` | Provider route inside dsh. Aria passes it through unchanged; an unknown route fails in the harness instead of being remapped. |
+| `DSH_HOME_ROOT` | `/app/.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories (unset resolves `.aria/dsh`). |
 | `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
 | `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
 | `DSH_THINKING_FILTER` | `enable` | `enable` routes dsh through a loopback proxy that strips Anthropic `redacted_thinking` blocks in both directions (the bundled adapter cannot replay them and fails turn two with `UNSUPPORTED_CONTENT`); `thinking` blocks are preserved. `disable` connects dsh straight to the gateway. Any other value fails at boot. |
 | `DSH_PERMISSION_MODE` | `workspace-write` | Tool-permission ceiling dsh applies inside the sandbox (`read-only` \| `workspace-write` \| `danger-full-access`). Never set it wider than the sandbox allows. |
-| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / _(empty)_ / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. The value is the gateway root; `native` appends `/v1/chat/completions` and `dsh` appends `/anthropic/v1/messages`. No `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
-| `AGENT_CLOUD_API_KEY` | _(empty)_ | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. Empty = open (`default` tenant). |
+| `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / `your-api-key` (placeholder) / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. The value is the gateway root; `native` appends `/v1/chat/completions` and `dsh` appends `/anthropic/v1/messages`. No `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
+| `AGENT_CLOUD_API_KEY` | `your-api-key` (placeholder) | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. The template ships a placeholder — replace it. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
+| `AGENT_RSI_ENABLED` / `AGENT_RSI_AUTO_PROMOTE` | `true` / `false` | Recursive self-improvement master switch and the trusted-deployment auto gate. Setting `AGENT_RSI_ENABLED=false` means no ledger, no sweep and a single persistence sink per turn. |
+| `AGENT_RSI_SWEEP_SECS` / `AGENT_RSI_SWEEP_THRESHOLD` / `AGENT_RSI_DOMAIN` | `0` / `3` / `default` | In-process sweep interval (`0` = external cron drives `POST /v1/rsi/sweep`), unhealthy turns accumulated before a sweep is due, and the domain the in-process timer sweeps. |
+| `AGENT_RSI_SKILLS_DIR` | _(empty)_ → `~/.ariacompute/skills` | The one catalog promoted skills land in, `FilesystemSkills` scans and every dsh workspace links. Empty resolves `$ARIA_COMPUTE_HOME/skills`, else `$HOME/.ariacompute/skills`. |
+| `AGENT_RSI_REAL_RERUN` / `AGENT_RSI_RERUN_TIMEOUT_MS` | `false` / `600000` | Second validation gate: replay one recorded task through a real model call under the candidate playbook. Off by default because it costs money; every attempt is written to `rsi_reruns` (tokens, steps, duration, verdict) and the probe is tool-free, so a re-run has no sandbox side effects. A timeout is inconclusive, never a pass. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
 | `CLOUD_PORT` | `3000` | Host port published for **direct** access to the `cloud` service (the container always listens on 3000). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
@@ -605,6 +613,69 @@ Both the memory graph and auto-compact are gated by `AgentConfig::memory_graph`
 enables it). `aria-agent-core` depends only on the `ContextStore` trait — never on
 `aria-agent-memo` — so the local (aria memo / SQLite) and cloud (pgvector)
 backends are interchangeable. See `docs/adr/0013-agent-memo-integration.md`.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## ♻️ Recursive self-improvement
+
+Every task already leaves a `SessionEvent` ledger. RSI is on by default and folds
+that ledger into diagnosis, so a pathology one session paid for becomes a
+versioned asset the next one can reuse — with no second event stream, no
+background daemon and no hot swap. Only the optional real re-run is off:
+
+```
+TurnCompleted / TurnFailed
+  → ledger    (ChainPersistence: audit sink first, ledger second)
+  → sweep     (POST /v1/rsi/sweep, or AGENT_RSI_SWEEP_SECS > 0)
+  → insight   → EfficiencyReport + pathology + evidence (seq / tool / turn)
+  → propose   → deterministic rule table, scoped to tenant + domain
+  → replay    → below min_score_gain = discarded, nothing published
+  → rerun     → optional tool-free model call, receipted in rsi_reruns
+  → pending   → human promote (revision-guarded) → new playbook version
+                                       └→ skill in ~/.ariacompute/skills (linked into dsh)
+```
+
+`EfficiencyReport` names the pathology instead of only scoring the turn —
+repeated tool failure, retry storm, approval-denied loop, compaction churn,
+step-budget exhaustion, repeated tool-argument repair — and every finding keeps
+the event positions it was derived from.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /v1/rsi/status` | Feature flag, gate in force, buffered records and unhealthy sessions |
+| `POST /v1/rsi/sweep` | Run a sweep now (the external-cron trigger); one session or the whole tenant |
+| `GET /v1/rsi/reports` | Diagnoses and their evidence, newest first |
+| `GET /v1/rsi/reports/{id}` | One diagnosis |
+| `GET /v1/rsi/proposals` | Pending candidates for the caller's scope |
+| `POST /v1/rsi/proposals/{id}/promote` | The human gate; the body carries `expected_revision` |
+| `POST /v1/rsi/proposals/{id}/discard` | Drop a candidate without publishing it |
+| `GET /v1/rsi/playbooks/{key}` | Current playbook for the domain |
+| `GET /v1/rsi/playbooks/{key}/versions` | Revision history for audit |
+| `POST /v1/rsi/playbooks/{key}/adapt` | Propose an adapted cross-tenant copy |
+
+Rules the surface enforces:
+
+- **Off means off** — with `AGENT_RSI_ENABLED=false` there is no ledger, no sweep
+  and no timer, `POST /v1/rsi/sweep` answers `503`, and a turn keeps its single
+  persistence sink.
+- **Nothing publishes implicitly** — a `promote` with a stale `expected_revision`
+  is `409` and the candidate stays pending; an unanswered gate is a refusal,
+  never an implicit allow.
+- **Adapt before reuse** — a cross-tenant copy without a complete adaptation
+  record (source, target, rewritten parameters, rationale) is `422` and creates
+  nothing.
+- **Every paid run leaves a receipt** — the optional real re-run is one tool-free model
+  call whose tokens, steps and duration are recorded in `rsi_reruns`; if the
+  receipt cannot be written, the run fails closed and nothing is promoted.
+- **No hot swap** — promotion produces a new version read at the next turn; a
+  running session's system prompt is never rewritten.
+
+`AGENT_RSI_AUTO_PROMOTE` exists for trusted deployments only. See
+`docs/adr/0026-recursive-self-improvement.md` and `requirements.md §11`.
 
 <div align="right">
 
@@ -1179,7 +1250,7 @@ cloud deployment cannot disagree about what the default is.
 | `AGENT_EGRESS_ALLOW` | *(empty)* | hosts reachable when mode is `allowlist` (`*.` = sub-domains) |
 | `AGENT_EGRESS_DENY` | *(empty)* | hosts always refused |
 | `AGENT_EGRESS_ENFORCEMENT` | `proxy` | `proxy` \| `network` \| `off` (needs `AGENT_ALLOW_UNENFORCED_EGRESS=1`) |
-| `AGENT_AUDIT_DIR` | `<workspace>/.aria/audit` | JSONL sink; `/v1/governance/audit/export` returns NDJSON |
+| `AGENT_AUDIT_DIR` | _(empty)_ → `<workspace>/.aria/audit` | JSONL sink; `/v1/governance/audit/export` returns NDJSON |
 | `AGENT_AUDIT_RETENTION_DAYS` | `30` | `0` keeps forever |
 | `AGENT_METERING` | `on` | state-based usage ledger |
 | `AGENT_COMPRESSION` | `on` | rule-based projection of tool output for the model |
@@ -1284,12 +1355,13 @@ Detailed design records live under [`docs/adr/`](./docs/adr), written in English
 | [Browser sandbox](./docs/adr/0012-browser-sandbox.md) | Six-image `BrowserCatalog` and `BrowserSandbox` |
 | [Agent–memo integration](./docs/adr/0013-agent-memo-integration.md) | Memory graph, auto-compact, memo tool family |
 | [DeepSeek Harness runtime](./docs/adr/0019-dsh-runtime.md) | `dsh` as the default `agent_loop` provider |
-| [Governed egress](./docs/adr/0020-governed-egress-single-boundary.md) | One decide/substitute/audit boundary, deny-by-default |
+| [Governed egress](./docs/adr/0025-governed-egress-single-boundary.md) | One decide/substitute/audit boundary, deny-by-default |
 | [SDK cloud client](./docs/adr/0020-sdk-cloud-client.md) | Why the native SDK embeds no runtime |
 | [Audit schema & retention](./docs/adr/0021-audit-event-schema-and-retention.md) | Audit event fields, JSONL sink, retention |
 | [Checkpoints & metering](./docs/adr/0022-sandbox-checkpoint-and-metering.md) | Sandbox snapshots and state-based usage |
 | [Idle & rotation](./docs/adr/0023-idle-detection-and-credential-rotation.md) | Five-signal idle detection, credential rotation |
 | [Network enforcement](./docs/adr/0024-network-enforcement-sidecar.md) | Internal network + secretless egress proxy |
+| [Recursive self-improvement](./docs/adr/0026-recursive-self-improvement.md) | Ledger diagnosis, deterministic proposals, replay validation, revision-guarded playbooks, receipted real re-run |
 
 <div align="right">
 

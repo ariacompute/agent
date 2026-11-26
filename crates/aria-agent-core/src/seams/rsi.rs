@@ -34,13 +34,16 @@ use std::collections::BTreeMap;
 
 /// Deployment configuration for the RSI loop.
 ///
-/// `enabled = false` is the default: with RSI off no ledger is written, no sweep
-/// runs and no background task is spawned, so the existing turn path keeps its
-/// exact behaviour and cost.
+/// `enabled` defaults to `true`: the ledger records, a sweep can be requested and
+/// `RsiState::disabled()` remains the explicit way to switch the feature off
+/// (off means no ledger, no sweep, no timer and a single persistence sink, so the
+/// turn path keeps its exact behaviour and cost). `real_rerun` stays off because
+/// it is the only step that spends model calls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RsiConfig {
-    /// Master switch. Off by default (ADR-0026).
+    /// Master switch. On by default (ADR-0026); `RsiState::disabled()` is the
+    /// explicit, tested way to turn the whole loop off.
     pub enabled: bool,
     /// Most recent ledger records folded into one report.
     pub max_records: usize,
@@ -75,7 +78,7 @@ pub struct RsiConfig {
 impl Default for RsiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_records: 2_000,
             max_turns: 50,
             max_evidence: 8,
@@ -593,18 +596,18 @@ mod tests {
     }
 
     #[test]
-    fn the_default_configuration_is_off_and_valid() {
+    fn the_default_configuration_is_on_but_never_spends_a_model_call() {
         let config = RsiConfig::default();
-        assert!(!config.enabled);
-        assert!(!config.auto_promote);
-        assert!(!config.real_rerun);
+        assert!(config.enabled, "the ledger and diagnosis are on by default");
+        assert!(!config.auto_promote, "publishing still needs a human");
+        assert!(!config.real_rerun, "a real re-run costs model calls");
         assert!(config.validate().is_ok());
         let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["enabled"], false);
+        assert_eq!(json["enabled"], true);
         // Missing fields fall back to the documented defaults, not to zero.
-        let partial: RsiConfig = serde_json::from_value(serde_json::json!({"enabled": true}))
+        let partial: RsiConfig = serde_json::from_value(serde_json::json!({"enabled": false}))
             .expect("partial config deserializes");
-        assert!(partial.enabled);
+        assert!(!partial.enabled);
         assert_eq!(partial.max_records, 2_000);
         assert_eq!(partial.min_score_gain, 5);
     }

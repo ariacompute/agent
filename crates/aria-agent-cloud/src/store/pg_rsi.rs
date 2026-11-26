@@ -8,8 +8,9 @@
 //!   unique index on `(principal_id, domain, key, revision)` is the real guard —
 //!   if a concurrent promotion wins the race, the insert fails on the constraint
 //!   and is reported as [`SeamError::Conflict`], never retried as an overwrite.
-//! * [`RsiStore`] — diagnoses. Every query is filtered by `principal_id` unless
-//!   the caller is an admin, so a tenant can never read another tenant's report.
+//! * [`RsiStore`] — diagnoses and real re-run receipts. Every query is filtered
+//!   by `principal_id` unless the caller is an admin, so a tenant can never read
+//!   another tenant's report; receipts are insert-only.
 //!
 //! Excluded from the coverage gate like the rest of `store/pg*`: these paths need
 //! a live database, and the same semantics are covered through the in-memory
@@ -26,7 +27,7 @@ use serde::Serialize;
 use sqlx::{Executor, PgPool, Row};
 
 use crate::auth::PrincipalKind;
-use crate::store::{can_see, AppError, PgStore, ReportRow, RsiStore};
+use crate::store::{can_see, AppError, PgStore, ReportRow, RerunRow, RsiStore};
 use agent_core::CoreError;
 
 use super::Principal;
@@ -52,7 +53,7 @@ fn decode_store<T: DeserializeOwned>(raw: &str, what: &str) -> Result<T, AppErro
     serde_json::from_str(raw).map_err(|e| AppError::Core(CoreError::Config(format!("{what}: {e}"))))
 }
 
-/// Create the three RSI tables.
+/// Create the four RSI tables.
 ///
 /// Mirrors `migrations/0009_rsi.sql` step by step: the migration file is what
 /// `sqlx migrate run` applies, and this function is what a binary started without
@@ -116,6 +117,36 @@ pub async fn ensure_rsi_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     pool.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_rsi_playbooks_revision \
             ON rsi_playbooks (principal_id, domain, key, revision)",
+    )
+    .await?;
+    // Real re-runs: the receipt for the only step that spends model calls.
+    pool.execute(
+        "CREATE TABLE IF NOT EXISTS rsi_reruns (\
+            id TEXT PRIMARY KEY, \
+            principal_id TEXT NOT NULL, \
+            domain TEXT NOT NULL, \
+            proposal_id TEXT NOT NULL, \
+            key TEXT NOT NULL, \
+            baseline INTEGER NOT NULL, \
+            score INTEGER NOT NULL, \
+            verdict TEXT NOT NULL, \
+            prompt_tokens BIGINT NOT NULL, \
+            completion_tokens BIGINT NOT NULL, \
+            steps INTEGER NOT NULL, \
+            tool_calls INTEGER NOT NULL, \
+            duration_ms BIGINT NOT NULL, \
+            note TEXT NOT NULL DEFAULT '', \
+            created_at_ms BIGINT NOT NULL)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rsi_reruns_principal \
+            ON rsi_reruns (principal_id, created_at_ms DESC)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rsi_reruns_proposal \
+            ON rsi_reruns (proposal_id, created_at_ms DESC)",
     )
     .await?;
     Ok(())
@@ -453,6 +484,37 @@ impl RsiStore for PgStore {
             return Err(AppError::NotFound);
         }
         Ok(report)
+    }
+
+    async fn insert_rerun(&self, row: &RerunRow) -> Result<(), AppError> {
+        // Insert-only: a receipt is never amended, so cost and effects cannot be
+        // rewritten after the fact.
+        sqlx::query(
+            "INSERT INTO rsi_reruns \
+                (id, principal_id, domain, proposal_id, key, baseline, score, verdict, \
+                 prompt_tokens, completion_tokens, steps, tool_calls, duration_ms, note, \
+                 created_at_ms) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+        )
+        .bind(&row.id)
+        .bind(&row.principal_id)
+        .bind(&row.domain)
+        .bind(&row.proposal_id)
+        .bind(&row.key)
+        .bind(row.baseline)
+        .bind(row.score)
+        .bind(&row.verdict)
+        .bind(row.prompt_tokens as i64)
+        .bind(row.completion_tokens as i64)
+        .bind(i32::try_from(row.steps).unwrap_or(i32::MAX))
+        .bind(i32::try_from(row.tool_calls).unwrap_or(i32::MAX))
+        .bind(row.duration_ms as i64)
+        .bind(&row.note)
+        .bind(row.created_at_ms)
+        .execute(&self.pool)
+        .await
+        .map_err(store_io)?;
+        Ok(())
     }
 }
 

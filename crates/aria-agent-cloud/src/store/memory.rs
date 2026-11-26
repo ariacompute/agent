@@ -14,8 +14,8 @@ use async_trait::async_trait;
 
 use crate::auth::{ApiKeyScopes, Principal};
 use crate::store::{
-    AgentStore, ApiKeyRow, ApiKeyStore, ItemRow, NewApiKeyRow, ReportRow, ResolvedKey, RsiStore,
-    SessionRow, SessionStore, TitleRow, TitleStore, TurnRow,
+    AgentStore, ApiKeyRow, ApiKeyStore, ItemRow, NewApiKeyRow, ReportRow, RerunRow, ResolvedKey,
+    RsiStore, SessionRow, SessionStore, TitleRow, TitleStore, TurnRow,
 };
 use crate::types::{Agent, AGENT_OBJECT};
 use crate::AppError;
@@ -34,6 +34,8 @@ struct Inner {
     titles: Vec<(String, TitleRow)>,
     /// RSI diagnoses (the owning principal is inside the row).
     reports: Vec<ReportRow>,
+    /// Real re-runs: one receipt per attempt (cost + effects).
+    reruns: Vec<RerunRow>,
 }
 
 /// One lock-backed store implementing [`AgentStore`], [`SessionStore`],
@@ -49,6 +51,11 @@ use crate::store::can_see;
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Real re-runs recorded so far, oldest first (test/diagnostic accessor).
+    pub fn reruns(&self) -> Vec<RerunRow> {
+        self.inner.lock().unwrap().reruns.clone()
     }
 }
 
@@ -376,6 +383,11 @@ impl RsiStore for MemoryStore {
             .find(|row| row.id == id && can_see(principal, &row.principal_id))
             .cloned()
             .ok_or(AppError::NotFound)
+    }
+
+    async fn insert_rerun(&self, row: &RerunRow) -> Result<(), AppError> {
+        self.inner.lock().unwrap().reruns.push(row.clone());
+        Ok(())
     }
 }
 
@@ -863,6 +875,41 @@ mod rsi_store_tests {
         ) -> Result<ReportRow, AppError> {
             Err(AppError::NotFound)
         }
+        async fn insert_rerun(&self, _row: &RerunRow) -> Result<(), AppError> {
+            Err(AppError::BadRequest("nope".into()))
+        }
+    }
+
+    fn rerun(id: &str) -> RerunRow {
+        RerunRow {
+            id: id.into(),
+            principal_id: "tenant-a".into(),
+            domain: "orders".into(),
+            proposal_id: "p1".into(),
+            key: "retry_storm:shell".into(),
+            baseline: 40,
+            score: 60,
+            verdict: "passed".into(),
+            prompt_tokens: 120,
+            completion_tokens: 30,
+            steps: 1,
+            tool_calls: 0,
+            duration_ms: 25,
+            note: String::new(),
+            created_at_ms: 10,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_rerun_receipt_is_kept_verbatim() {
+        let store = MemoryStore::new();
+        store.insert_rerun(&rerun("r1")).await.unwrap();
+        store.insert_rerun(&rerun("r2")).await.unwrap();
+        let kept = store.reruns();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].proposal_id, "p1");
+        assert_eq!(kept[1].prompt_tokens, 120);
+        assert_eq!(kept[1].tool_calls, 0, "no side effects are recorded as 0");
     }
 
     #[tokio::test]
@@ -893,5 +940,7 @@ mod rsi_store_tests {
         // The reader half is equally explicit rather than silently empty.
         assert!(failing.list_reports(&user("tenant-a"), 10).await.is_err());
         assert!(failing.get_report(&user("tenant-a"), "a").await.is_err());
+        // A receipt that cannot be written is an error, never a silent drop.
+        assert!(failing.insert_rerun(&rerun("r1")).await.is_err());
     }
 }

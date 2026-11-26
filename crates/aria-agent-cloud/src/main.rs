@@ -13,14 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::seams::{
-    ApprovalBroker, AutoAllow, DenyAll, NoQuestions, PermissionPreset, PlaybookStore, RsiConfig,
-    RsiScope,
+    shared_skill_catalog, ApprovalBroker, AutoAllow, DenyAll, NoQuestions, PermissionPreset,
+    PlaybookStore, RsiConfig, RsiScope,
 };
 use agent_core::{gateway_api_key, gateway_base_url, gateway_model, ModelClient, OpenAiModel};
 use agent_sandbox::Sandbox;
 use aria_agent_cloud::app::{AppState, DEFAULT_MODEL};
 use aria_agent_cloud::cli_config;
 use aria_agent_cloud::context::PgContextStore;
+use aria_agent_cloud::rsi_rerun::ModelRerunProbe;
 use aria_agent_cloud::store::{ensure_schema, PgStore};
 use aria_agent_cloud::{build_router, upgrade, KeyCache};
 use aria_agent_dsh::{
@@ -408,24 +409,22 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let titles: Arc<dyn aria_agent_cloud::store::TitleStore> = pg.clone();
 
     // --- Recursive self-improvement (ADR-0026) ---
-    // Off unless asked for: with `AGENT_RSI_ENABLED` unset nothing is buffered,
-    // no sweep exists and the session-log chain keeps its single sink.
+    // On by default: the ledger, the sweep and the diagnosis are cheap. The one
+    // paid step (`AGENT_RSI_REAL_RERUN`) stays off, and setting
+    // `AGENT_RSI_ENABLED=false` restores the single-sink, no-sweep path.
     let rsi_config = RsiConfig {
-        enabled: env_flag("AGENT_RSI_ENABLED", false),
+        enabled: env_flag("AGENT_RSI_ENABLED", true),
         auto_promote: env_flag("AGENT_RSI_AUTO_PROMOTE", false),
         real_rerun: env_flag("AGENT_RSI_REAL_RERUN", false),
+        real_rerun_timeout_ms: env_u64(
+            "AGENT_RSI_RERUN_TIMEOUT_MS",
+            RsiConfig::default().real_rerun_timeout_ms,
+        )
+        .max(1_000),
         sweep_threshold: env_u64("AGENT_RSI_SWEEP_THRESHOLD", 3).max(1) as usize,
         ..RsiConfig::default()
     };
     rsi_config.validate()?;
-    if rsi_config.real_rerun {
-        // No re-run probe ships with this binary: enabling the second gate
-        // without one would make every validation fail closed, so refuse to
-        // start rather than appear to double-check.
-        return Err("AGENT_RSI_REAL_RERUN is not supported by this build: \
-                    it requires a wired re-run probe"
-            .into());
-    }
     let rsi_ledger = if rsi_config.enabled {
         Some(Arc::new(RsiLedger::new(&rsi_config)))
     } else {
@@ -435,19 +434,30 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let playbooks: Arc<dyn PlaybookStore> = pg.clone();
     let rsi_sweep = match (&rsi_ledger, rsi_config.enabled) {
         (Some(ledger), true) => {
+            let mut reflection = DeterministicReflection::new(rsi_config.clone());
+            if rsi_config.real_rerun {
+                // The only gate that spends model calls: one real turn under the
+                // candidate playbook, with every attempt receipted in
+                // `rsi_reruns`.
+                reflection = reflection.with_rerun(Arc::new(ModelRerunProbe::new(
+                    ledger.clone(),
+                    make_model.clone(),
+                    rsi_store.clone(),
+                    Duration::from_millis(rsi_config.real_rerun_timeout_ms),
+                )));
+            }
             let mut sweep = RsiSweep::new(
                 ledger.clone(),
-                Arc::new(DeterministicReflection::new(rsi_config.clone())),
+                Arc::new(reflection),
                 playbooks.clone(),
                 rsi_config.clone(),
             )
             .with_reports(Arc::new(aria_agent_cloud::store::StoreReportSink::new(
                 rsi_store.clone(),
             )));
-            // Distilled skills land in the same catalog `FilesystemSkills` reads.
-            let skills_dir = std::env::var("AGENT_RSI_SKILLS_DIR")
-                .unwrap_or_else(|_| ".aria/skills".to_string());
-            sweep = sweep.with_skills(Arc::new(FilesystemSkillSink::new(skills_dir)));
+            // Distilled skills land in the one catalog every consumer reads:
+            // `FilesystemSkills`, the dsh workspace link and the RSI sink.
+            sweep = sweep.with_skills(Arc::new(FilesystemSkillSink::new(shared_skill_catalog())));
             Some(Arc::new(sweep))
         }
         _ => None,
@@ -481,6 +491,7 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         enabled = rsi_config.enabled,
         auto_promote = rsi_config.auto_promote,
+        real_rerun = rsi_config.real_rerun,
         sweep_secs,
         "rsi: {}",
         if rsi_config.enabled {

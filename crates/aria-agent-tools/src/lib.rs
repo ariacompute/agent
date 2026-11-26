@@ -19,8 +19,8 @@ pub mod todo;
 pub mod web;
 
 use agent_core::seams::{
-    EgressSeam, FilesystemSkills, FsSeam, JobsSeam, LocalFs, LocalJobs, SandboxPolicy,
-    SandboxShell, ShellSeam, SkillsSeam, UserQuestions, WebSeam,
+    shared_skill_catalog, EgressSeam, FilesystemSkills, FsSeam, JobsSeam, LocalFs, LocalJobs,
+    SandboxPolicy, SandboxShell, ShellSeam, SkillsSeam, UserQuestions, WebSeam,
 };
 use agent_core::{Tool, ToolCall, ToolHandler, ToolResult};
 use serde_json::Value;
@@ -83,7 +83,10 @@ impl ToolSet {
             fs: Some(Arc::new(LocalFs::new(policy))),
             jobs: Some(Arc::new(LocalJobs::new(shell.clone()))),
             shell: Some(shell),
-            skills: Some(Arc::new(FilesystemSkills::new([root.join(".aria/skills")]))),
+            // One catalog for every consumer: RSI's sink, this tool family and
+            // the dsh workspace link all resolve through the same helper, so a
+            // promoted skill is never written where nothing looks for it.
+            skills: Some(Arc::new(FilesystemSkills::new([shared_skill_catalog()]))),
             sandbox: Some(sandbox),
             root,
             web: None,
