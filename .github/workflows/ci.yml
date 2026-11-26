@@ -170,3 +170,10 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/aria
         run: cargo test -p aria-agent-cloud --lib -- --nocapture
+
+      # The real-socket suite has the same gate: the Postgres scenario skips
+      # without DATABASE_URL, so it belongs in the job that has one.
+      - name: real-socket E2E with Postgres
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/aria
+        run: cargo test -p agent-tests --test e2e_http -- --nocapture

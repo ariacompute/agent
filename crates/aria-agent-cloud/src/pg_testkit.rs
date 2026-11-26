@@ -13,23 +13,16 @@
 //! `23505 duplicate key value violates unique constraint "pg_type_typname_nsp_index"`,
 //! so the DDL now runs behind one process-wide lock and a ready flag.
 //!
-//! The three orchestration tables (`scheduled_jobs`, `agent_teams`,
-//! `session_titles`) are not created by `store::pg::ensure_schema`; they come
-//! from the migrations a deployment replays. The fixture applies those same
-//! files, so the DDL under test is the DDL that ships.
+//! `store::pg::ensure_schema` is the whole schema now: it also replays the
+//! orchestration migrations (`scheduled_jobs`, `agent_teams`, `session_titles`),
+//! which is what the boot path runs. The fixture therefore applies exactly one
+//! function, so the DDL under test is the DDL that ships.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Executor;
 use tokio::sync::Mutex;
-
-/// Migrations that `store::pg::ensure_schema` does not repeat.
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../migrations/0006_scheduled_jobs.sql"),
-    include_str!("../../../migrations/0007_agent_teams.sql"),
-    include_str!("../../../migrations/0008_session_titles.sql"),
-];
 
 static READY: AtomicBool = AtomicBool::new(false);
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
@@ -95,11 +88,7 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 /// The DDL itself, always executed (idempotent).
 async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
-    crate::store::pg::ensure_schema(pool).await?;
-    for sql in MIGRATIONS {
-        pool.execute(*sql).await?;
-    }
-    Ok(())
+    crate::store::pg::ensure_schema(pool).await
 }
 
 #[cfg(test)]

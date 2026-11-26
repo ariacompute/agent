@@ -762,9 +762,39 @@ async fn postgres_backed_routes_persist_across_servers() {
         .await;
     assert_eq!(status, StatusCode::OK);
 
+    // The team and the scheduled job are Postgres-backed too: create them on
+    // one router, prove them on the next.
+    let (status, team) = first
+        .send(
+            Method::POST,
+            "/v1/agent-teams",
+            auth,
+            Some(json!({
+                "name": format!("pg-team-{tag}"),
+                "tasks": [{"id": "t1", "title": "build"}],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{team}");
+    let team_id = team["id"].as_str().expect("team id").to_string();
+    let (status, job) = first
+        .send(
+            Method::POST,
+            "/v1/scheduled-jobs",
+            auth,
+            Some(json!({
+                "name": format!("pg-job-{tag}"),
+                "every_secs": 60,
+                "payload": {"kind": "sweep", "tag": tag.to_string()},
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_string();
+
     // A brand-new router over the same pool sees the committed rows: nothing
     // lives in a process-local store.
-    let (second, _server2) = serve(build_router(state(pool))).await;
+    let (second, _server2) = serve(build_router(state(pool.clone()))).await;
     let (status, read) = second
         .send(
             Method::GET,
@@ -785,6 +815,51 @@ async fn postgres_backed_routes_persist_across_servers() {
         .await;
     assert_eq!(status, StatusCode::OK, "{turns}");
     assert_eq!(turns["data"].as_array().expect("turns").len(), 1);
+
+    let (status, read_team) = second
+        .send(
+            Method::GET,
+            &format!("/v1/agent-teams/{team_id}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{read_team}");
+    assert_eq!(read_team["tasks"][0]["state"], "pending");
+    let (status, after_claim) = second
+        .send(
+            Method::POST,
+            &format!("/v1/agent-teams/{team_id}/tasks/t1/claim"),
+            auth,
+            Some(json!({"worker": "pg-worker"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_claim}");
+    assert_eq!(after_claim["tasks"][0]["claimed_by"], "pg-worker");
+    // The claim is written, not just echoed: a third router reads it back.
+    let (third, _server3) = serve(build_router(state(pool))).await;
+    let (status, persisted) = third
+        .send(
+            Method::GET,
+            &format!("/v1/agent-teams/{team_id}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{persisted}");
+    assert_eq!(persisted["tasks"][0]["claimed_by"], "pg-worker");
+
+    let (status, jobs) = second
+        .send(Method::GET, "/v1/scheduled-jobs", auth, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{jobs}");
+    let stored = jobs["data"]
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .find(|j| j["id"] == json!(job_id))
+        .unwrap_or_else(|| panic!("job {job_id} missing from {jobs}"));
+    assert_eq!(stored["payload"]["tag"], json!(tag.to_string()));
 }
 
 #[tokio::test]
@@ -1280,4 +1355,496 @@ async fn agent_and_session_crud_over_a_real_socket() {
         .send(Method::GET, &format!("/v1/agents/{aid}"), auth, None)
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// One agent + session over the socket, for the endpoint families that hang off
+/// a session.
+async fn agent_and_session(
+    h: &MemoryHarness,
+    auth: Option<&str>,
+    tag: &uuid::Uuid,
+) -> (String, String) {
+    let (status, agent) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/agents",
+            auth,
+            Some(json!({"name": format!("e2e-{tag}")})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{agent}");
+    let aid = agent["id"].as_str().expect("agent id").to_string();
+    let (status, session) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/agents/sessions",
+            auth,
+            Some(json!({"agent_id": aid})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    (aid, session["id"].as_str().expect("session id").to_string())
+}
+
+#[tokio::test]
+async fn api_keys_are_issued_used_and_revoked_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let tag = uuid::Uuid::new_v4();
+    let admin = format!("e2e-admin-{tag}");
+    issue_key(
+        &h,
+        &admin,
+        &format!("admin-{tag}"),
+        &["read", "write", "admin"],
+    )
+    .await;
+
+    // A key created through HTTP must work on the very next request: the
+    // plaintext is returned once, only its hash is stored.
+    let (status, created) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/api-keys",
+            Some(&admin),
+            Some(json!({
+                "label": "ci",
+                "principal_id": format!("pid-{tag}"),
+                "scopes": ["read"],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let key = created["key"]
+        .as_str()
+        .expect("plaintext key is returned once")
+        .to_string();
+    let id = created["id"].as_str().expect("key id").to_string();
+    assert!(key.starts_with(created["key_prefix"].as_str().expect("prefix")));
+    assert_eq!(created["principal_id"], json!(format!("pid-{tag}")));
+
+    let (status, agents) = h
+        .api
+        .send(Method::GET, "/v1/agents", Some(&key), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{agents}");
+
+    // Revocation purges the resolution cache, so the next request is already
+    // rejected — not only after the cache entry would have expired.
+    let (status, revoked) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/api-keys/{id}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["ok"], json!(true));
+    for _ in 0..2 {
+        let (status, body) = h
+            .api
+            .send(Method::GET, "/v1/agents", Some(&key), None)
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+
+    // The revoked key is gone from the listing, and revoking twice is 404.
+    let (status, listed) = h
+        .api
+        .send(Method::GET, "/v1/api-keys", Some(&admin), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    // The key listing is a plain array (the only endpoint that is not a
+    // `ListResponse`), so read it as one.
+    assert!(!listed
+        .as_array()
+        .expect("key list")
+        .iter()
+        .any(|k| k["id"] == json!(id)));
+    let (status, _) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/api-keys/{id}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn team_task_state_machine_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let tag = uuid::Uuid::new_v4();
+
+    let (status, team) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/agent-teams",
+            auth,
+            Some(json!({
+                "name": format!("release-{tag}"),
+                "tasks": [
+                    {"id": "t1", "title": "build"},
+                    {"id": "t2", "title": "ship", "depends_on": ["t1"]},
+                ],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{team}");
+    assert_eq!(team["object"], "agent_team");
+    assert_eq!(team["total"], json!(2));
+    assert_eq!(team["done"], json!(0));
+    let team_id = team["id"].as_str().expect("team id").to_string();
+
+    // A dependent task cannot be claimed before its dependency is done.
+    let (status, blocked) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agent-teams/{team_id}/tasks/t2/claim"),
+            auth,
+            Some(json!({"worker": "w1"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{blocked}");
+
+    let (status, claimed) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agent-teams/{team_id}/tasks/t1/claim"),
+            auth,
+            Some(json!({"worker": "w1"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["tasks"][0]["state"], "claimed");
+    assert_eq!(claimed["tasks"][0]["claimed_by"], "w1");
+
+    // Claiming the same task twice loses with 403 and keeps the first owner.
+    let (status, twice) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agent-teams/{team_id}/tasks/t1/claim"),
+            auth,
+            Some(json!({"worker": "w2"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{twice}");
+
+    let (status, done) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agent-teams/{team_id}/tasks/t1/complete"),
+            auth,
+            Some(json!({"result": "ok"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["done"], json!(1));
+    assert_eq!(done["tasks"][0]["state"], "done");
+
+    let (status, ready) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agent-teams/{team_id}/tasks/t2/claim"),
+            auth,
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(ready["tasks"][1]["state"], "claimed");
+
+    // Unknown tasks and teams are 404, not 500.
+    for path in [
+        format!("/v1/agent-teams/{team_id}/tasks/nope/claim"),
+        "/v1/agent-teams/nope/tasks/t1/claim".to_string(),
+    ] {
+        let (status, body) = h.api.send(Method::POST, &path, auth, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+    }
+
+    let (status, teams) = h.api.send(Method::GET, "/v1/agent-teams", auth, None).await;
+    assert_eq!(status, StatusCode::OK, "{teams}");
+    assert!(teams["data"]
+        .as_array()
+        .expect("team list")
+        .iter()
+        .any(|t| t["id"] == json!(team_id)));
+}
+
+#[tokio::test]
+async fn scheduled_jobs_crud_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let tag = uuid::Uuid::new_v4();
+
+    let (status, job) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/scheduled-jobs",
+            auth,
+            Some(json!({
+                "name": format!("nightly-{tag}"),
+                "every_secs": 3600,
+                "payload": {"kind": "sweep"},
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    assert_eq!(job["object"], "scheduled_job");
+    assert_eq!(job["every_secs"], json!(3600));
+    assert!(job["next_run_ms"].as_i64().unwrap_or_default() > 0);
+    let job_id = job["id"].as_str().expect("job id").to_string();
+
+    // Exactly one of the two schedules is required.
+    for body in [
+        json!({"name": "both", "every_secs": 60, "at_ms": 1_700_000_000_000i64}),
+        json!({"name": "neither"}),
+    ] {
+        let (status, _) = h
+            .api
+            .send(Method::POST, "/v1/scheduled-jobs", auth, Some(body))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, list) = h
+        .api
+        .send(Method::GET, "/v1/scheduled-jobs", auth, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(list["data"]
+        .as_array()
+        .expect("job list")
+        .iter()
+        .any(|j| j["id"] == json!(job_id)));
+
+    let (status, deleted) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/scheduled-jobs/{job_id}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let (status, _) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/scheduled-jobs/{job_id}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn memory_relations_and_bounded_graph_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let tag = uuid::Uuid::new_v4();
+    let (_aid, sid) = agent_and_session(&h, auth, &tag).await;
+
+    let mut ids = Vec::new();
+    for (key, value) in [
+        ("alpha", "the build finished"),
+        ("beta", "the release shipped"),
+    ] {
+        let (status, item) = h
+            .api
+            .send(
+                Method::POST,
+                &format!("/v1/agents/sessions/{sid}/memory"),
+                auth,
+                Some(json!({"key": key, "value": value})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{item}");
+        assert_eq!(item["kind"], "long_term");
+        ids.push(item["id"].as_str().expect("memory id").to_string());
+    }
+
+    let (status, edge) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agents/sessions/{sid}/memory/relations"),
+            auth,
+            Some(json!({
+                "from_id": ids[0],
+                "to_id": ids[1],
+                "kind": "causal",
+                "score": 0.9,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{edge}");
+    assert_eq!(edge["kind"], "causal");
+    assert_eq!(edge["provenance"], "rest");
+
+    // Filters narrow the edge list; an unknown kind is a client error.
+    let (status, rels) = h
+        .api
+        .send(
+            Method::GET,
+            &format!(
+                "/v1/agents/sessions/{sid}/memory/relations?from={}&kind=causal",
+                ids[0]
+            ),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rels}");
+    assert!(rels["data"]
+        .as_array()
+        .expect("relations")
+        .iter()
+        .any(|r| r["to_id"] == json!(ids[1]) && r["kind"] == "causal"));
+    let (status, _) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{sid}/memory/relations?kind=nonsense"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Bounded graph retrieval from a seed; without a seed it refuses.
+    let (status, graph) = h
+        .api
+        .send(
+            Method::GET,
+            &format!(
+                "/v1/agents/sessions/{sid}/memory/relations/graph?seeds={}&views=causal&max_hops=2&budget=10",
+                ids[0]
+            ),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert!(!graph["items"].as_array().expect("graph items").is_empty());
+    assert_eq!(graph["trace"]["budget"], json!(10));
+    assert!(graph["trace"]["stop_reason"].is_string());
+    let (status, _) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{sid}/memory/relations/graph"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A delete needs at least one selector, and then removes the edge for good.
+    let (status, _) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/agents/sessions/{sid}/memory/relations"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, removed) = h
+        .api
+        .send(
+            Method::DELETE,
+            &format!("/v1/agents/sessions/{sid}/memory/relations?from={}", ids[0]),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert!(removed["deleted"].as_u64().unwrap_or_default() >= 1);
+    let (status, after) = h
+        .api
+        .send(
+            Method::GET,
+            &format!(
+                "/v1/agents/sessions/{sid}/memory/relations?from={}&kind=causal",
+                ids[0]
+            ),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["data"], json!([]));
+}
+
+#[tokio::test]
+async fn rsi_off_is_visible_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+
+    let (status, body) = h.api.send(Method::GET, "/v1/rsi/status", auth, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["object"], "rsi_status");
+    assert_eq!(body["enabled"], json!(false));
+    assert!(body["gate"].is_null());
+    assert_eq!(body["records"], json!(0));
+
+    // The switch is off: a sweep refuses instead of pretending to run.
+    let (status, body) = h
+        .api
+        .send(Method::POST, "/v1/rsi/sweep", auth, Some(json!({})))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // The read-only surfaces still answer with an empty list.
+    for path in ["/v1/rsi/reports", "/v1/rsi/proposals"] {
+        let (status, body) = h.api.send(Method::GET, path, auth, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body["data"], json!([]), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_routes_and_methods_answer_4xx_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let (status, body) = h.api.send(Method::GET, "/v1/not-a-route", None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = h.api.send(Method::DELETE, "/healthz", None, None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+
+    // An empty turn is a client error, not a stream that never starts.
+    let token = bootstrap_token();
+    let tag = uuid::Uuid::new_v4();
+    let (_aid, sid) = agent_and_session(&h, token.as_deref(), &tag).await;
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            &format!("/v1/agents/sessions/{sid}/events/stream"),
+            token.as_deref(),
+            Some(json!({"text": "   "})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }

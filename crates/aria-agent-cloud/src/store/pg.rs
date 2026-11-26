@@ -761,6 +761,18 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Recursive self-improvement tables (ADR-0026). Kept in their own module so
     // the RSI DDL lives next to the queries that use it.
     super::pg_rsi::ensure_rsi_schema(pool).await?;
+    // Orchestration tables (scheduled jobs, agent teams, session titles). They
+    // live in `migrations/` because the backends sit in `pg_orchestration.rs`,
+    // but `PgStore` implements those seams, so booting with Postgres must create
+    // them here too: a deployment that only ran this function answered
+    // `500 relation "agent_teams" does not exist` on `/v1/agent-teams`.
+    for sql in [
+        include_str!("../../../../migrations/0006_scheduled_jobs.sql"),
+        include_str!("../../../../migrations/0007_agent_teams.sql"),
+        include_str!("../../../../migrations/0008_session_titles.sql"),
+    ] {
+        pool.execute(sql).await?;
+    }
     Ok(())
 }
 
