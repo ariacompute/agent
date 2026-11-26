@@ -18,9 +18,10 @@
 #
 # Exclusions (see `docs/coverage.md`): the FFI binding generator, the cloud
 # process entrypoint, and the Postgres/pgvector backends (they need a live
-# database; their `DATABASE_URL`-gated tests stay in place). Outside the IGNORE
-# list a single statement may opt out with `// LCOV_EXCL_LINE` (printed as a
-# separate count), and closing-delimiter-only lines are ignored as artifacts.
+# database; their `DATABASE_URL`-gated suite is green against a real server, and
+# `just pg-test` / the `postgres` CI job run it). Outside the IGNORE list a single
+# statement may opt out with `// LCOV_EXCL_LINE` (printed as a separate count),
+# and closing-delimiter-only lines are ignored as artifacts.
 #
 # Usage: ./scripts/coverage.sh [extra cargo-llvm-cov args]
 
@@ -30,13 +31,19 @@ cd "$(dirname "$0")/.."
 # `store/governance.rs` is the Postgres half of the governance store: same
 # category as `store/pg.rs` (DB-gated integration behaviour, exercised only when
 # DATABASE_URL is set), so it is excluded from the line gate for the same reason.
-# `sandbox/egress_net.rs` drives the Docker Engine API (create network / start
-# proxy container). Its pure decision logic (`plan`, label parsing) is unit
-# tested, but the client calls need a live daemon; excluding the file is the same
-# trade-off the repo already makes for `store/pg*.rs`.
 # `aria-agent-egress-proxy/src/main.rs` is the bin entry point (same category as
 # `aria-agent-cloud/src/main.rs`).
-IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/pg_rsi\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-tools/src/web\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs|crates/aria-agent-sandbox/src/egress_net\.rs'
+#
+# Two files left this list:
+#   * `tools/web.rs` — its only unexercised line was `host_of` with an empty
+#     host, which needs no network at all.
+#   * `sandbox/egress_net.rs` — the Docker calls are covered by a scripted
+#     Engine API over loopback (`Engine` in its test module), so `ensure`,
+#     `probe`, `health`, `resolve_peer` and `control_networks` run against the
+#     real request/response path without a daemon.
+# `tools/terminal.rs` stays: the `pty` feature (off by default) needs a real
+# terminal device.
+IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/pg_rsi\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-cloud/src/pg_testkit\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs'
 
 # Hermetic environment: the sandbox socket probes and the Docker client
 # constructor are environment-dependent. Give both a stable, local target so

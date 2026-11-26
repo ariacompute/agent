@@ -818,27 +818,7 @@ mod tests {
     /// with the `vector` extension. Exercises the real SQL end to end.
     #[tokio::test]
     async fn pg_stores_roundtrip_when_database_url_is_set() {
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!("skip: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("skip: DATABASE_URL unreachable: {e}");
-                return;
-            }
-        };
-        ensure_schema(&pool)
-            .await
-            .expect("ensure_schema (needs pgvector)");
+        let pool = crate::pg_testkit::db_or_skip!(crate::pg_testkit::maybe_pool().await);
         let store = PgStore::new(pool);
         let tenant = Principal {
             id: format!("pg_{}", crate::util::new_id("t")),

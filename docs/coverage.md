@@ -9,15 +9,16 @@ statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
 opt-outs (see below). The summary prints both numbers, so a run reads:
 
 ```
-lines measured: 27188/27199 (99.96%)
-closing-delimiter artifacts: 11 (no statement; not counted)
-lines included: 27188/27188 (100.00%)
+lines measured: 32978/33002 (99.93%)
+closing-delimiter artifacts: 24 (no statement; not counted)
+lines included: 32978/32978 (100.00%)
 OK: every included line is covered (or explicitly excluded).
 ```
 
 ```bash
 just cov-check        # gate: fails on any uncovered included line
 just cov              # report only: writes lcov.info
+just pg-test          # the Postgres/pgvector suite; needs DATABASE_URL
 ```
 
 ## Why lcov records instead of `--fail-under-lines`
@@ -39,13 +40,23 @@ needs a reason that does not depend on "it was hard":
 | --- | --- |
 | `crates/aria-agent-ffigen/**` | binding *generator* binary; its output is verified by `just ffi` and the committed Swift/Kotlin sources |
 | `crates/aria-agent-cloud/src/main.rs` | process entrypoint: `main`/`run`, signal handling and the Postgres/OpenAI wiring |
-| `crates/aria-agent-cloud/src/store/pg.rs` | Postgres metadata backend: needs a live database. The `DATABASE_URL`-gated tests stay in place (`#[tokio::test]` + early `return` when unset) so a real deployment can still exercise them — they never fake a result |
-| `crates/aria-agent-cloud/src/context/pg.rs` | pgvector context backend, same reasoning as above |
-| `crates/aria-agent-cloud/src/store/pg_orchestration.rs` | Postgres teams/schedule/title backends; the same semantics are covered by the in-memory providers in `api_tests.rs` |
-| `crates/aria-agent-cloud/src/store/pg_rsi.rs` | Postgres RSI backends (reports, pending proposals, revision-guarded playbooks, insert-only re-run receipts); the same semantics — including the `409` revision guard and the `422` adaptation rule — are covered by `MemoryStore`/`MemoryPlaybooks` through `rsi_tests.rs` and the `rsi_rerun.rs` probe tests |
+| `crates/aria-agent-cloud/src/store/pg.rs` | Postgres metadata backend: needs a live database, so it cannot sit in an offline gate. It is **not** untested: `just pg-test` (the `postgres` CI job) runs the whole pg suite against a real `pgvector/pgvector:pg16`, which is how the `SUM(...)::BIGINT` decoding bug in `usage()` was found. See “Why the pg files stay out of the line gate” below |
+| `crates/aria-agent-cloud/src/context/pg.rs` | pgvector context backend, same reasoning and same suite |
+| `crates/aria-agent-cloud/src/store/pg_orchestration.rs` | Postgres teams/schedule/title backends; covered by the real-database suite as well as by the in-memory providers in `api_tests.rs` |
+| `crates/aria-agent-cloud/src/store/pg_rsi.rs` | Postgres RSI backends (reports, pending proposals, revision-guarded playbooks, insert-only re-run receipts); the real-database suite exercises the `409` revision guard, the `422` adaptation rule and the unique-index conflict mapping |
+| `crates/aria-agent-cloud/src/pg_testkit.rs` | the fixture those tests share (one pool per test, schema applied once behind a process-wide lock). Its skip arms only run without a database, so it travels with the group above |
 | `crates/aria-agent-tools/src/terminal.rs` (`pty`) | optional `pty` provider needs a real terminal device; `scripts/coverage.sh` excludes this file so enabling the feature cannot make the gate depend on a TTY. The default build keeps `pty` off. |
-| `crates/aria-agent-tools/src/web.rs` (`web`) | optional `web` provider needs live HTTP; excluded by `scripts/coverage.sh` for the same reason. The default build keeps `web` off. |
 | `crates/aria-agent-dsh/src/transport.rs` | child-process plumbing: piped stdio "unavailable" is unreachable with `Stdio::piped`, and write/flush/read `EIO` plus `start_kill`/`try_wait` failures cannot be produced hermetically. Exercised end-to-end by `just dsh-smoke` (scripted child) and `just dsh-e2e` (real dsh). |
+
+`crates/aria-agent-sandbox/src/egress_net.rs` used to be excluded as “needs a
+live daemon”. It is now **inside** the gate: its test module runs a scripted
+Engine API over loopback, so `ensure` (create network → create proxy → connect →
+start), `probe`, `health`, `resolve_peer` and `control_networks` all exercise the
+real `bollard` request/response path. Writing those tests found a real defect:
+`plan` asked for `ConnectProxyToControl`/`ConnectProxyToEgress` even right after
+`CreateProxy` had already attached the container, and Docker answers
+`403 endpoint ... already exists in network` to the second `connect`, so a fresh
+bring-up would have failed on itself.
 
 `crates/aria-agent-dsh/src/rpc.rs` is **inside** the gate: the request/response,
 timeout, server-request, notification, dead-pipe, read-error and dropped-channel
@@ -67,6 +78,34 @@ possible because the data-access layer is a set of traits (`AgentStore`,
 `SessionStore`, `ApiKeyStore`) with an in-memory implementation used by the
 tests, while `store/pg.rs` keeps the production SQL.
 
+## Why the pg files stay out of the line gate
+
+The pg backends have a real suite (`just pg-test`, `DATABASE_URL` required,
+`postgres` CI job), but they do not join the **line** gate, for a measurement
+reason rather than a testing one: on `sqlx` call chains llvm reports zero-count
+*gap regions* for lines that demonstrably ran. A concrete example, from a run
+with a live database where the assertion `list_checkpoints(...).len() == 1`
+passed:
+
+```
+   240| 2|        sqlx::query("INSERT INTO sandbox_checkpoints ...")      ^0
+   253| 0|            .execute(&self.pool)
+   255| 0|        Ok(())
+   264| 0|        .fetch_all(&self.pool)
+   267| 1|            .map(|row| {
+```
+
+`.fetch_all` cannot be unexecuted while the `map` below it ran, and `Ok(())`
+cannot be unexecuted in a function that returned `Ok`. The gate would flag those
+lines forever, and the only way to silence them is to rewrite the SQL chains into
+unnatural single-line shapes. The behaviour those lines encode *is* covered — by
+`just pg-test` against a real server, which is the stronger check (it found the
+`NUMERIC` vs `BIGINT` decode bug).
+
+Everything that is *offline testable* stays inside the gate: `tools/web.rs` used
+to be excluded for “needs live HTTP”, but its only unexecuted line was
+`host_of("http://user@:8080/x")`, so it is now measured like everything else.
+
 ## Test doubles
 
 No test reaches the public internet or a live database:
@@ -75,7 +114,7 @@ No test reaches the public internet or a live database:
 | --- | --- |
 | OpenAI-compatible upstream | `wiremock` loopback server (`aria-agent-core`, `upgrade`) |
 | Docker daemon | hand-rolled Engine API stub over TCP in `crates/aria-agent-sandbox` (raw-stream `exec` upgrade included) |
-| Postgres / pgvector | `store/memory.rs` + `context::MemoryContextStore` |
+| Postgres / pgvector | `store/memory.rs` + `context::MemoryContextStore` for the offline suite; a real `pgvector/pgvector:pg16` behind `DATABASE_URL` for `just pg-test` (one pool per test, schema applied once — the shared `pg_testkit` exists because per-test DDL raced into `23505` on `pg_type`) |
 | `aria-memo` CLI | `cli-interop` feature (off by default) — a plain `cargo test` never silently skips |
 | Cloud HTTP API | `tower::ServiceExt::oneshot` against `build_router(state)` |
 | Gateway HTTP (thinking-filter proxy) | one-shot loopback gateway, plus `ProxyListener` / reader / writer seams for the `bind`/`local_addr`/`accept` and short-read/short-write branches a real socket cannot be made to produce |

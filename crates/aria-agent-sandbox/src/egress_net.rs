@@ -147,16 +147,21 @@ pub fn plan(
         steps.push(Step::CreateNetwork);
     }
     if !proxy_present {
+        // `CreateProxy` attaches the new container to the control networks and
+        // to the egress network in one go. Asking for the connections again
+        // makes Docker answer `403 endpoint ... already exists in network`, so a
+        // fresh bring-up would fail on its own second `connect`.
         steps.push(Step::CreateProxy);
+    } else {
+        if !proxy_on_control {
+            steps.push(Step::ConnectProxyToControl);
+        }
+        if !proxy_on_egress {
+            steps.push(Step::ConnectProxyToEgress);
+        }
     }
     if !proxy_running {
         steps.push(Step::StartProxy);
-    }
-    if !proxy_on_control {
-        steps.push(Step::ConnectProxyToControl);
-    }
-    if !proxy_on_egress {
-        steps.push(Step::ConnectProxyToEgress);
     }
     steps
 }
@@ -684,6 +689,10 @@ mod tests {
     fn bring_up_is_idempotent_and_complete() {
         assert!(plan(false, false, false, false, false).contains(&Step::CreateNetwork));
         assert!(plan(false, false, false, false, false).contains(&Step::CreateProxy));
+        // Creating the proxy attaches it; asking for the connections again makes
+        // Docker refuse the second `connect` with `403 ... already exists`.
+        assert!(!plan(false, false, false, false, false).contains(&Step::ConnectProxyToControl));
+        assert!(!plan(false, false, false, false, false).contains(&Step::ConnectProxyToEgress));
         assert_eq!(
             plan(true, true, true, true, true),
             Vec::new(),
@@ -786,5 +795,781 @@ mod tests {
             cfg.validate(),
             Err(SandboxError::NotConfigured(_))
         ));
+    }
+
+    // --- Scripted Docker Engine API ---------------------------------------
+    //
+    // Every request is answered from a queue: a test queues exactly the call
+    // sequence `ensure` / `probe` / `resolve_peer` make, so each branch is
+    // deterministic and no daemon is involved. `bollard` is spoken to over a
+    // real loopback socket, so the request building and response parsing under
+    // test are the ones a deployment uses.
+
+    struct Reply {
+        status: u16,
+        body: String,
+    }
+
+    impl Reply {
+        fn ok(body: impl Into<String>) -> Self {
+            Self {
+                status: 200,
+                body: body.into(),
+            }
+        }
+        fn no_content() -> Self {
+            Self {
+                status: 204,
+                body: String::new(),
+            }
+        }
+        fn status(status: u16) -> Self {
+            Self {
+                status,
+                body: format!("{{\"message\":\"refused ({status})\"}}"),
+            }
+        }
+    }
+
+    struct Engine {
+        endpoint: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Engine {
+        /// `script` entries are `(method-and-path fragment, reply)`; a request
+        /// takes the first entry whose fragment it matches, so the order of the
+        /// queue is the order of the calls.
+        fn start(script: Vec<(&str, Reply)>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let queue = std::sync::Arc::new(std::sync::Mutex::new(
+                script
+                    .into_iter()
+                    .map(|(fragment, reply)| (fragment.to_string(), reply))
+                    .collect::<Vec<_>>(),
+            ));
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = std::sync::Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    serve(&mut stream, &queue, &recorded);
+                }
+            });
+            Self { endpoint, seen }
+        }
+
+        fn sandbox(&self) -> DockerSandbox {
+            DockerSandbox::with_client(
+                bollard::Docker::connect_with_http(&self.endpoint, 5, bollard::API_DEFAULT_VERSION)
+                    .unwrap(),
+            )
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn serve(
+        stream: &mut std::net::TcpStream,
+        queue: &std::sync::Mutex<Vec<(String, Reply)>>,
+        seen: &std::sync::Mutex<Vec<String>>,
+    ) {
+        use std::io::{Read, Write};
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 512];
+        let head_end = loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let path = parts.next().unwrap_or_default().to_string();
+        seen.lock().unwrap().push(format!("{method} {path}"));
+
+        // Drain the declared body so the client is not writing into a closed
+        // socket (container create carries a JSON config).
+        let declared = head
+            .lines()
+            .find_map(|line| {
+                let line = line.to_ascii_lowercase();
+                line.strip_prefix("content-length:")
+                    .map(|value| value.trim().to_string())
+            })
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while buf.len() < head_end + declared {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+
+        let call = format!("{method} {path}");
+        let reply = {
+            let mut queue = queue.lock().unwrap();
+            match queue
+                .iter()
+                .position(|(fragment, _)| call.contains(fragment.as_str()))
+            {
+                Some(index) => queue.remove(index).1,
+                None => Reply::status(404),
+            }
+        };
+        let head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            reply.status,
+            if reply.status < 300 { "OK" } else { "Error" },
+            reply.body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(reply.body.as_bytes());
+        let _ = stream.flush();
+    }
+
+    fn governed() -> EgressConfig {
+        EgressConfig {
+            network: DEFAULT_NETWORK.into(),
+            proxy_container: DEFAULT_PROXY_CONTAINER.into(),
+            proxy_image: "aria-egress-proxy:test".into(),
+            control_plane_url: "http://cloud:8080".into(),
+            token: "tok".into(),
+            control_networks: vec!["aria_default".into()],
+        }
+    }
+
+    fn network(name: &str, proxy_container: &str) -> EgressNetwork {
+        EgressNetwork {
+            network: name.into(),
+            proxy_container: proxy_container.into(),
+        }
+    }
+
+    /// The same shape as `inspect`, as the JSON the engine would return.
+    fn inspect_body(tenant: Option<&str>, ip: Option<&str>) -> String {
+        let labels = tenant
+            .map(|t| format!("\"{TENANT_LABEL}\":\"{t}\""))
+            .unwrap_or_default();
+        let networks = ip
+            .map(|ip| format!("\"{DEFAULT_NETWORK}\":{{\"IPAddress\":\"{ip}\"}}"))
+            .unwrap_or_default();
+        format!(
+            "{{\"Id\":\"c1\",\"State\":{{\"Running\":true,\"Status\":\"running\"}},\
+              \"Config\":{{\"Labels\":{{{labels}}}}},\
+              \"NetworkSettings\":{{\"Networks\":{{{networks}}}}}}}"
+        )
+    }
+
+    fn inspect_json(running: bool, attached: &[&str]) -> String {
+        let networks = attached
+            .iter()
+            .map(|name| format!("\"{name}\":{{\"IPAddress\":\"10.0.0.9\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"Id\":\"c1\",\"Name\":\"/{DEFAULT_PROXY_CONTAINER}\",\
+              \"State\":{{\"Running\":{running},\"Status\":\"{}\"}},\
+              \"Config\":{{\"Labels\":{{}}}},\
+              \"NetworkSettings\":{{\"Networks\":{{{networks}}}}}}}",
+            if running { "running" } else { "exited" }
+        )
+    }
+
+    #[tokio::test]
+    async fn ensure_creates_the_network_and_brings_the_proxy_up() {
+        let engine = Engine::start(vec![
+            ("/networks", Reply::ok("[]")),
+            ("/aria-egress-proxy/json", Reply::status(404)),
+            (
+                "/networks/create",
+                Reply::ok("{\"Id\":\"n1\",\"Warning\":\"\"}"),
+            ),
+            (
+                "/containers/create",
+                Reply::ok("{\"Id\":\"c1\",\"Warnings\":[]}"),
+            ),
+            ("/aria_default/connect", Reply::ok("{}")),
+            ("/aria-egress/connect", Reply::ok("{}")),
+            ("/aria-egress-proxy/start", Reply::no_content()),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &["aria_default", "aria-egress"])),
+            ),
+        ]);
+        let sandbox = engine.sandbox();
+        let egress = EgressNetwork::ensure(&sandbox, &governed()).await.unwrap();
+        assert_eq!(egress.network(), DEFAULT_NETWORK);
+        assert_eq!(egress.proxy_container(), DEFAULT_PROXY_CONTAINER);
+
+        let calls = engine.seen();
+        assert!(calls.iter().any(|c| c.contains("/networks/create")));
+        assert!(calls.iter().any(|c| c.contains("/containers/create")));
+        assert_eq!(
+            calls.iter().filter(|c| c.contains("/connect")).count(),
+            2,
+            "the proxy joins the control plane and the egress network"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_is_a_no_op_when_the_proxy_is_already_governed() {
+        let engine = Engine::start(vec![
+            (
+                "/networks",
+                Reply::ok("[{\"Name\":\"aria-egress\",\"Id\":\"n1\",\"Driver\":\"bridge\"}]"),
+            ),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &["aria_default", "aria-egress"])),
+            ),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &["aria_default", "aria-egress"])),
+            ),
+        ]);
+        EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .expect("nothing to do");
+        assert_eq!(
+            engine.seen().iter().filter(|c| c.contains("POST")).count(),
+            0,
+            "a governed proxy is never re-created"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_reports_each_failed_step() {
+        // Network creation fails.
+        let engine = Engine::start(vec![
+            ("/networks", Reply::ok("[]")),
+            ("GET /containers/", Reply::status(404)),
+            ("/networks/create", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("create network"));
+
+        // Proxy creation fails.
+        let engine = Engine::start(vec![
+            ("/networks", Reply::ok("[]")),
+            ("GET /containers/", Reply::status(404)),
+            (
+                "/networks/create",
+                Reply::ok("{\"Id\":\"n1\",\"Warning\":\"\"}"),
+            ),
+            ("/containers/create", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("create proxy container"));
+
+        // Attaching to the control plane fails.
+        let engine = Engine::start(vec![
+            ("/networks", Reply::ok("[]")),
+            ("GET /containers/", Reply::status(404)),
+            (
+                "/networks/create",
+                Reply::ok("{\"Id\":\"n1\",\"Warning\":\"\"}"),
+            ),
+            (
+                "/containers/create",
+                Reply::ok("{\"Id\":\"c1\",\"Warnings\":[]}"),
+            ),
+            ("/aria_default/connect", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("attach proxy to network"));
+
+        // Starting the proxy fails.
+        let engine = Engine::start(vec![
+            ("/networks", Reply::ok("[]")),
+            ("GET /containers/", Reply::status(404)),
+            (
+                "/networks/create",
+                Reply::ok("{\"Id\":\"n1\",\"Warning\":\"\"}"),
+            ),
+            (
+                "/containers/create",
+                Reply::ok("{\"Id\":\"c1\",\"Warnings\":[]}"),
+            ),
+            ("/aria_default/connect", Reply::ok("{}")),
+            ("/aria-egress/connect", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("attach proxy to"));
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_a_missing_stopped_or_detached_proxy() {
+        let sandbox = Engine::start(vec![("GET /containers/", Reply::status(404))]).sandbox();
+        let err = network(DEFAULT_NETWORK, DEFAULT_PROXY_CONTAINER)
+            .probe(&sandbox)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("is missing"));
+
+        let sandbox = Engine::start(vec![(
+            "GET /containers/",
+            Reply::ok(inspect_json(false, &["aria-egress"])),
+        )])
+        .sandbox();
+        let err = network(DEFAULT_NETWORK, DEFAULT_PROXY_CONTAINER)
+            .probe(&sandbox)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("is not running"));
+
+        let sandbox = Engine::start(vec![(
+            "GET /containers/",
+            Reply::ok(inspect_json(true, &["aria_default"])),
+        )])
+        .sandbox();
+        let err = network(DEFAULT_NETWORK, DEFAULT_PROXY_CONTAINER)
+            .probe(&sandbox)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("is not attached"));
+    }
+
+    #[tokio::test]
+    async fn health_is_optional() {
+        let sandbox = Engine::start(vec![("GET /containers/", Reply::status(404))]).sandbox();
+        assert!(network(DEFAULT_NETWORK, DEFAULT_PROXY_CONTAINER)
+            .health(&sandbox)
+            .await
+            .is_none());
+
+        let sandbox = Engine::start(vec![(
+            "GET /containers/",
+            Reply::ok(inspect_json(true, &["aria-egress"])),
+        )])
+        .sandbox();
+        assert!(network(DEFAULT_NETWORK, DEFAULT_PROXY_CONTAINER)
+            .health(&sandbox)
+            .await
+            .is_none());
+
+        let sandbox = Engine::start(vec![(
+            "GET /containers/",
+            Reply::ok(
+                "{\"Id\":\"c1\",\"State\":{\"Running\":true,\"Health\":{\"Status\":\"healthy\"}}}",
+            ),
+        )])
+        .sandbox();
+        assert_eq!(
+            network(DEFAULT_NETWORK, DEFAULT_PROXY_CONTAINER)
+                .health(&sandbox)
+                .await,
+            Some(HealthStatusEnum::HEALTHY)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_attributes_an_ip_through_labels() {
+        // The sandbox and the proxy both sit on the network; only the labelled
+        // one is attributable.
+        let engine = Engine::start(vec![
+            (
+                "/containers/json",
+                Reply::ok(
+                    "[{\"Id\":\"c1\",\"Names\":[\"/aria-egress-proxy\"]},\
+                      {\"Id\":\"c2\",\"Names\":[\"/sbx-1\"]},\
+                      {\"Id\":\"c3\"}]",
+                ),
+            ),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &["aria-egress"])),
+            ),
+            (
+                "/containers/sbx-1/json",
+                Reply::ok(inspect_body(Some("tenant-a"), Some("10.0.0.9"))),
+            ),
+            // A container that cannot be inspected is skipped, not fatal.
+            ("GET /containers/", Reply::status(500)),
+        ]);
+        let found = EgressNetwork::resolve_peer(&engine.sandbox(), "aria-egress", "10.0.0.9")
+            .await
+            .unwrap()
+            .expect("attributed");
+        assert_eq!(found.principal_id, "tenant-a");
+        assert_eq!(found.sandbox_id, "sbx-1");
+
+        // An IP nobody owns is unattributable.
+        let engine = Engine::start(vec![
+            (
+                "/containers/json",
+                Reply::ok("[{\"Id\":\"c1\",\"Names\":[\"/sbx-1\"]}]"),
+            ),
+            (
+                "/containers/sbx-1/json",
+                Reply::ok(inspect_body(Some("tenant-a"), Some("10.0.0.5"))),
+            ),
+        ]);
+        assert!(
+            EgressNetwork::resolve_peer(&engine.sandbox(), "aria-egress", "10.0.0.9")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // A listing failure is reported.
+        let engine = Engine::start(vec![("/containers/json", Reply::status(500))]);
+        let err = EgressNetwork::resolve_peer(&engine.sandbox(), "aria-egress", "10.0.0.9")
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("list sandbox containers"));
+    }
+
+    // Async mutex: the guard is deliberately held across the awaits below.
+    static HOSTNAME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn control_networks_come_from_the_hostname_container() {
+        let _guard = HOSTNAME_LOCK.lock().await;
+        let saved = std::env::var("HOSTNAME").ok();
+        std::env::set_var("HOSTNAME", "cloud");
+
+        let engine = Engine::start(vec![(
+            "/containers/cloud/json",
+            Reply::ok(inspect_json(true, &["aria_default", "aria-egress"])),
+        )]);
+        let nets = EgressNetwork::control_networks(&engine.sandbox())
+            .await
+            .unwrap();
+        assert!(nets.contains(&"aria_default".to_string()));
+
+        // A host that is not a container cannot discover its networks.
+        let engine = Engine::start(vec![("/containers/cloud/json", Reply::status(404))]);
+        assert!(EgressNetwork::control_networks(&engine.sandbox())
+            .await
+            .is_err());
+
+        // A container with no networks is refused too.
+        let engine = Engine::start(vec![(
+            "/containers/cloud/json",
+            Reply::ok("{\"Id\":\"c1\",\"NetworkSettings\":{\"Networks\":{}}}"),
+        )]);
+        let err = EgressNetwork::control_networks(&engine.sandbox())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("no Docker network"));
+
+        // An empty HOSTNAME is refused before any call.
+        std::env::set_var("HOSTNAME", "  ");
+        let err = EgressNetwork::control_networks(&engine.sandbox())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("HOSTNAME is empty"));
+
+        match saved {
+            Some(value) => std::env::set_var("HOSTNAME", value),
+            None => std::env::remove_var("HOSTNAME"),
+        }
+    }
+
+    // --- the remaining branches of the bring-up and the decorator ---------
+
+    #[test]
+    fn a_session_label_is_trimmed_and_a_blank_one_is_dropped() {
+        let with = |session: &str| {
+            let mut labels = HashMap::new();
+            labels.insert(TENANT_LABEL.to_string(), "tenant-a".to_string());
+            labels.insert(SESSION_LABEL.to_string(), session.to_string());
+            ContainerInspectResponse {
+                config: Some(ContainerConfig {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        };
+        assert_eq!(
+            PeerIdentity::from_inspect("sbx", &with("  s-1  "))
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("s-1")
+        );
+        assert!(PeerIdentity::from_inspect("sbx", &with("   "))
+            .unwrap()
+            .session_id
+            .is_none());
+    }
+
+    #[test]
+    fn an_empty_or_missing_address_is_not_a_peer() {
+        let mut networks = HashMap::new();
+        networks.insert(
+            DEFAULT_NETWORK.to_string(),
+            EndpointSettings {
+                ip_address: Some("   ".into()),
+                ..Default::default()
+            },
+        );
+        let container = ContainerInspectResponse {
+            network_settings: Some(NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(PeerIdentity::ip_on(&container, DEFAULT_NETWORK).is_none());
+        // No network settings at all is the same answer.
+        assert!(PeerIdentity::ip_on(&ContainerInspectResponse::default(), "any").is_none());
+    }
+
+    static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_config_comes_from_the_environment_or_a_lookup() {
+        let _guard = CONFIG_ENV_LOCK.lock().unwrap();
+        let keys = [
+            "EGRESS_PROXY_IMAGE",
+            "CONTROL_PLANE_URL",
+            "EGRESS_PROXY_TOKEN",
+            "AGENT_EGRESS_NETWORK",
+            "EGRESS_PROXY_CONTAINER",
+        ];
+        // Pre-seed one key so the restore loop sees both of its arms.
+        std::env::set_var("AGENT_EGRESS_NETWORK", "aria-before-test");
+        let saved: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
+        std::env::set_var("EGRESS_PROXY_IMAGE", "img:test");
+        std::env::set_var("CONTROL_PLANE_URL", "http://cp:8080");
+        std::env::set_var("EGRESS_PROXY_TOKEN", "tok");
+        std::env::set_var("AGENT_EGRESS_NETWORK", "  ");
+        let cfg = EgressConfig::from_env().expect("three required keys are set");
+        assert_eq!(cfg.proxy_image, "img:test");
+        assert_eq!(
+            cfg.network, DEFAULT_NETWORK,
+            "blank falls back to the default"
+        );
+        assert_eq!(cfg.proxy_container, DEFAULT_PROXY_CONTAINER);
+        for (key, value) in keys.iter().zip(saved) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        // A missing required key is a configuration error, not a default.
+        let err = EgressConfig::from_lookup(|key| match key {
+            "EGRESS_PROXY_IMAGE" => Some("img".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(format!("{err}").contains("CONTROL_PLANE_URL must be set"));
+
+        // An explicit lookup supplies every value, blank optional ones too.
+        let values: HashMap<&str, &str> = HashMap::from([
+            ("EGRESS_PROXY_IMAGE", "  img  "),
+            ("CONTROL_PLANE_URL", "http://cp"),
+            ("EGRESS_PROXY_TOKEN", "tok"),
+            ("AGENT_EGRESS_NETWORK", "  "),
+            ("EGRESS_PROXY_CONTAINER", ""),
+        ]);
+        let cfg = EgressConfig::from_lookup(|key| values.get(key).map(|v| v.to_string()))
+            .expect("lookup");
+        assert_eq!(cfg.proxy_image, "img");
+        assert_eq!(cfg.network, DEFAULT_NETWORK);
+        assert_eq!(cfg.proxy_container, DEFAULT_PROXY_CONTAINER);
+        assert!(cfg.control_networks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_reconnects_an_existing_proxy_and_starts_it() {
+        let engine = Engine::start(vec![
+            (
+                "/networks",
+                Reply::ok("[{\"Name\":\"aria-egress\",\"Id\":\"n1\"}]"),
+            ),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(false, &[])),
+            ),
+            ("/aria_default/connect", Reply::ok("{}")),
+            ("/aria-egress/connect", Reply::ok("{}")),
+            ("/aria-egress-proxy/start", Reply::no_content()),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &["aria_default", "aria-egress"])),
+            ),
+        ]);
+        EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .expect("reconnected and started");
+        let calls = engine.seen();
+        assert_eq!(calls.iter().filter(|c| c.contains("/connect")).count(), 2);
+        assert!(calls.iter().any(|c| c.contains("/start")));
+    }
+
+    #[tokio::test]
+    async fn ensure_reports_a_failed_reconnect() {
+        // Control-plane reconnect refused.
+        let engine = Engine::start(vec![
+            (
+                "/networks",
+                Reply::ok("[{\"Name\":\"aria-egress\",\"Id\":\"n1\"}]"),
+            ),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &[])),
+            ),
+            ("/aria_default/connect", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("attach proxy to control network"));
+
+        // Egress reconnect refused.
+        let engine = Engine::start(vec![
+            (
+                "/networks",
+                Reply::ok("[{\"Name\":\"aria-egress\",\"Id\":\"n1\"}]"),
+            ),
+            (
+                "/aria-egress-proxy/json",
+                Reply::ok(inspect_json(true, &["aria_default"])),
+            ),
+            ("/aria-egress/connect", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("attach proxy to aria-egress"));
+    }
+
+    #[tokio::test]
+    async fn ensure_reports_a_listing_or_start_failure() {
+        let engine = Engine::start(vec![("/networks", Reply::status(500))]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("list docker networks"));
+
+        // A stopped proxy is (re)started; the engine refuses the start.
+        let stopped = inspect_json(false, &["aria_default", "aria-egress"]);
+        let engine = Engine::start(vec![
+            (
+                "/networks",
+                Reply::ok("[{\"Name\":\"aria-egress\",\"Id\":\"n1\"}]"),
+            ),
+            ("/aria-egress-proxy/json", Reply::ok(stopped)),
+            ("/aria-egress-proxy/start", Reply::status(500)),
+        ]);
+        let err = EgressNetwork::ensure(&engine.sandbox(), &governed())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("start proxy container"));
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_skips_unnamed_and_unreadable_containers() {
+        let engine = Engine::start(vec![
+            (
+                "/containers/json",
+                Reply::ok("[{\"Id\":\"c1\",\"Names\":[\"/ghost\"]},{\"Id\":\"c2\"}]"),
+            ),
+            ("/containers/ghost/json", Reply::status(500)),
+        ]);
+        assert!(
+            EgressNetwork::resolve_peer(&engine.sandbox(), "aria-egress", "10.0.0.9")
+                .await
+                .unwrap()
+                .is_none(),
+            "an unreadable container and an unnamed one are both skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_decorator_forwards_every_lifecycle_call() {
+        let capture = std::sync::Arc::new(Capture::default());
+        let sandbox = NetworkingSandbox::new(
+            capture,
+            "aria-egress",
+            vec![(TENANT_LABEL.into(), "tenant-a".into())],
+            Vec::new(),
+        );
+        let handle = crate::SandboxHandle { id: "sbx".into() };
+        // `Capture` implements only spawn/exec/destroy; the rest come from the
+        // trait's defaults. What matters here is that the decorator forwards.
+        assert!(sandbox.exec(&handle, &["true".into()]).await.is_err());
+        sandbox.destroy(handle.clone()).await.unwrap();
+        let _ = sandbox.capabilities();
+        let _ = sandbox.status(&handle).await;
+        let _ = sandbox.pause(&handle).await;
+        let _ = sandbox.resume(&handle).await;
+        let _ = sandbox.suspend(&handle).await;
+        let _ = sandbox.checkpoint(&handle).await;
+        let _ = sandbox
+            .restore(
+                &crate::CheckpointRef::new("img", "sbx", 1),
+                &crate::ExecSpec::command(vec!["true".into()]),
+            )
+            .await;
+    }
+
+    /// The stub's own defensive arms: a peer that closes before sending a whole
+    /// request, and a body that arrives after the headers.
+    #[tokio::test]
+    async fn the_stub_handles_a_truncated_request_and_a_split_body() {
+        use std::io::{Read, Write};
+        let engine = Engine::start(vec![("/containers/create", Reply::ok("{}"))]);
+        let addr = engine.endpoint.trim_start_matches("http://").to_string();
+
+        let mut truncated = std::net::TcpStream::connect(&addr).unwrap();
+        truncated.write_all(b"GET /containers/json").unwrap();
+        truncated.flush().unwrap();
+        drop(truncated);
+
+        let mut split = std::net::TcpStream::connect(&addr).unwrap();
+        split
+            .write_all(
+                b"POST /containers/create HTTP/1.1\r\nHost: stub\r\nContent-Length: 5\r\n\r\n",
+            )
+            .unwrap();
+        split.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        split.write_all(b"hello").unwrap();
+        let mut answer = Vec::new();
+        let _ = split.read_to_end(&mut answer);
+        assert!(String::from_utf8_lossy(&answer).contains("200 OK"));
+
+        // A body that never arrives ends the drain loop instead of hanging.
+        let mut short = std::net::TcpStream::connect(&addr).unwrap();
+        short
+            .write_all(
+                b"POST /containers/create HTTP/1.1\r\nHost: stub\r\nContent-Length: 9\r\n\r\nhi",
+            )
+            .unwrap();
+        short.flush().unwrap();
+        drop(short);
+
+        // A call nobody scripted answers 404 rather than panicking.
+        let empty = Engine::start(Vec::new());
+        let mut unmatched =
+            std::net::TcpStream::connect(empty.endpoint.trim_start_matches("http://").to_string())
+                .unwrap();
+        unmatched
+            .write_all(b"GET /networks HTTP/1.1\r\nHost: stub\r\n\r\n")
+            .unwrap();
+        let mut answer = Vec::new();
+        let _ = unmatched.read_to_end(&mut answer);
+        assert!(String::from_utf8_lossy(&answer).contains("404"));
     }
 }

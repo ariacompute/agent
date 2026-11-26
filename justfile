@@ -43,6 +43,13 @@ cov:
 cov-check:
     ./scripts/coverage.sh
 
+# Postgres/pgvector backends against a real database. Without DATABASE_URL every
+# DB test returns early, which proves nothing; start one first, e.g.
+#   docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=postgres \
+#     -e POSTGRES_DB=aria pgvector/pgvector:pg16
+pg-test:
+    cargo test -p aria-agent-cloud --lib -- --nocapture
+
 # Generate UniFFI bindings for Swift and Kotlin from the ariacompute-agent crate.
 ffi:
     cargo build -p ariacompute-agent

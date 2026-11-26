@@ -469,6 +469,8 @@ mod tests {
         assert_eq!(host_of("http://[::1]:80/x").as_deref(), Some("::1"));
         assert_eq!(host_of("nonsense"), None);
         assert_eq!(host_of("https://"), None);
+        // Userinfo followed by an empty host and a port: nothing is left to name.
+        assert_eq!(host_of("http://user@:8080/x"), None);
     }
 
     struct FixedPolicy(agent_core::seams::EgressPolicy);

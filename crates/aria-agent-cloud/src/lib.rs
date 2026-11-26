@@ -25,6 +25,8 @@ pub mod context;
 pub mod event_envelope;
 pub mod governance;
 pub mod internal_egress;
+#[cfg(test)]
+pub(crate) mod pg_testkit;
 pub mod rsi_rerun;
 #[cfg(test)]
 mod rsi_tests;

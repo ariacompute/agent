@@ -36,6 +36,22 @@ fn io(e: sqlx::Error) -> SeamError {
     SeamError::Io(format!("postgres: {e}"))
 }
 
+// Cold path: keep it out of the hot `promote` body.
+#[inline(never)]
+fn insert_error(e: sqlx::Error, key: &str, revision: i64) -> SeamError {
+    // A concurrent promotion that already claimed this revision trips the
+    // unique index `(principal_id, domain, key, revision)` and must be reported
+    // as a conflict; everything else is storage. The mapping lives here (not
+    // inline in `promote`) so the branch can be exercised with a fabricated
+    // `DatabaseError`.
+    match &e {
+        sqlx::Error::Database(db) if db.is_unique_violation() => SeamError::Conflict(format!(
+            "playbook {key} revision {revision} was published concurrently"
+        )),
+        _ => io(e),
+    }
+}
+
 fn store_io(e: sqlx::Error) -> AppError {
     AppError::Db(e)
 }
@@ -336,16 +352,8 @@ impl PlaybookStore for PgStore {
         .bind(updated_at_ms)
         .execute(&mut *tx)
         .await;
-        match insert {
-            Ok(_) => {}
-            // A concurrent promotion inserted the same revision first.
-            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-                return Err(SeamError::Conflict(format!(
-                    "playbook {} revision {revision} was published concurrently",
-                    candidate.key
-                )))
-            }
-            Err(e) => return Err(io(e)),
+        if let Err(e) = insert {
+            return Err(insert_error(e, &candidate.key, revision));
         }
 
         sqlx::query("DELETE FROM rsi_proposals WHERE id = $1")
@@ -568,5 +576,409 @@ mod tests {
             decode_store::<Vec<Evidence>>("{", "evidence"),
             Err(AppError::Core(_))
         ));
+    }
+
+    // ---------------------------------------------------------------- DB tests
+
+    use agent_core::session::insight::Pathology;
+
+    async fn store() -> Option<PgStore> {
+        crate::pg_testkit::maybe_pool().await.map(PgStore::new)
+    }
+
+    /// An admin list reads *every* tenant, so the row a test deliberately
+    /// corrupts must not exist while another test is listing. Both sides take
+    /// this lock instead of relying on scheduling luck.
+    static CORRUPTION_WINDOW: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn scope() -> RsiScope {
+        RsiScope::new(format!("rsi-{}", uuid::Uuid::new_v4().simple()), "support")
+    }
+
+    fn candidate(scope: &RsiScope, proposal_id: &str, key: &str) -> PlaybookCandidate {
+        PlaybookCandidate {
+            proposal_id: proposal_id.into(),
+            origin: scope.clone(),
+            scope: scope.clone(),
+            key: key.into(),
+            title: "Retry with a backoff".into(),
+            body: "When a tool fails twice, wait 500ms before the third attempt.".into(),
+            score: 60,
+            baseline: 40,
+            evidence: vec![Evidence {
+                seq: 3,
+                turn_id: Some("turn-1".into()),
+                tool: Some("shell".into()),
+                detail: "tool_error".into(),
+            }],
+            adaptation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn proposals_promote_into_versioned_playbooks() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let scope = scope();
+        let first = candidate(
+            &scope,
+            &format!("p-{}", uuid::Uuid::new_v4()),
+            "retry_storm:shell",
+        );
+        let id = first.proposal_id.clone();
+
+        let submitted = store.submit(first.clone()).await.expect("submit");
+        assert_eq!(submitted.pathology, "retry_storm");
+        assert_eq!(submitted.tool.as_deref(), Some("shell"));
+        // Re-submitting the same id is a retry, not a second row.
+        store.submit(first.clone()).await.expect("resubmit");
+
+        let pending = store.pending(&scope).await.expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+
+        let promoted = store.promote(&id, 0).await.expect("promote r1");
+        assert_eq!(promoted.revision, 1);
+        assert_eq!(promoted.key, "retry_storm:shell");
+        assert!(store.pending(&scope).await.expect("pending").is_empty());
+
+        let current = store
+            .current(&scope, "retry_storm:shell")
+            .await
+            .expect("current")
+            .expect("playbook");
+        assert_eq!(current.revision, 1);
+
+        // A proposal whose expected revision is stale is refused and stays pending.
+        let second = candidate(
+            &scope,
+            &format!("p-{}", uuid::Uuid::new_v4()),
+            "retry_storm:shell",
+        );
+        let second_id = second.proposal_id.clone();
+        store.submit(second).await.expect("submit second");
+        match store.promote(&second_id, 0).await {
+            Err(SeamError::Conflict(message)) => assert!(message.contains("expected 0")),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        let promoted = store.promote(&second_id, 1).await.expect("promote r2");
+        assert_eq!(promoted.revision, 2);
+        assert_eq!(
+            store
+                .list_versions(&scope, "retry_storm:shell")
+                .await
+                .expect("versions")
+                .len(),
+            2
+        );
+
+        assert!(matches!(
+            store.promote("ghost", 0).await,
+            Err(SeamError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.discard("ghost").await,
+            Err(SeamError::NotFound(_))
+        ));
+        assert!(store
+            .current(&scope, "never-published")
+            .await
+            .expect("current")
+            .is_none());
+
+        // Discarding deletes the pending row and hands it back.
+        let third = candidate(
+            &scope,
+            &format!("p-{}", uuid::Uuid::new_v4()),
+            "retry_storm",
+        );
+        let third_id = third.proposal_id.clone();
+        store.submit(third).await.expect("submit third");
+        let discarded = store.discard(&third_id).await.expect("discard");
+        assert_eq!(discarded.id, third_id);
+        // A key without a tool keeps `tool = None`.
+        assert_eq!(discarded.tool, None);
+        assert!(store.pending(&scope).await.expect("pending").is_empty());
+    }
+
+    /// Cross-tenant promotion without an adaptation record never reaches SQL.
+    #[tokio::test]
+    async fn an_unadapted_cross_tenant_proposal_is_refused() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let scope = scope();
+        let mut cross = candidate(
+            &scope,
+            &format!("p-{}", uuid::Uuid::new_v4()),
+            "retry_storm",
+        );
+        cross.origin = RsiScope::new("another-tenant", "billing");
+        assert!(matches!(
+            store.submit(cross.clone()).await,
+            Err(SeamError::Unadapted(_))
+        ));
+
+        // With an adaptation record the same candidate is accepted.
+        cross.adaptation = Some(agent_core::seams::Adaptation {
+            from_principal: "another-tenant".into(),
+            from_domain: "billing".into(),
+            to_principal: scope.principal.clone(),
+            to_domain: scope.domain.clone(),
+            rewritten: vec!["threshold".into()],
+            rationale: "the support queue uses the same thresholds".into(),
+        });
+        store.submit(cross).await.expect("adapted submit");
+    }
+
+    /// Rows written by an older binary must surface as seam errors, not panics.
+    #[tokio::test]
+    async fn corrupt_proposal_and_playbook_rows_surface_as_seam_errors() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let scope = scope();
+        let id = format!("p-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO rsi_proposals (id, principal_id, domain, key, title, body, score, \
+                baseline, evidence, scope, origin, adaptation, created_at_ms) \
+             VALUES ($1, $2, $3, 'k', 't', 'b', 60, 40, '[]', '{oops', '{}', NULL, 1)",
+        )
+        .bind(&id)
+        .bind(&scope.principal)
+        .bind(&scope.domain)
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt proposal");
+
+        assert!(matches!(
+            store.pending(&scope).await,
+            Err(SeamError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.promote(&id, 0).await,
+            Err(SeamError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.discard(&id).await,
+            Err(SeamError::Invalid(_))
+        ));
+
+        // A corrupt adaptation column takes the same route.
+        let adapted = format!("p-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO rsi_proposals (id, principal_id, domain, key, title, body, score, \
+                baseline, evidence, scope, origin, adaptation, created_at_ms) \
+             VALUES ($1, $2, $3, 'k', 't', 'b', 60, 40, '[]', '{}', '{}', '{oops', 1)",
+        )
+        .bind(&adapted)
+        .bind(&scope.principal)
+        .bind(&scope.domain)
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt adaptation");
+        assert!(matches!(
+            store.pending(&scope).await,
+            Err(SeamError::Invalid(_))
+        ));
+
+        // The same for a published playbook.
+        sqlx::query(
+            "INSERT INTO rsi_playbooks (id, principal_id, domain, key, revision, title, body, \
+                score, source_proposal, scope, origin, adaptation, updated_at_ms) \
+             VALUES ($1, $2, $3, 'retry_storm:shell', 1, 't', 'b', 60, 'p', '{oops', '{}', NULL, 1)",
+        )
+        .bind(format!("pb-{}", uuid::Uuid::new_v4()))
+        .bind(&scope.principal)
+        .bind(&scope.domain)
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt playbook");
+        assert!(matches!(
+            store.current(&scope, "retry_storm:shell").await,
+            Err(SeamError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.list_versions(&scope, "retry_storm:shell").await,
+            Err(SeamError::Invalid(_))
+        ));
+    }
+
+    fn principal(id: &str, kind: PrincipalKind) -> Principal {
+        Principal {
+            id: id.to_string(),
+            kind,
+            scopes: crate::auth::ApiKeyScopes::read_write(),
+        }
+    }
+
+    fn report(principal_id: &str) -> ReportRow {
+        ReportRow {
+            id: format!("rep-{}", uuid::Uuid::new_v4()),
+            principal_id: principal_id.to_string(),
+            session: "sess-1".into(),
+            score: 55,
+            truncated: false,
+            findings: vec![Finding {
+                pathology: Pathology::RetryStorm,
+                tool: Some("shell".into()),
+                occurrences: 3,
+                evidence: vec![Evidence {
+                    seq: 4,
+                    turn_id: None,
+                    tool: Some("shell".into()),
+                    detail: "retry_storm".into(),
+                }],
+            }],
+            created_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_are_tenant_scoped_and_decode_their_findings() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let tenant = format!("rsi-{}", uuid::Uuid::new_v4().simple());
+        let row = report(&tenant);
+        store.insert_report(&row).await.expect("insert");
+
+        let user = principal(&tenant, PrincipalKind::User);
+        let mine = store.list_reports(&user, 10).await.expect("list");
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].findings, row.findings);
+        assert_eq!(
+            store.get_report(&user, &row.id).await.expect("get").id,
+            row.id
+        );
+
+        // Another tenant sees neither the list entry nor the row.
+        let other = principal("someone-else", PrincipalKind::User);
+        assert!(store
+            .list_reports(&other, 10)
+            .await
+            .expect("list")
+            .is_empty());
+        assert!(matches!(
+            store.get_report(&other, &row.id).await,
+            Err(AppError::NotFound)
+        ));
+        assert!(matches!(
+            store.get_report(&user, "ghost").await,
+            Err(AppError::NotFound)
+        ));
+
+        // Admins read across tenants (no corrupted row may exist right now).
+        let _guard = CORRUPTION_WINDOW.lock().await;
+        let admin = principal("root", PrincipalKind::Admin);
+        assert!(store
+            .list_reports(&admin, 10)
+            .await
+            .expect("admin list")
+            .iter()
+            .any(|r| r.id == row.id));
+        assert_eq!(
+            store.get_report(&admin, &row.id).await.expect("get").id,
+            row.id
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_findings_are_a_config_error() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let _guard = CORRUPTION_WINDOW.lock().await;
+        let tenant = format!("rsi-{}", uuid::Uuid::new_v4().simple());
+        let row = report(&tenant);
+        store.insert_report(&row).await.expect("insert");
+        sqlx::query("UPDATE rsi_reports SET findings = '{oops' WHERE id = $1")
+            .bind(&row.id)
+            .execute(store.pool())
+            .await
+            .expect("corrupt findings");
+        let user = principal(&tenant, PrincipalKind::User);
+        assert!(matches!(
+            store.get_report(&user, &row.id).await,
+            Err(AppError::Core(_))
+        ));
+        assert!(matches!(
+            store.list_reports(&user, 10).await,
+            Err(AppError::Core(_))
+        ));
+        // Leave the table clean for the admin list above.
+        sqlx::query("DELETE FROM rsi_reports WHERE id = $1")
+            .bind(&row.id)
+            .execute(store.pool())
+            .await
+            .expect("clean up");
+    }
+
+    #[tokio::test]
+    async fn rerun_receipts_are_insert_only() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let row = RerunRow {
+            id: format!("rerun-{}", uuid::Uuid::new_v4()),
+            principal_id: format!("rsi-{}", uuid::Uuid::new_v4().simple()),
+            domain: "support".into(),
+            proposal_id: "p1".into(),
+            key: "retry_storm:shell".into(),
+            baseline: 40,
+            score: 60,
+            verdict: "passed".into(),
+            prompt_tokens: 120,
+            completion_tokens: 30,
+            // Wider than a Postgres INTEGER: stored as I32::MAX, never a panic.
+            steps: u32::MAX,
+            tool_calls: 0,
+            duration_ms: 900,
+            note: String::new(),
+            created_at_ms: 1_700_000_000_000,
+        };
+        store.insert_rerun(&row).await.expect("insert");
+        // The receipt is never amended: a second insert with the same id fails.
+        assert!(store.insert_rerun(&row).await.is_err());
+    }
+
+    /// A concurrent promotion that wins the unique index must read as a
+    /// conflict. The branch cannot be produced deterministically against a real
+    /// server, so the mapping is exercised with a fabricated `DatabaseError`.
+    #[test]
+    fn a_unique_violation_is_reported_as_a_conflict() {
+        #[derive(Debug)]
+        struct Duplicate;
+
+        impl std::fmt::Display for Duplicate {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("duplicate key value violates unique constraint")
+            }
+        }
+
+        impl std::error::Error for Duplicate {}
+
+        impl sqlx::error::DatabaseError for Duplicate {
+            fn message(&self) -> &str {
+                "duplicate key value violates unique constraint"
+            }
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::UniqueViolation
+            }
+        }
+
+        let conflict = insert_error(
+            sqlx::Error::Database(Box::new(Duplicate)),
+            "retry_storm:shell",
+            3,
+        );
+        match conflict {
+            SeamError::Conflict(message) => {
+                assert!(message.contains("revision 3"));
+                assert!(message.contains("concurrently"));
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        let other = insert_error(sqlx::Error::RowNotFound, "k", 1);
+        assert!(matches!(other, SeamError::Io(_)));
     }
 }

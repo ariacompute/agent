@@ -277,4 +277,237 @@ mod tests {
         assert_eq!(back, tasks);
         assert!(tasks_from_json("{not json", "team-1").is_err());
     }
+
+    use crate::store::PgStore;
+
+    /// One store over the shared fixture, or an early return when this
+    /// environment has no database.
+    async fn store() -> Option<PgStore> {
+        crate::pg_testkit::maybe_pool().await.map(PgStore::new)
+    }
+
+    fn owner() -> String {
+        format!("owner-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    #[tokio::test]
+    async fn teams_round_trip_and_refuse_a_foreign_update() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let owner = owner();
+        let team = AgentTeam::new(
+            &owner,
+            "incident",
+            vec![TeamTask::new("triage", "read the alert")],
+        )
+        .expect("team");
+        let created = store.create(team).await.expect("create");
+        // An empty id is minted by the store, never by the caller.
+        assert!(created.id.starts_with("team-"));
+
+        let fetched = store.get(&owner, &created.id).await.expect("get");
+        assert_eq!(fetched.name, "incident");
+        assert_eq!(fetched.tasks.len(), 1);
+        assert_eq!(fetched.owner, owner);
+
+        let mut renamed = fetched.clone();
+        renamed.name = "incident v2".into();
+        let updated = store.update(renamed.clone()).await.expect("update");
+        assert_eq!(updated.name, "incident v2");
+        assert_eq!(
+            TeamStore::list(&store, &owner).await.expect("list").len(),
+            1
+        );
+
+        // Unknown and foreign ids are one answer: not yours.
+        assert!(matches!(
+            store.get(&owner, "ghost").await,
+            Err(SeamError::NotFound(_))
+        ));
+        let ghost = AgentTeam {
+            id: "ghost".into(),
+            ..renamed.clone()
+        };
+        assert!(matches!(
+            store.update(ghost).await,
+            Err(SeamError::NotFound(_))
+        ));
+        let foreign = store.update(AgentTeam {
+            owner: "someone-else".into(),
+            ..created
+        });
+        assert!(matches!(foreign.await, Err(SeamError::NotFound(_))));
+
+        // A duplicate id is a storage error, not a silent overwrite.
+        let dup = AgentTeam::new(&owner, "dup", vec![TeamTask::new("t", "x")]).expect("team");
+        let dup = store.create(dup).await.expect("first");
+        assert!(store.create(dup).await.is_err());
+    }
+
+    /// A row written by an older schema (tasks is free text) must surface as a
+    /// seam error instead of panicking.
+    #[tokio::test]
+    async fn teams_report_unreadable_task_json() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let owner = owner();
+        let id = format!("team-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO agent_teams (id, principal_id, name, tasks) VALUES ($1, $2, $3, '{oops')",
+        )
+        .bind(&id)
+        .bind(&owner)
+        .bind("broken")
+        .execute(store.pool())
+        .await
+        .expect("insert raw row");
+
+        assert!(matches!(
+            store.get(&owner, &id).await,
+            Err(SeamError::Io(_))
+        ));
+        assert!(matches!(
+            TeamStore::list(&store, &owner).await,
+            Err(SeamError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn schedules_compute_the_next_run_and_respect_ownership() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let owner = owner();
+
+        let interval = store
+            .upsert(ScheduleEntry::every(&owner, "poll", 30))
+            .await
+            .expect("upsert interval");
+        assert!(interval.id.starts_with("job-"));
+        assert!(interval.next_run_ms.is_some());
+
+        let at = aria_agent_orchestrator::now_ms() + 60_000;
+        let once = store
+            .upsert(ScheduleEntry::at(&owner, "remind", at))
+            .await
+            .expect("upsert one-shot");
+        assert_eq!(once.next_run_ms, Some(at));
+
+        let mut paused = ScheduleEntry::every(&owner, "paused", 60);
+        paused.enabled = false;
+        let paused = store.upsert(paused).await.expect("upsert paused");
+        assert_eq!(paused.next_run_ms, None, "a disabled job has no cursor");
+
+        assert_eq!(
+            ScheduleSeam::list(&store, &owner)
+                .await
+                .expect("list")
+                .len(),
+            3
+        );
+
+        // Both triggers at once is rejected before any SQL runs.
+        let mut both = ScheduleEntry::every(&owner, "bad", 10);
+        both.at_ms = Some(at);
+        assert!(matches!(
+            store.upsert(both).await,
+            Err(SeamError::Invalid(_))
+        ));
+
+        // Removing someone else's job is denied; removing an unknown id is not
+        // an error, just `false`.
+        let other = owner.clone() + "-other";
+        let foreign = store
+            .upsert(ScheduleEntry::every(&other, "theirs", 5))
+            .await
+            .expect("foreign job");
+        assert!(matches!(
+            store.remove(&owner, &foreign.id).await,
+            Err(SeamError::Denied(_))
+        ));
+        assert!(!store.remove(&owner, "ghost").await.expect("remove ghost"));
+
+        // Re-using a foreign id must not hijack the row (ON CONFLICT ... WHERE).
+        let mut hijack = ScheduleEntry::every(&owner, "mine now", 5);
+        hijack.id = foreign.id.clone();
+        assert!(matches!(
+            store.upsert(hijack).await,
+            Err(SeamError::Denied(_))
+        ));
+
+        assert!(store.remove(&owner, &interval.id).await.expect("remove"));
+        assert_eq!(
+            ScheduleSeam::list(&store, &owner)
+                .await
+                .expect("list")
+                .len(),
+            2
+        );
+    }
+
+    /// A payload that is not JSON decodes as `null` instead of failing the read.
+    #[tokio::test]
+    async fn schedules_decode_a_broken_payload_as_null() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let owner = owner();
+        let job = store
+            .upsert(ScheduleEntry::every(&owner, "poll", 30))
+            .await
+            .expect("upsert");
+        sqlx::query("UPDATE scheduled_jobs SET payload = '{oops' WHERE id = $1")
+            .bind(&job.id)
+            .execute(store.pool())
+            .await
+            .expect("corrupt payload");
+        let rows = ScheduleSeam::list(&store, &owner).await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].payload, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn titles_are_upserted_per_tenant() {
+        let store = crate::pg_testkit::db_or_skip!(store().await);
+        let principal = crate::auth::Principal {
+            id: owner(),
+            kind: crate::auth::PrincipalKind::User,
+            scopes: crate::auth::ApiKeyScopes::read_write(),
+        };
+        let session = format!("sess-{}", uuid::Uuid::new_v4().simple());
+        let row = TitleRow {
+            session_id: session.clone(),
+            title: "first prompt".into(),
+            source: "first_prompt".into(),
+            updated_at: 1_700_000_000_000,
+        };
+        store.put_title(&principal, &row).await.expect("put");
+
+        let stored = store
+            .get_title(&principal, &session)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.title, "first prompt");
+        assert_eq!(stored.source, "first_prompt");
+        assert_eq!(stored.session_id, session);
+
+        // A provider override replaces the deterministic title in place.
+        let overridden = TitleRow {
+            title: "provider title".into(),
+            source: "provider".into(),
+            updated_at: 1_700_000_001_000,
+            ..row
+        };
+        store
+            .put_title(&principal, &overridden)
+            .await
+            .expect("overwrite");
+        let stored = store
+            .get_title(&principal, &session)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.source, "provider");
+
+        assert!(store
+            .get_title(&principal, "ghost")
+            .await
+            .expect("get ghost")
+            .is_none());
+    }
 }

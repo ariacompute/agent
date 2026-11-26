@@ -137,3 +137,36 @@ jobs:
           name: lcov
           path: lcov.info
           if-no-files-found: ignore
+
+  postgres:
+    name: Postgres backends (real database)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector is required by `context/pg.rs` (`CREATE EXTENSION vector`).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aria
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aria"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # These tests early-return without DATABASE_URL, so the job that proves
+      # the pg backends work is the one that sets it. A silent skip is not a
+      # pass: the run below must report the DB tests as *passed*.
+      - name: cargo test (DATABASE_URL set)
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/aria
+        run: cargo test -p aria-agent-cloud --lib -- --nocapture

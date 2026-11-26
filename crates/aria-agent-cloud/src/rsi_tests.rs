@@ -13,7 +13,7 @@ use aria_agent_rsi::{DeterministicReflection, MemoryPlaybooks, RsiLedger, RsiSwe
 use axum::http::StatusCode;
 use serde_json::json;
 
-use crate::api_tests::{harness, harness_with_rsi, send, Harness, ADMIN_KEY};
+use crate::api_tests::{env_admin, harness, harness_with_rsi, send, Harness, ADMIN_KEY};
 use crate::app::RsiState;
 use crate::auth::Principal;
 use crate::store::{MemoryStore, RsiStore, StoreReportSink};
@@ -127,6 +127,7 @@ fn adaptation(to_domain: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn rsi_is_off_by_default_and_says_so() {
+    let _env = env_admin().await;
     let h = harness();
     let (status, body) = send(&h.app, "GET", "/v1/rsi/status", Some(ADMIN_KEY), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -157,6 +158,7 @@ async fn rsi_is_off_by_default_and_says_so() {
 
 #[tokio::test]
 async fn the_auto_gate_publishes_and_every_artifact_is_queryable() {
+    let _env = env_admin().await;
     let fx = enabled(true);
     let (status, body) = send(
         &fx.harness.app,
@@ -262,6 +264,7 @@ async fn the_auto_gate_publishes_and_every_artifact_is_queryable() {
 
 #[tokio::test]
 async fn the_human_gate_needs_a_promote_and_guards_the_revision() {
+    let _env = env_admin().await;
     let fx = enabled(false);
     let (status, body) = send(
         &fx.harness.app,
@@ -388,6 +391,7 @@ async fn the_human_gate_needs_a_promote_and_guards_the_revision() {
 
 #[tokio::test]
 async fn cross_tenant_adaptation_must_be_complete_and_privileged() {
+    let _env = env_admin().await;
     let fx = enabled(false);
     fx.playbooks.submit(candidate("p1")).await.unwrap();
     fx.playbooks.promote("p1", 0).await.unwrap();
@@ -455,6 +459,7 @@ async fn cross_tenant_adaptation_must_be_complete_and_privileged() {
 
 #[tokio::test]
 async fn a_sweep_for_an_unknown_session_is_a_no_op() {
+    let _env = env_admin().await;
     let fx = enabled(false);
     let (status, body) = send(
         &fx.harness.app,

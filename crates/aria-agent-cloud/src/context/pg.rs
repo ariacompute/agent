@@ -518,26 +518,11 @@ mod tests {
         assert_eq!(PgContextStore::candidate_limit(0), 20);
     }
 
-    /// DB-gated: skipped unless `DATABASE_URL` is set.
-    ///
-    /// Requires the `vector` extension (`pgvector/pgvector:pg16`).
-    async fn maybe_pool() -> Option<PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("DATABASE_URL is set but unreachable");
-        ensure_schema(&pool).await.expect("context schema");
-        Some(pool)
-    }
-
     #[tokio::test]
     async fn pg_store_roundtrip_when_database_url_is_set() {
-        let Some(pool) = maybe_pool().await else {
-            eprintln!("skip: DATABASE_URL not set");
-            return;
-        };
+        // DB-gated: the shared fixture prints one skip line when no database is
+        // configured and every test returns on this same line.
+        let pool = crate::pg_testkit::db_or_skip!(crate::pg_testkit::maybe_pool().await);
         // Use a unique tenant/session so repeated runs never collide.
         let tenant = format!("test-{}", uuid::Uuid::new_v4());
         let session = format!("s-{}", uuid::Uuid::new_v4());
@@ -574,10 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn pg_relations_roundtrip_when_database_url_is_set() {
-        let Some(pool) = maybe_pool().await else {
-            eprintln!("skip: DATABASE_URL not set");
-            return;
-        };
+        let pool = crate::pg_testkit::db_or_skip!(crate::pg_testkit::maybe_pool().await);
         let tenant = format!("test-{}", uuid::Uuid::new_v4());
         let session = format!("s-{}", uuid::Uuid::new_v4());
         let store = PgContextStore::new(pool, tenant);
@@ -666,10 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn pg_store_isolates_tenants_and_sessions() {
-        let Some(pool) = maybe_pool().await else {
-            eprintln!("skip: DATABASE_URL not set");
-            return;
-        };
+        let pool = crate::pg_testkit::db_or_skip!(crate::pg_testkit::maybe_pool().await);
         let session = format!("s-{}", uuid::Uuid::new_v4());
         let a = PgContextStore::new(pool.clone(), format!("tenant-a-{}", uuid::Uuid::new_v4()));
         let b = PgContextStore::new(pool, format!("tenant-b-{}", uuid::Uuid::new_v4()));
@@ -700,10 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn pg_relations_isolated_by_tenant() {
-        let Some(pool) = maybe_pool().await else {
-            eprintln!("skip: DATABASE_URL not set");
-            return;
-        };
+        let pool = crate::pg_testkit::db_or_skip!(crate::pg_testkit::maybe_pool().await);
         let session = format!("s-{}", uuid::Uuid::new_v4());
         let a = PgContextStore::new(
             pool.clone(),
