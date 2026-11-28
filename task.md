@@ -692,11 +692,40 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       `a_client_that_cannot_be_built_is_reported_not_swallowed` supplies the
       `Err` and pins `a2a push client: {e}`, while the `Ok` arm still runs through
       the real `new()` — a silent no-op would turn every push target into a lie.
-- [x] Result: measured lines **37234 → 37240** and covered **37218 → 37225** (the
-      new `build` lines plus the mapping that used to be excluded); opt-outs
-      **1 → 0**, artifacts stay at **15**, and `./scripts/coverage.sh` is still
-      **100.00% of included lines** (37225/37225). `docs/coverage.md` lists the
+- [x] Result: measured lines **37234 → 37240** and covered **37218 → 37227** (the
+      new `build` lines, the mapping that used to be excluded, and the two
+      `cancel()` delimiters the extended E2E suite made report hits); opt-outs
+      **1 → 0**, artifacts **15 → 13**, and `./scripts/coverage.sh` is still
+      **100.00% of included lines** (37227/37227). `docs/coverage.md` lists the
       artifacts and the constructor seam.
+
+## E2E hardening (after M21)
+- [x] The A2A surface was only proven in-process: `a2a_tests.rs` drives
+      `build_router` through `tower::oneshot`, so every answer was a collected
+      body. No A2A frame had crossed a real socket, the SSE content type and
+      chunk framing were never observed, and a cancel could only be aimed at a
+      task the same test had just started. The harness now has `a2a_harness`,
+      which seeds one default agent owned by the principal the caller resolves
+      to (the bootstrap admin when a key is configured, the `default` tenant in
+      open mode) and switches the surface on — so the same assertions run in
+      both auth modes.
+- [x] New scenarios (18 → 22): public discovery (well-known card, both aliases,
+      per-agent card, machine-readable 404), auth and scope gates (a read-only
+      key cannot start a run, a write-only key cannot read it back or follow the
+      replay), tenant isolation (`-32004` for the agent, `-32001` for the task),
+      the A2A-disabled deployment, `message/send` with the console mirror (session
+      items and the finished turn), `tasks/get` aliases and `historyLength`, push
+      set/get plus `-32006`/`-32602`, cancel of a finished task (`-32002`),
+      envelope errors (`-32700`/`-32600` at 400), SSE streaming (content-type,
+      legacy `event:` names, terminal frame, no sentinel), replay (no envelope,
+      `since` past the end, 400/404), and a live cancel over two sockets against a
+      gated model that cannot finish on its own.
+- [x] `just e2e` is 22 scenarios in both modes (`cargo test -p agent-tests
+      --test e2e_http` with and without `AGENT_CLOUD_API_KEY`); the Postgres and
+      Docker scenarios still print a skip reason when their dependency is absent.
+      Integration test binaries stay outside the coverage report, and the gate
+      re-run after them is still 100% of included lines (37227/37227, 13
+      closing-delimiter artifacts, no opt-outs).
 
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process

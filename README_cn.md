@@ -482,7 +482,7 @@ DSH_BIN="$PWD/.venv-dsh/bin/dsh" just --dotenv-path .env dsh-e2e
 若两者都不用，测试会打印 `skip: GATEWAY_API_KEY is not set` 并返回 `ok` ——
 这是跳过，不是通过。
 
-`just e2e` 将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧（含终止 `agent.turn.failed` 帧）、工具调用、租户隔离、记忆、编排、子代理只读面、已识别但未实现的 `501` 资源、RSI 只读面与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
+`just e2e` 将生产 axum router 绑定到临时回环端口，用真实 HTTP 客户端驱动 beta Agents API，覆盖 agent/session/turn 生命周期、SSE 帧（含终止 `agent.turn.failed` 帧）、工具调用、租户隔离、记忆、编排、子代理只读面、已识别但未实现的 `501` 资源、RSI 只读面、A2A 面（公开发现卡片、带推送配置的 JSON-RPC send/get/cancel、作用域与租户闸门、SSE 流式与重放，以及跨两条连接取消运行中的任务）与异常路径。两个可选场景在缺少依赖时打印跳过原因，不会伪造通过：
 
 - `DATABASE_URL` —— 通过两个独立构建的 router 验证 Postgres + pgvector 存储；未设置或不可达时跳过。
 - `ARIA_E2E_DOCKER=1` —— 经流式路由在真实容器中执行 `shell` 工具；需 Docker 守护进程可达且本地已有 `alpine:latest` 镜像，否则跳过。

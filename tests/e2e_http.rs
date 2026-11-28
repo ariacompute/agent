@@ -23,8 +23,8 @@ use aria_agent_cloud::context::{ensure_pgvector, PgContextStore};
 use aria_agent_cloud::governance::{global_store, usage_record};
 use aria_agent_cloud::store::PgStore;
 use aria_agent_cloud::{
-    build_router, hash_key, ApiKeyStore, AppState, KeyCache, MakeModel, MakeSandbox, MemoryStore,
-    NewApiKeyRow, Principal,
+    agent_from_request, build_router, hash_key, AgentStore, ApiKeyStore, AppState, KeyCache,
+    MakeModel, MakeSandbox, MemoryStore, NewApiKeyRow, Principal,
 };
 use axum::Router;
 use reqwest::{Client as HttpClient, Method, StatusCode};
@@ -76,6 +76,20 @@ impl Api {
         token: Option<&str>,
         body: Option<Value>,
     ) -> (StatusCode, String) {
+        let (status, _, text) = self.call_with_type(method, path, token, body).await;
+        (status, text)
+    }
+
+    /// Like `call`, but keeps the response `content-type`: an SSE route must be
+    /// distinguishable from a JSON error body, and the socket is the only place
+    /// that framing is produced.
+    async fn call_with_type(
+        &self,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, Option<String>, String) {
         let mut req = self.http.request(method, format!("{}{}", self.base, path));
         if let Some(t) = token {
             req = req.bearer_auth(t);
@@ -85,7 +99,31 @@ impl Api {
         }
         let resp = req.send().await.expect("request reaches the e2e server");
         let status = resp.status();
-        (status, resp.text().await.expect("response body"))
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        (
+            status,
+            content_type,
+            resp.text().await.expect("response body"),
+        )
+    }
+
+    /// POST a hand-written body, so a malformed envelope can be sent verbatim.
+    async fn post_raw(&self, path: &str, token: Option<&str>, body: &str) -> (StatusCode, Value) {
+        let mut req = self
+            .http
+            .post(format!("{}{}", self.base, path))
+            .body(body.to_string());
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.expect("request reaches the e2e server");
+        let status = resp.status();
+        let text = resp.text().await.expect("response body");
+        (status, serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
     async fn send(
@@ -197,6 +235,29 @@ impl ModelClient for ToolCallModel {
     }
 }
 
+/// Blocks inside the model call until the test releases it, so a cancellation
+/// is guaranteed to land while the task is still working.
+struct GatedModel(Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl ModelClient for GatedModel {
+    async fn complete(&self, _req: &ModelRequest) -> Result<ModelResponse, agent_core::CoreError> {
+        self.0.notified().await;
+        Ok(ModelResponse {
+            text: "released".into(),
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _req: &ModelRequest,
+        _tools: &[agent_core::Tool],
+    ) -> Result<ModelTurn, agent_core::CoreError> {
+        self.0.notified().await;
+        Ok(ModelTurn::reply("released"))
+    }
+}
+
 /// Fails every completion, so the socket path must end the stream itself.
 struct FailingModel;
 
@@ -233,7 +294,63 @@ struct MemoryHarness {
 }
 
 async fn memory_harness(model: MakeModel, sandbox: MakeSandbox) -> MemoryHarness {
+    memory_harness_with(model, sandbox, None).await
+}
+
+/// The default agent the A2A surface serves on `/a2a`.
+const A2A_AGENT_ID: &str = "a2a-default";
+const A2A_AGENT_NAME: &str = "e2e-a2a";
+
+/// The principal the seeded agent belongs to: the bootstrap admin when a key is
+/// configured, the open-mode tenant otherwise.
+fn a2a_owner() -> Principal {
+    if bootstrap_token().is_some() {
+        Principal::admin()
+    } else {
+        Principal::default_user()
+    }
+}
+
+/// The same harness with the A2A surface on and one seeded default agent.
+async fn a2a_harness(model: MakeModel, sandbox: MakeSandbox) -> MemoryHarness {
+    memory_harness_with(model, sandbox, Some(A2A_AGENT_ID)).await
+}
+
+/// `default_agent`: when set, the A2A surface is enabled and that agent is
+/// seeded for the principal the caller resolves to. Cards are public and the
+/// card lookup uses the admin, but every JSON-RPC call resolves the agent as
+/// the caller — so the row has to belong to that tenant.
+async fn memory_harness_with(
+    model: MakeModel,
+    sandbox: MakeSandbox,
+    default_agent: Option<&str>,
+) -> MemoryHarness {
     let store = Arc::new(MemoryStore::new());
+    let mut a2a = aria_agent_cloud::A2aState::disabled();
+    if let Some(agent_id) = default_agent {
+        let agent = agent_from_request(
+            agent_id.to_string(),
+            aria_agent_cloud::types::CreateAgentRequest {
+                name: Some(A2A_AGENT_NAME.into()),
+                ..Default::default()
+            },
+            1_700_000_000_000,
+        )
+        .expect("the seeded A2A agent is well formed");
+        store
+            .insert_agent(&a2a_owner(), &agent)
+            .await
+            .expect("seed the A2A agent");
+        a2a = aria_agent_cloud::A2aState {
+            enabled: true,
+            config: Arc::new(aria_agent_cloud::A2aConfig {
+                default_agent: Some(agent_id.to_string()),
+                public_url: "https://cloud.example.test/".into(),
+                ..Default::default()
+            }),
+            ..aria_agent_cloud::A2aState::disabled()
+        };
+    }
     let contexts = Contexts::default();
     let ctx = contexts.clone();
     let make_context = Arc::new(move |p: &Principal| ctx.store_for(p));
@@ -250,7 +367,7 @@ async fn memory_harness(model: MakeModel, sandbox: MakeSandbox) -> MemoryHarness
         make_context,
         harness: None,
         rsi: aria_agent_cloud::RsiState::disabled(),
-        a2a: aria_agent_cloud::A2aState::disabled(),
+        a2a,
         cancel_harness: None,
     };
     let (api, server) = serve(build_router(state)).await;
@@ -259,6 +376,26 @@ async fn memory_harness(model: MakeModel, sandbox: MakeSandbox) -> MemoryHarness
         store,
         _server: server,
     }
+}
+
+/// One A2A user message, carrying both part discriminators like agenthub does.
+fn a2a_msg(text: &str) -> Value {
+    json!({
+        "kind": "message",
+        "role": "user",
+        "messageId": "m-e2e",
+        "parts": [{"kind": "text", "type": "text", "text": text}],
+    })
+}
+
+/// A JSON-RPC envelope.
+fn rpc_call(id: u64, method: &str, params: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+}
+
+/// The `error.code` of a method-level failure (they travel inside a 200).
+fn rpc_error(body: &Value) -> i64 {
+    body["error"]["code"].as_i64().unwrap_or_default()
 }
 
 fn stub_model() -> MakeModel {
@@ -2070,4 +2207,661 @@ async fn unknown_routes_and_methods_answer_4xx_over_a_real_socket() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+// ------------------------------------------------------------------- A2A
+//
+// The A2A surface is a second protocol on the same server: public discovery
+// cards, a JSON-RPC endpoint behind the auth layer, and two SSE shapes (a
+// streaming call and a replay). `a2a_tests.rs` pins the semantics in-process;
+// these drive the same routes over a real socket, where chunked framing, the
+// auth middleware and the console mirror all take part.
+
+#[tokio::test]
+async fn a2a_cards_scope_gates_and_tenancy_over_a_real_socket() {
+    let h = a2a_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+
+    // Discovery is public: an orchestrator must find the agent before it has a
+    // key. The card also has to stay free of deployment internals.
+    let (status, card_text) = h
+        .api
+        .call(Method::GET, "/.well-known/agent-card.json", None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{card_text}");
+    let card: Value = serde_json::from_str(&card_text).expect("the card is JSON");
+    assert_eq!(card["protocolVersion"], "1.0.0");
+    assert_eq!(card["name"], A2A_AGENT_NAME);
+    assert_eq!(card["url"], "https://cloud.example.test/a2a");
+    assert_eq!(card["capabilities"]["streaming"], true);
+    assert_eq!(card["capabilities"]["pushNotifications"], true);
+    assert_eq!(card["authentication"]["schemes"][0], "bearer");
+    assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
+    for forbidden in ["instructions", "shell", "admin", "sess_"] {
+        assert!(
+            !card_text.contains(forbidden),
+            "{forbidden} leaked into {card_text}"
+        );
+    }
+    // The compatibility aliases answer, and the per-agent card points at that
+    // agent's own endpoint.
+    for path in ["/.well-known/agent.json", "/a2a/agent-card"] {
+        let (status, _) = h.api.call(Method::GET, path, None, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+    let (status, per_agent) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/{A2A_AGENT_ID}/agent-card.json"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{per_agent}");
+    assert_eq!(
+        per_agent["url"],
+        format!("https://cloud.example.test/v1/agents/{A2A_AGENT_ID}/a2a")
+    );
+    let (status, missing) = h
+        .api
+        .send(
+            Method::GET,
+            "/v1/agents/agent-missing/agent-card.json",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["error"]["code"], "agent_not_found");
+
+    // The JSON-RPC route is behind the auth layer; in open mode the same call
+    // answers as the default tenant instead of refusing.
+    let read_call = rpc_call(1, "tasks/get", json!({"id": "task_missing"}));
+    let (status, body) = h
+        .api
+        .send(Method::POST, "/a2a", None, Some(read_call))
+        .await;
+    assert_eq!(
+        status,
+        if auth.is_some() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::OK
+        },
+        "{body}"
+    );
+    if auth.is_none() {
+        assert_eq!(rpc_error(&body), -32001, "{body}");
+    }
+
+    // Scopes belong to the caller, not the method: a read-only key cannot start
+    // a run, a write-only key cannot read one back or follow the replay.
+    let tag = uuid::Uuid::new_v4();
+    let (ro, wo) = (format!("a2a-ro-{tag}"), format!("a2a-wo-{tag}"));
+    issue_key(&h, &ro, &a2a_owner().id, &["read"]).await;
+    issue_key(&h, &wo, &a2a_owner().id, &["write"]).await;
+    let send_call = rpc_call(2, "message/send", json!({"message": a2a_msg("scope gate")}));
+    let (status, body) = h
+        .api
+        .send(Method::POST, "/a2a", Some(&ro), Some(send_call.clone()))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "insufficient_scope");
+    let (status, started) = h
+        .api
+        .send(Method::POST, "/a2a", Some(&wo), Some(send_call))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["result"]["status"]["state"], "completed");
+    let task_id = started["result"]["id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let get_call = rpc_call(3, "tasks/get", json!({"id": task_id}));
+    let (status, body) = h
+        .api
+        .send(Method::POST, "/a2a", Some(&wo), Some(get_call.clone()))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = h
+        .api
+        .send(Method::POST, "/a2a", Some(&ro), Some(get_call))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["id"], task_id);
+    let (status, _) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/a2a/stream?task={task_id}"),
+            Some(&wo),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, replay) = h
+        .api
+        .call(
+            Method::GET,
+            &format!("/a2a/stream?task={task_id}"),
+            Some(&ro),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(replay.contains("event: task_status_update"), "{replay}");
+
+    // Another tenant sees neither the agent nor the task: the answer is the
+    // protocol's machine code, not a hint about what exists.
+    let outsider = format!("a2a-out-{tag}");
+    issue_key(&h, &outsider, &format!("a2a-b-{tag}"), &["read", "write"]).await;
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            Some(&outsider),
+            Some(rpc_call(
+                4,
+                "message/send",
+                json!({"message": a2a_msg("hello")}),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(rpc_error(&body), -32004, "{body}");
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            Some(&outsider),
+            Some(rpc_call(5, "tasks/get", json!({"id": task_id}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rpc_error(&body), -32001, "{body}");
+
+    // A deployment with A2A switched off still mounts the routes, so a probe
+    // gets a reason instead of a router 404.
+    let off = memory_harness(stub_model(), stub_sandbox()).await;
+    let (status, body) = off
+        .api
+        .send(Method::GET, "/.well-known/agent-card.json", None, None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "agent_not_found");
+    let (status, body) = off
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                6,
+                "message/send",
+                json!({"message": a2a_msg("hello")}),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(rpc_error(&body), -32004, "{body}");
+}
+
+#[tokio::test]
+async fn a2a_task_lifecycle_and_console_mirror_over_a_real_socket() {
+    let h = a2a_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let prompt = "ping over a2a";
+
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                1,
+                "message/send",
+                json!({"message": a2a_msg(prompt)}),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    let task = &body["result"];
+    assert_eq!(task["kind"], "task");
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    assert!(task_id.starts_with("task_"), "{task_id}");
+    let context = task["contextId"].as_str().expect("context id").to_string();
+    assert!(context.starts_with("sess_"), "{context}");
+    assert_eq!(task["status"]["state"], "completed");
+    assert_eq!(task["history"][0]["role"], "user");
+    let artifact = &task["artifacts"][0];
+    assert_eq!(artifact["artifactId"], "final");
+    let answer = artifact["parts"][0]["text"].as_str().expect("text part");
+    assert!(answer.contains(prompt), "{answer}");
+    // A part carries both discriminators; agenthub dispatches on `type`.
+    assert_eq!(artifact["parts"][0]["kind"], "text");
+    assert_eq!(artifact["parts"][0]["type"], "text");
+
+    // The run is the console's own session: items and the finished turn are
+    // readable through the OpenAI-shaped routes.
+    let (status, items) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{context}/items"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{items}");
+    let items = items["data"].as_array().expect("items list");
+    assert!(items.iter().any(|i| i["role"] == "user"), "{items:?}");
+    assert!(items.iter().any(|i| i["role"] == "assistant"), "{items:?}");
+    let (status, turns) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{context}/turns"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{turns}");
+    assert_eq!(turns["data"][0]["status"], "completed");
+
+    // `tasks/get` accepts both ids and trims the history on demand.
+    let (status, full) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(2, "tasks/get", json!({"id": task_id}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    assert_eq!(full["result"]["id"], task_id);
+    assert_eq!(full["result"]["status"]["state"], "completed");
+    assert!(!full["result"]["history"].as_array().unwrap().is_empty());
+    let (_, aliased) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(3, "tasks/get", json!({"taskId": task_id}))),
+        )
+        .await;
+    assert_eq!(aliased["result"]["id"], task_id);
+    let (_, trimmed) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                4,
+                "tasks/get",
+                json!({"id": task_id, "historyLength": 0}),
+            )),
+        )
+        .await;
+    assert_eq!(trimmed["result"]["history"], json!([]), "{trimmed}");
+
+    // Push configuration round-trips, and a URL that would smuggle credentials
+    // is refused before it is stored or used.
+    let (status, set) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                5,
+                "tasks/pushNotification/set",
+                json!({
+                    "id": task_id,
+                    "pushNotificationConfig": {"url": "https://hooks.example.test/a2a"},
+                }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["result"]["url"], "https://hooks.example.test/a2a");
+    let (_, got) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                6,
+                "tasks/pushNotification/get",
+                json!({"id": task_id}),
+            )),
+        )
+        .await;
+    assert_eq!(got["result"]["url"], "https://hooks.example.test/a2a");
+
+    // A second task with no hook: `get` answers `-32006`, and a bad URL is
+    // `-32602` on both the push route and `message/send`.
+    let (_, second) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                7,
+                "message/send",
+                json!({"message": a2a_msg("no hook")}),
+            )),
+        )
+        .await;
+    let second_id = second["result"]["id"]
+        .as_str()
+        .expect("second task id")
+        .to_string();
+    let (_, none) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                8,
+                "tasks/pushNotification/get",
+                json!({"id": second_id}),
+            )),
+        )
+        .await;
+    assert_eq!(rpc_error(&none), -32006, "{none}");
+    let (_, bad_push) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                9,
+                "tasks/pushNotification/set",
+                json!({
+                    "id": second_id,
+                    "pushNotificationConfig": {"url": "https://user:pass@hooks.example.test/x"},
+                }),
+            )),
+        )
+        .await;
+    assert_eq!(rpc_error(&bad_push), -32602, "{bad_push}");
+    let (_, bad_send) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                10,
+                "message/send",
+                json!({
+                    "message": a2a_msg("hi"),
+                    "configuration": {"pushNotification": {"url": "ftp://hooks.example.test"}},
+                }),
+            )),
+        )
+        .await;
+    assert_eq!(rpc_error(&bad_send), -32602, "{bad_send}");
+
+    // A task that finished cannot be cancelled, an unknown one is `-32001`, and
+    // an unknown method is `-32601` — all inside a 200 so the code is readable.
+    let (_, cancelled) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(11, "tasks/cancel", json!({"id": task_id}))),
+        )
+        .await;
+    assert_eq!(rpc_error(&cancelled), -32002, "{cancelled}");
+    let (status, unknown) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(12, "tasks/get", json!({"id": "task_missing"}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rpc_error(&unknown), -32001, "{unknown}");
+    let (status, method) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(13, "tasks/teleport", json!({}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rpc_error(&method), -32601, "{method}");
+
+    // Envelope failures are transport-level: 400 with the JSON-RPC code, never
+    // a 200 error body.
+    let (status, parse) = h.api.post_raw("/a2a", auth, "{not json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rpc_error(&parse), -32700, "{parse}");
+    let (status, invalid) = h.api.post_raw("/a2a", auth, r#"{"jsonrpc":"2.0"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rpc_error(&invalid), -32600, "{invalid}");
+}
+
+#[tokio::test]
+async fn a2a_stream_and_replay_frames_over_a_real_socket() {
+    let h = a2a_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+
+    let (status, content_type, text) = h
+        .api
+        .call_with_type(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(
+                7,
+                "message/stream",
+                json!({"message": a2a_msg("stream it")}),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(
+        content_type
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "{content_type:?}"
+    );
+    assert!(!text.contains("[DONE]"), "no sentinel allowed: {text}");
+    let frames = sse_frames(&text);
+    assert!(frames.len() >= 2, "{text}");
+    // Every frame is a JSON-RPC result carrying the request id.
+    for frame in &frames {
+        assert_eq!(frame["jsonrpc"], "2.0");
+        assert_eq!(frame["id"], 7);
+    }
+    assert_eq!(frames[0]["result"]["kind"], "task");
+    let last = frames.last().unwrap();
+    assert_eq!(last["result"]["kind"], "status-update");
+    assert_eq!(last["result"]["final"], true);
+    assert_eq!(last["result"]["status"]["state"], "completed");
+    // The legacy dispatch names travel with the frames.
+    assert!(text.contains("event: task_artifact_update"), "{text}");
+    assert!(text.contains("event: task_status_update"), "{text}");
+    let task_id = frames[0]["result"]["id"]
+        .as_str()
+        .expect("streamed task id")
+        .to_string();
+
+    // The replay endpoint serves the same task without a JSON-RPC envelope and
+    // ends on its own once the terminal frame is out.
+    let (status, content_type, replay) = h
+        .api
+        .call_with_type(
+            Method::GET,
+            &format!("/a2a/stream?task={task_id}"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert!(
+        content_type
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "{content_type:?}"
+    );
+    let replayed = sse_frames(&replay);
+    assert_eq!(replayed[0]["kind"], "task", "{replay}");
+    assert!(
+        replayed.iter().all(|f| f.get("jsonrpc").is_none()),
+        "no envelope on the replay path: {replay}"
+    );
+    assert_eq!(
+        replayed.last().unwrap()["status"]["state"],
+        "completed",
+        "{replay}"
+    );
+    assert_eq!(replayed.last().unwrap()["final"], true, "{replay}");
+
+    // `since` past the end is an empty stream; a missing or unknown task is a
+    // client error with a machine code.
+    let (status, _, empty) = h
+        .api
+        .call_with_type(
+            Method::GET,
+            &format!("/a2a/stream?task={task_id}&since=9999"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sse_frames(&empty).is_empty(), "{empty}");
+    let (status, body) = h.api.send(Method::GET, "/a2a/stream", auth, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_params");
+    let (status, body) = h
+        .api
+        .send(Method::GET, "/a2a/stream?task=task_missing", auth, None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "task_not_found");
+}
+
+#[tokio::test]
+async fn a2a_cancel_stops_a_live_stream_over_two_sockets() {
+    // The model blocks until the test releases it, so the cancel cannot lose a
+    // race with a fast stub: the run is still working when the second socket
+    // asks for it to stop.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let make: MakeModel = {
+        let gate = gate.clone();
+        Arc::new(move || Box::new(GatedModel(gate.clone())) as Box<dyn ModelClient>)
+    };
+    let h = a2a_harness(make, stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+
+    // `message/send` would block until the run ends; the stream returns as soon
+    // as the task is announced, which is what makes a live cancel reachable.
+    let mut req = h
+        .api
+        .http
+        .post(format!("{}/a2a", h.api.base))
+        .json(&rpc_call(
+            1,
+            "message/stream",
+            json!({"message": a2a_msg("cancel me")}),
+        ));
+    if let Some(token) = auth {
+        req = req.bearer_auth(token);
+    }
+    let mut resp = req.send().await.expect("the stream opens");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut text = String::new();
+    while !text.contains("event: task\n") {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+            .await
+            .expect("the stream announces the task")
+            .expect("the stream stays open")
+            .expect("a chunk arrives");
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let task_id = sse_frames(&text)[0]["result"]["id"]
+        .as_str()
+        .expect("streamed task id")
+        .to_string();
+
+    // Cancel over a second connection while the first is still streaming.
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(2, "tasks/cancel", json!({"id": task_id}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["status"]["state"], "canceled", "{body}");
+
+    // The open stream ends on its own with the terminal frame.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(chunk) = resp.chunk().await.expect("the stream ends cleanly") {
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    })
+    .await
+    .expect("a cancelled stream is closed, not left hanging");
+
+    let frames = sse_frames(&text);
+    let last = frames.last().expect("the stream carried frames");
+    assert_eq!(last["result"]["kind"], "status-update");
+    assert_eq!(last["result"]["final"], true);
+    assert_eq!(last["result"]["status"]["state"], "canceled");
+
+    // The row agrees, and a second cancel loses to the terminal state.
+    let (_, got) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(3, "tasks/get", json!({"id": task_id}))),
+        )
+        .await;
+    assert_eq!(got["result"]["status"]["state"], "canceled");
+    let (_, again) = h
+        .api
+        .send(
+            Method::POST,
+            "/a2a",
+            auth,
+            Some(rpc_call(4, "tasks/cancel", json!({"id": task_id}))),
+        )
+        .await;
+    assert_eq!(rpc_error(&again), -32002, "{again}");
+
+    // The aborted run never consults the model again; release it anyway so no
+    // waiter outlives the test.
+    gate.notify_one();
 }

@@ -515,7 +515,7 @@ DSH_BIN="$PWD/.venv-dsh/bin/dsh" just --dotenv-path .env dsh-e2e
 recipe environment. Without either form the test prints
 `skip: GATEWAY_API_KEY is not set` and returns `ok` — that is a skip, not a pass.
 
-`just e2e` binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames (including the terminal `agent.turn.failed` frame), tool calls, tenant isolation, memory, orchestration, the subagent read surface, the recognised-but-unimplemented `501` resources, the RSI read surface and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
+`just e2e` binds the production axum router to an ephemeral loopback port and drives the beta Agents API with a real HTTP client. It covers the agent/session/turn lifecycle, SSE frames (including the terminal `agent.turn.failed` frame), tool calls, tenant isolation, memory, orchestration, the subagent read surface, the recognised-but-unimplemented `501` resources, the RSI read surface, the A2A surface (public discovery cards, JSON-RPC send/get/cancel with push config, scope and tenant gates, SSE streaming and replay, and a live cancel driven over two sockets) and error paths. Two optional scenarios skip with an explicit reason rather than faking a pass:
 
 - `DATABASE_URL` — exercises the Postgres + pgvector stores through two independently built routers; skipped when unset or unreachable.
 - `ARIA_E2E_DOCKER=1` — executes a `shell` tool in a real container via the streaming route; requires a reachable daemon and a locally cached `alpine:latest` image, otherwise skipped.

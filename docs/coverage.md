@@ -9,28 +9,28 @@ statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
 opt-outs (see below). A run with no opt-outs reads:
 
 ```
-lines measured: 37225/37240 (99.96%)
-closing-delimiter artifacts: 15 (no statement; not counted)
-lines included: 37225/37225 (100.00%)
+lines measured: 37227/37240 (99.97%)
+closing-delimiter artifacts: 13 (no statement; not counted)
+lines included: 37227/37227 (100.00%)
 OK: every included line is covered (or explicitly excluded).
 ```
 
-The fifteen artifacts are all closing braces whose block did run: the statement
-on the line above each carries a non-zero hit count, and llvm still emits a
-zero-count gap region at the delimiter.
+The artifacts are all closing braces whose block did run: each is the end of an
+`if` / `if let` / `match` arm or of a `tokio::spawn` body, and llvm emits the
+empty arm of that branch as a zero-count region at the delimiter. The current
+run reports 13: five in `a2a/` (the `Done` arm and the `if let` blocks in `fail`
+and `cancel`, plus the push-URL and `metadata.answer` arms in `rpc.rs`), four in
+`rsi/` (the two eviction blocks in `ledger.rs` — both entered by a fresh-key and
+an over-window batch — and two `if let` assertions in `validate.rs` whose variant
+is asserted on the line above), two in `governance/proxy.rs` (one `tokio::spawn`
+body and the never-returning `pending_dial` helper), one in
+`core/seams/tools.rs` (the same `if let` assertion shape) and one in
+`dsh/sandbox.rs` (a spawn body in the test double).
 
-* `a2a/executor.rs` (5): the `Done` arm of the event stream and the four
-  `if let` blocks in `fail` and `cancel`.
-* `a2a/rpc.rs` (2): the push-URL check in `message/stream`, and the
-  `metadata.answer` arm of `resume_input`.
-* `rsi/ledger.rs` (2): the two eviction `if let` blocks (session capacity and
-  record window) — both were entered by fresh-key and over-window batches.
-* `rsi/validate.rs` (2) and `core/seams/tools.rs` (1): `if let` assertions in
-  tests, where the line above asserts the variant, so the body always runs.
-* `dsh/sandbox.rs` (1) and `governance/proxy.rs` (2): two `tokio::spawn` bodies
-  of the test doubles and the never-returning `pending_dial` helper.
-
-They are printed for transparency. No test can enter a delimiter, and replacing
+The set is not fixed: extending the E2E suite to cancel a live run made
+`a2a/executor.rs:673` and `:696` report hits without touching their code, which
+is the clearest evidence these counters belong to the branch, not to a statement.
+They are printed for transparency; no test can enter a delimiter, and replacing
 the construct would change the code being measured rather than cover it.
 
 There are no per-line opt-outs left. The last one was `HttpPushNotifier::new`:
