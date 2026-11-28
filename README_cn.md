@@ -342,7 +342,7 @@ bash scripts/test-api.sh --base-url http://localhost:3000
 BASE_URL=http://localhost:3000 bash scripts/test-api.sh
 ```
 
-脚本会对每条路由（agents、sessions、memory、relations、subagents、api-keys、模型驱动的 `/events` 与 `/events/stream`，以及已识别但未实现的 501 stub）断言状态码与关键 JSON 字段，打印 `TOTAL / PASS / FAIL / SKIP`，并以失败数作为退出码。单 agent 运行时的 subagent 子资源路由按 `404` 断言，不再跳过。`/events` 与 `/events/stream` 默认执行（需已配置模型网关）；`--events-test` / `EVENTS_TEST` 仅为兼容旧调用的空操作。
+脚本会对每条路由（agents、sessions、memory、relations、subagents、api-keys、模型驱动的 `/events` 与 `/events/stream`，以及已识别但未实现的 `501` stub）断言状态码与关键 JSON 字段，打印 `TOTAL / PASS / FAIL / SKIP`，并以失败数作为退出码。单 agent 运行时的 subagent 子资源路由按 `404` 断言，不再跳过。`/events` 与 `/events/stream` 默认执行（需已配置模型网关）；`--events-test` / `EVENTS_TEST` 仅为兼容旧调用的空操作。
 
 云端服务会等待 Postgres 健康后再启动；表结构（`agents` / `runs`）在启动时由
 `ensure_schema` 自动创建，无需初始化脚本。API 可通过**任一**入口访问：
@@ -1346,6 +1346,7 @@ docker compose up
 | [网络强制](./docs/adr/0024-network-enforcement-sidecar.md) | internal 网络 + 无密钥出站代理 |
 | [递归自我改进](./docs/adr/0026-recursive-self-improvement.md) | 账本诊断、确定性提案、重放验证、带版本号的手册、有回执的真实重跑 |
 | [dsh 沙箱运行时](./docs/adr/0027-dsh-sandbox-runtime.md) | 容器化 harness：keep-alive + attach exec、命名卷会话工作区、失败即失败的 preflight |
+| [A2A 服务端](./docs/adr/0028-a2a-server.md) | 云端作为 A2A 远端 agent：公开卡、JSON-RPC、SSE 重放、取消时驱逐运行时 |
 
 <div align="right">
 

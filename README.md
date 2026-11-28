@@ -356,7 +356,8 @@ BASE_URL=http://localhost:3000 bash scripts/test-api.sh
 
 The script asserts status codes + key JSON fields across every route (agents,
 sessions, memory, relations, subagents, api-keys, the model-backed `/events`
-and `/events/stream` endpoints, and the recognised-but-501 stubs), prints
+and `/events/stream` endpoints, and the recognised-but-unimplemented `501`
+stubs), prints
 `TOTAL / PASS / FAIL / SKIP`, and exits with the failure count. The single-agent
 subagent-id route is asserted as `404`, not skipped. `/events` and
 `/events/stream` run by default (a configured model gateway is required);
@@ -544,7 +545,8 @@ Anthropic `redacted_thinking` block in the first turn, persists it, then throws
 `UNSUPPORTED_CONTENT` when replaying history. The proxy strips that block from
 request bodies and from JSON/SSE responses (renumbering content-block indices),
 so dsh never sees it. `thinking` blocks are deliberately **kept** — DeepSeek's
-Anthropic-compatible layer requires them to be passed back — which makes thinking
+Anthropic-compatible layer requires them to be passed back in thinking mode, and
+stripping them would turn that error into a `400` — which makes thinking
 display-only and never replayed, the same trade-off OpenCode makes. Set
 `DSH_THINKING_FILTER=disable` only for a dsh build whose adapter handles redacted
 thinking.
@@ -1454,6 +1456,7 @@ Detailed design records live under [`docs/adr/`](./docs/adr), written in English
 | [Network enforcement](./docs/adr/0024-network-enforcement-sidecar.md) | Internal network + secretless egress proxy |
 | [Recursive self-improvement](./docs/adr/0026-recursive-self-improvement.md) | Ledger diagnosis, deterministic proposals, replay validation, revision-guarded playbooks, receipted real re-run |
 | [dsh sandbox runtime](./docs/adr/0027-dsh-sandbox-runtime.md) | Containerised harness: keep-alive + attached exec, named-volume session workspace, fail-closed preflight |
+| [A2A server](./docs/adr/0028-a2a-server.md) | The cloud as an A2A remote agent: public cards, JSON-RPC, SSE replay, cancel evicting the runtime |
 
 <div align="right">
 
