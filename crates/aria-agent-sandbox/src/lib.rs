@@ -2267,8 +2267,15 @@ mod tests {
                 // stdin frames are ignored by the sandbox.
                 frame(stream, 0, b"ignored\n");
                 let _ = stream.flush();
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+                // A real daemon keeps reading stdin; the stub must too. Closing
+                // a socket that still has unread inbound bytes makes Windows
+                // answer with `RST`, which the client surfaces as
+                // `WSAECONNRESET (10054)` in the middle of the output stream
+                // instead of the EOF that ends it.
+                drain_stdin(stream);
+                // Half-close only: the frames are already written, so the FIN is
+                // the clean end of stream the caller's decoder waits for.
+                let _ = stream.shutdown(std::net::Shutdown::Write);
             }
             Route::Other => {
                 let _ = stream.write_all(
@@ -2277,6 +2284,23 @@ mod tests {
                 let _ = stream.flush();
             }
         }
+    }
+
+    /// Absorb the caller's stdin before the exec stream is closed.
+    ///
+    /// The `101` upgrade makes the exec socket duplex, so the client writes
+    /// stdin on the very connection the frames go out on. A stub that closes
+    /// without reading leaves those bytes in its receive queue, and Windows
+    /// answers that close with `RST` — the client then reports
+    /// `WSAECONNRESET (10054)` part-way through the frames instead of seeing a
+    /// clean EOF. Draining until the caller goes quiet keeps the close graceful
+    /// on every platform; the timeout only bounds the wait when nothing is
+    /// written.
+    fn drain_stdin(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+        let mut sink = [0u8; 256];
+        while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
     }
 
     fn no_content(stream: &mut std::net::TcpStream) {
