@@ -48,15 +48,25 @@ pub struct HttpPushNotifier {
 
 impl HttpPushNotifier {
     pub fn new() -> Result<Self, String> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(PUSH_TIMEOUT)
-            .timeout(PUSH_TIMEOUT)
-            .build()
-            // Only an unusable TLS backend gets here, and there is no hermetic
-            // way to provoke it. Booting without a client would be worse: the
-            // caller must hear that its push target cannot be served.
-            .map_err(|e| format!("a2a push client: {e}"))?; // LCOV_EXCL_LINE
+        // Only an unusable TLS backend gets here. Booting without a client
+        // would be worse: the caller must hear that its push target cannot be
+        // served, so the failure is reported instead of swallowed.
+        Self::build(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(PUSH_TIMEOUT)
+                .timeout(PUSH_TIMEOUT)
+                .build()
+        })
+    }
+
+    /// Map the client result. Split out so the error arm is exercised by a
+    /// test instead of being excluded: only the mapping is ours, the failure
+    /// itself belongs to `reqwest`.
+    pub(crate) fn build<E: std::fmt::Display>(
+        make: impl FnOnce() -> Result<reqwest::Client, E>,
+    ) -> Result<Self, String> {
+        let client = make().map_err(|e| format!("a2a push client: {e}"))?;
         Ok(Self { client })
     }
 }

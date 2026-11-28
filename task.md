@@ -677,6 +677,27 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       §12`, the `a2a/pg.rs` coverage exclusion and its reason, both READMEs,
       `.env.example` and AGENTS.md rule 19.
 
+## Coverage hardening (after M21)
+- [x] Audited all fifteen remaining artifacts against `lcov.info` line by line:
+      every one is the closing delimiter of a block whose statements ran (the
+      preceding line carries a non-zero hit count, e.g. `rsi/ledger.rs:121,123`
+      around the `}` at `:122`), not an untested arm — `a2a/executor.rs` (5),
+      `a2a/rpc.rs` (2), `rsi/ledger.rs` (2), `rsi/validate.rs` (2),
+      `core/seams/tools.rs` (1), `dsh/sandbox.rs` (1), `governance/proxy.rs` (2).
+      An earlier note had called the ledger pair "impossible `None` arms"; the
+      eviction blocks are in fact entered by a fresh-key and an over-window
+      batch. No test can enter a delimiter, so none of them is a gap.
+- [x] Removed the last `// LCOV_EXCL_LINE`: `HttpPushNotifier::new` now delegates
+      to `HttpPushNotifier::build(make)`, which takes the client constructor.
+      `a_client_that_cannot_be_built_is_reported_not_swallowed` supplies the
+      `Err` and pins `a2a push client: {e}`, while the `Ok` arm still runs through
+      the real `new()` — a silent no-op would turn every push target into a lie.
+- [x] Result: measured lines **37234 → 37240** and covered **37218 → 37225** (the
+      new `build` lines plus the mapping that used to be excluded); opt-outs
+      **1 → 0**, artifacts stay at **15**, and `./scripts/coverage.sh` is still
+      **100.00% of included lines** (37225/37225). `docs/coverage.md` lists the
+      artifacts and the constructor seam.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

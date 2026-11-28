@@ -6,30 +6,41 @@ whole workspace and then checks the lcov `DA:` records.
 
 "Included" = every measured source line minus the two categories that carry no
 statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
-opt-outs (see below). The summary prints both numbers, so a run reads:
+opt-outs (see below). A run with no opt-outs reads:
 
 ```
-lines measured: 37218/37234 (99.96%)
-excluded by `LCOV_EXCL_LINE`: 1
+lines measured: 37225/37240 (99.96%)
 closing-delimiter artifacts: 15 (no statement; not counted)
-lines included: 37218/37218 (100.00%)
+lines included: 37225/37225 (100.00%)
 OK: every included line is covered (or explicitly excluded).
 ```
 
-The fifteen artifacts are all block ends that carry no statement of their own:
-two test-harness closures, the never-returning `pending()` dial that forces a
-connect timeout, the ledger's two impossible `None` arms (its capacity
-constructor clamps both bounds to at least one), two not-taken arms of `if let`
-assertions in the RSI validation tests (the variant is asserted on the line
-above), and eight `}` lines from the A2A projection (`a2a/executor.rs`,
-`a2a/rpc.rs`) and the `set_approvals` seam test in `tools.rs`, where the branch
-on the line above already ran. They are printed for transparency; none can be
-reached by a different test without changing the code being measured.
+The fifteen artifacts are all closing braces whose block did run: the statement
+on the line above each carries a non-zero hit count, and llvm still emits a
+zero-count gap region at the delimiter.
 
-The one opt-out is `HttpPushNotifier::new`: `reqwest::ClientBuilder::build` fails
-only when the TLS backend cannot initialise. That cannot be provoked
-hermetically, and booting without a client would turn a push target into a
-silent no-op, so the line is excluded with its reason instead of faked.
+* `a2a/executor.rs` (5): the `Done` arm of the event stream and the four
+  `if let` blocks in `fail` and `cancel`.
+* `a2a/rpc.rs` (2): the push-URL check in `message/stream`, and the
+  `metadata.answer` arm of `resume_input`.
+* `rsi/ledger.rs` (2): the two eviction `if let` blocks (session capacity and
+  record window) — both were entered by fresh-key and over-window batches.
+* `rsi/validate.rs` (2) and `core/seams/tools.rs` (1): `if let` assertions in
+  tests, where the line above asserts the variant, so the body always runs.
+* `dsh/sandbox.rs` (1) and `governance/proxy.rs` (2): two `tokio::spawn` bodies
+  of the test doubles and the never-returning `pending_dial` helper.
+
+They are printed for transparency. No test can enter a delimiter, and replacing
+the construct would change the code being measured rather than cover it.
+
+There are no per-line opt-outs left. The last one was `HttpPushNotifier::new`:
+`reqwest::ClientBuilder::build` fails only when the TLS backend cannot
+initialise, which cannot be provoked hermetically, and booting without a client
+would turn a push target into a silent no-op. The mapping is now isolated in
+`HttpPushNotifier::build`, which takes the constructor as an argument, so
+`a_client_that_cannot_be_built_is_reported_not_swallowed` pins the error text —
+and the `Ok` arm still runs through the real `new()` — without faking a broken
+platform.
 
 ```bash
 just cov-check        # gate: fails on any uncovered included line
@@ -159,7 +170,9 @@ global state that would otherwise collect run after run.
    socket-write and relay failures live in `send_bytes` / `relay`.
    `ThinkingFilterProxy` uses `config_err` / `model_err` the same way, and keeps
    its logging on one line so `rustfmt` cannot split a `tracing::debug!` into
-   regions that only run with a subscriber.
+   regions that only run with a subscriber. A fallible constructor follows the
+   same rule: `HttpPushNotifier::build` takes the closure that builds the client,
+   so the error mapping is one exercised line instead of an opt-out.
 3. If a branch is truly unreachable, remove it or document it here — do not pad
    the exclusion list with business logic.
 
@@ -186,7 +199,10 @@ all reproducible hermetically:
 * listener failure — the internal `ProxyListener` seam supplies a listener
   whose `local_addr` and `accept` fail;
 * atomic replace — pointing the store file at a directory makes the rename fail
-  after the temp write succeeds.
+  after the temp write succeeds;
+* fallible constructor — the build is injected (`HttpPushNotifier::build`), so a
+  test hands in the `Err` value and the mapping runs without a broken TLS
+  backend.
 
 Use a marker only for a branch that must stay in the code but genuinely cannot
 be produced hermetically. Anything that could be tested belongs in a test.

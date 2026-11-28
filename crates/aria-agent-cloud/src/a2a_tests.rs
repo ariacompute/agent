@@ -2745,6 +2745,18 @@ async fn the_push_url_validator_only_accepts_plain_http_targets() {
     assert_eq!(PUSH_TIMEOUT, Duration::from_secs(5));
 }
 
+#[test]
+fn a_client_that_cannot_be_built_is_reported_not_swallowed() {
+    // `reqwest` only fails here when its TLS backend cannot initialise, which
+    // cannot be provoked hermetically. The mapping is ours, so it is pinned
+    // directly rather than faking a broken platform: a silent no-op would turn
+    // every push target into a lie.
+    let err = HttpPushNotifier::build(|| Err::<reqwest::Client, _>("no usable TLS backend"))
+        .err()
+        .expect("a failed build must be reported");
+    assert_eq!(err, "a2a push client: no usable TLS backend");
+}
+
 #[tokio::test]
 async fn the_http_notifier_posts_the_body_retries_and_reports_failure() {
     let server = MockServer::start().await;
