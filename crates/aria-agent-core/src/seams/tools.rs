@@ -12,7 +12,8 @@ use crate::{Tool, ToolCall, ToolHandler, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// Default cap for a single tool result fed back to the model (64 KiB).
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 64 * 1024;
@@ -164,8 +165,10 @@ pub enum Authz {
 pub struct ToolExecutionPipeline {
     handlers: Vec<Arc<dyn ToolHandler>>,
     policy: Option<Arc<SandboxPolicy>>,
-    approvals: Arc<dyn ApprovalBroker>,
-    approvals_configured: bool,
+    /// Replaceable after assembly: a remote caller (A2A) needs its own
+    /// per-task broker without rebuilding the agent.
+    approvals: RwLock<Arc<dyn ApprovalBroker>>,
+    approvals_configured: AtomicBool,
     post: PostExecPolicy,
     projector: std::sync::RwLock<Arc<dyn ToolOutputProjector>>,
 }
@@ -175,8 +178,8 @@ impl ToolExecutionPipeline {
         Self {
             handlers,
             policy: None,
-            approvals: Arc::new(DenyAll),
-            approvals_configured: false,
+            approvals: RwLock::new(Arc::new(DenyAll)),
+            approvals_configured: AtomicBool::new(false),
             post: PostExecPolicy::default(),
             projector: std::sync::RwLock::new(Arc::new(NoProjection)),
         }
@@ -202,10 +205,28 @@ impl ToolExecutionPipeline {
         self
     }
 
-    pub fn with_approvals(mut self, broker: Arc<dyn ApprovalBroker>) -> Self {
-        self.approvals = broker;
-        self.approvals_configured = true;
+    pub fn with_approvals(self, broker: Arc<dyn ApprovalBroker>) -> Self {
+        self.set_approvals(broker);
         self
+    }
+
+    /// Swap the broker after assembly. The new broker is picked up by the next
+    /// `authorize`, never mid-decision: an in-flight approval stays with the
+    /// broker that started it, so a task cannot be answered twice.
+    pub fn set_approvals(&self, broker: Arc<dyn ApprovalBroker>) {
+        if let Ok(mut slot) = self.approvals.write() {
+            *slot = broker;
+        }
+        self.approvals_configured.store(true, Ordering::Release);
+    }
+
+    /// The broker for one authorization. A poisoned slot still yields the last
+    /// installed broker instead of panicking the turn.
+    fn broker(&self) -> Arc<dyn ApprovalBroker> {
+        match self.approvals.read() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     pub fn with_post_exec(mut self, post: PostExecPolicy) -> Self {
@@ -245,13 +266,14 @@ impl ToolExecutionPipeline {
         }
         let req = ApprovalRequest::new(call.name.clone(), session, call.arguments.clone())
             .with_preset(preset);
-        let decision = self.approvals.decide(&req).await;
+        let broker = self.broker();
+        let decision = broker.decide(&req).await;
         if decision.is_allowed() {
             Authz::Allowed {
                 approval: Some(decision),
             }
         } else {
-            let reason = if self.approvals_configured {
+            let reason = if self.approvals_configured.load(Ordering::Acquire) {
                 decision.reason()
             } else {
                 format!(
@@ -648,5 +670,80 @@ mod tests {
         let t = tool("fs_read", "read", fs_tool_schema(json!({}), &["path"]));
         assert_eq!(t.name, "fs_read");
         assert_eq!(t.parameters["required"][0], "path");
+    }
+
+    struct Counting {
+        decision: ApprovalDecision,
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ApprovalBroker for Counting {
+        async fn decide(&self, _req: &ApprovalRequest) -> ApprovalDecision {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            self.decision.clone()
+        }
+    }
+
+    fn workspace_pipeline() -> ToolExecutionPipeline {
+        ToolExecutionPipeline::new(vec![]).with_policy(policy(PermissionPreset::WorkspaceWrite))
+    }
+
+    #[tokio::test]
+    async fn approvals_can_be_swapped_after_assembly() {
+        let first = Arc::new(Counting {
+            decision: ApprovalDecision::Allow,
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let p = workspace_pipeline().with_approvals(first.clone());
+        assert!(matches!(
+            p.authorize(&call("shell"), "s").await,
+            Authz::Allowed { approval: Some(_) }
+        ));
+        assert_eq!(first.hits.load(Ordering::SeqCst), 1);
+
+        let second = Arc::new(Counting {
+            decision: ApprovalDecision::Deny {
+                reason: "nope".into(),
+            },
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        });
+        p.set_approvals(second.clone());
+        let answer = p.authorize(&call("shell"), "s").await;
+        assert!(matches!(answer, Authz::Denied { .. }));
+        if let Authz::Denied { reason, .. } = answer {
+            assert_eq!(reason, "denied: nope");
+        }
+        assert_eq!(second.hits.load(Ordering::SeqCst), 1);
+        // The replaced broker is never consulted again.
+        assert_eq!(first.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_approvals_slot_keeps_answering_with_the_last_broker() {
+        let last = Arc::new(Counting {
+            decision: ApprovalDecision::Allow,
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let p = workspace_pipeline().with_approvals(last.clone());
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = p.approvals.write().unwrap();
+            panic!("poison the approvals slot");
+        }));
+        assert!(poisoned.is_err());
+
+        // A swap after poisoning cannot take the slot, so it is a no-op…
+        p.set_approvals(Arc::new(Counting {
+            decision: ApprovalDecision::Deny {
+                reason: "late".into(),
+            },
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        // …and the turn still reads the broker it had instead of panicking.
+        assert!(matches!(
+            p.authorize(&call("shell"), "s").await,
+            Authz::Allowed { approval: Some(_) }
+        ));
+        assert_eq!(last.hits.load(Ordering::SeqCst), 1);
     }
 }

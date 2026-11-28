@@ -7,6 +7,7 @@ members = [
     "crates/aria-agent-memo",
     "crates/aria-agent-sandbox",
     "crates/aria-agent-core",
+    "crates/aria-agent-a2a",
     "crates/aria-agent-dsh",
     "crates/aria-agent-tools",
     "crates/aria-agent-orchestrator",
@@ -38,6 +39,7 @@ aria-agent-plugin = { path = "crates/aria-agent-plugin", version = "0.1.0" }
 aria-agent-memo = { path = "crates/aria-agent-memo" }
 aria-agent-sandbox = { path = "crates/aria-agent-sandbox" }
 aria-agent-core = { path = "crates/aria-agent-core" }
+aria-agent-a2a = { path = "crates/aria-agent-a2a", version = "0.1.0" }
 aria-agent-tools = { path = "crates/aria-agent-tools", version = "0.1.0" }
 aria-agent-orchestrator = { path = "crates/aria-agent-orchestrator" }
 aria-agent-rsi = { path = "crates/aria-agent-rsi" }

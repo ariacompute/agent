@@ -1518,6 +1518,17 @@ impl Agent {
         self
     }
 
+    /// Install the approval broker for mutating tool calls.
+    ///
+    /// A remote caller (A2A) installs a per-task broker here: the pipeline
+    /// consults the most recently installed one at the next authorization, so a
+    /// running turn keeps the broker it started with. Without any broker the
+    /// pipeline stays fail-closed.
+    pub fn with_approvals(self, broker: Arc<dyn seams::ApprovalBroker>) -> Self {
+        self.pipeline.set_approvals(broker);
+        self
+    }
+
     /// Build with an explicit model client (e.g. [`StubModel`] or [`OpenAiModel`]);
     /// the sandbox is resolved from `config.sandbox_provider`.
     pub fn with_model(
@@ -2716,6 +2727,31 @@ mod governance_validation_tests {
         };
         let err = cfg.validate_governance().unwrap_err().to_string();
         assert!(err.contains("unknown audit_sink"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn with_approvals_installs_the_broker_on_the_pipeline() {
+        let agent = Agent::with_model(
+            AgentConfig::default(),
+            Box::new(StubModel::new("approvals")),
+            in_memory_context(),
+        )
+        .unwrap();
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({}),
+        };
+        // No broker installed yet: the mutating call is refused.
+        assert!(matches!(
+            agent.pipeline.authorize(&call, "s").await,
+            seams::Authz::Denied { .. }
+        ));
+        let agent = agent.with_approvals(Arc::new(seams::AutoAllow));
+        assert!(matches!(
+            agent.pipeline.authorize(&call, "s").await,
+            seams::Authz::Allowed { .. }
+        ));
     }
 }
 

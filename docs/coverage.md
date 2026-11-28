@@ -9,19 +9,27 @@ statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
 opt-outs (see below). The summary prints both numbers, so a run reads:
 
 ```
-lines measured: 35073/35080 (99.98%)
-closing-delimiter artifacts: 7 (no statement; not counted)
-lines included: 35073/35073 (100.00%)
+lines measured: 37218/37234 (99.96%)
+excluded by `LCOV_EXCL_LINE`: 1
+closing-delimiter artifacts: 15 (no statement; not counted)
+lines included: 37218/37218 (100.00%)
 OK: every included line is covered (or explicitly excluded).
 ```
 
-The seven artifacts left are all block ends that carry no statement: two
-test-harness closures, the never-returning `pending()` dial that forces a
+The fifteen artifacts are all block ends that carry no statement of their own:
+two test-harness closures, the never-returning `pending()` dial that forces a
 connect timeout, the ledger's two impossible `None` arms (its capacity
-constructor clamps both bounds to at least one), and two not-taken arms of
-`if let` assertions in the RSI validation tests (the variant is asserted on the
-line above). They are printed for transparency; none can be reached by a
-different test without changing the code being measured.
+constructor clamps both bounds to at least one), two not-taken arms of `if let`
+assertions in the RSI validation tests (the variant is asserted on the line
+above), and eight `}` lines from the A2A projection (`a2a/executor.rs`,
+`a2a/rpc.rs`) and the `set_approvals` seam test in `tools.rs`, where the branch
+on the line above already ran. They are printed for transparency; none can be
+reached by a different test without changing the code being measured.
+
+The one opt-out is `HttpPushNotifier::new`: `reqwest::ClientBuilder::build` fails
+only when the TLS backend cannot initialise. That cannot be provoked
+hermetically, and booting without a client would turn a push target into a
+silent no-op, so the line is excluded with its reason instead of faked.
 
 ```bash
 just cov-check        # gate: fails on any uncovered included line
@@ -53,6 +61,7 @@ needs a reason that does not depend on "it was hard":
 | `crates/aria-agent-cloud/src/store/pg_orchestration.rs` | Postgres teams/schedule/title backends; covered by the real-database suite as well as by the in-memory providers in `api_tests.rs` |
 | `crates/aria-agent-cloud/src/store/pg_rsi.rs` | Postgres RSI backends (reports, pending proposals, revision-guarded playbooks, insert-only re-run receipts); the real-database suite exercises the `409` revision guard, the `422` adaptation rule and the unique-index conflict mapping |
 | `crates/aria-agent-cloud/src/pg_testkit.rs` | the fixture those tests share (one pool per test, schema applied once behind a process-wide lock). Its skip arms only run without a database, so it travels with the group above |
+| `crates/aria-agent-cloud/src/a2a/pg.rs` | Postgres A2A task store: the SQL needs `DATABASE_URL`, so it joins the group above rather than the offline gate. It is **not** unpinned: the module has DB-gated tests for the column round-trip, the CAS transition, the per-task event sequence, tenant scoping, push config/receipt and `fail_orphans`, and `MemoryA2aTasks` pins the same contract offline |
 | `crates/aria-agent-tools/src/terminal.rs` (`pty`) | optional `pty` provider needs a real terminal device; `scripts/coverage.sh` excludes this file so enabling the feature cannot make the gate depend on a TTY. The default build keeps `pty` off. |
 | `crates/aria-agent-dsh/src/transport.rs` | child-process plumbing: piped stdio "unavailable" is unreachable with `Stdio::piped`, and write/flush/read `EIO` plus `start_kill`/`try_wait` failures cannot be produced hermetically. Exercised end-to-end by `just dsh-smoke` (scripted child) and `just dsh-e2e` (real dsh). |
 

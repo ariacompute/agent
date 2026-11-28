@@ -1,5 +1,85 @@
 # Release notes
 
+## The same port is also an A2A remote agent
+
+`aria-agent-cloud` spoke one protocol face: the OpenAI beta Agents API. An orchestrator such as
+agenthub cannot register that as a remote agent — it discovers peers from a public Agent Card and
+drives them over A2A JSON-RPC. The process now speaks that too (ADR-0028): same port, same key,
+same session store. It is a second projection rather than a rewrite — `/v1/agents/**`, the frozen
+SSE envelope and the SDKs are untouched, and no permission code was added (`write` covers
+`message/*`, `cancel`, `resume` and push `set`; `read` covers `get`, push `get` and the replay).
+
+### Highlights
+
+- **A pure protocol crate** — `aria-agent-a2a` (no axum, no sqlx, no I/O) holds the card and task
+  types, the JSON-RPC envelope and code table, `Last-Event-ID` parsing and RFC 3339 helpers.
+  `protocolVersion` is `1.0.0`. The card carries the agent name and the `A2A_CARDS_FILE`
+  description/skills — never `instructions`, credentials, principals or sandbox names — and it does
+  not advertise the native tool families, because the default dsh harness runs its own tools inside
+  the container.
+- **Cards are public, methods are not** — `/.well-known/agent-card.json` (aliases `agent.json` and
+  `/a2a/agent-card`) and `/v1/agents/{id}/agent-card.json` are merged *after* `require_auth`, like
+  `/healthz`; the JSON-RPC and stream routes sit *before* it, so every method inherits Bearer auth
+  and is re-checked for scope inside the dispatcher. An unknown agent is
+  `404 {"error":{"code":"agent_not_found"}}`; with `A2A_DEFAULT_AGENT` unset the well-known card
+  answers the same code while the per-agent routes keep working.
+- **Method errors travel inside HTTP 200** — a non-2xx reads as `resource_unreachable` to the
+  caller, so `-32001`…`-32009` arrive as a JSON-RPC error object whose `error.data.code` carries the
+  machine name (`task_not_found`, `invalid_state_transition`, …). Only a malformed envelope is
+  `400`; a missing or bad token is `401`, a missing scope `403 insufficient_scope`.
+- **`contextId` is a session, and a context holds one live task** — it maps to `agent_sessions.id`,
+  so an A2A conversation reuses that dsh session's container and volume *and* shows up in the
+  console as an ordinary turn. A second `message/send` into a busy context is `-32005`, not two
+  interleaved runs; an unknown context mints a new `sess_<uuid>`.
+- **`tasks/cancel` destroys the container** — the state is CASed first, the parked decision is
+  released, the run is aborted, and `cancel_harness` evicts the session runtime (`DshPool::evict`),
+  so the sandbox transport destroys the container while the volume survives for the next prompt.
+  `fail_orphans` closes rows stranded by a restart.
+- **The stream replays** — `GET /a2a/stream?task=&since=` honours `Last-Event-ID` and then follows
+  the live task; frames are plain SSE (no JSON-RPC envelope) and carry both `kind` and the legacy
+  `event`. Token deltas are broadcast only and never persisted, so a reconnect gets status, tool
+  spans and the final artifact.
+- **HITL parks the task** — `PausingHitl` answers both seams (approval and question).
+  `tasks/resume` reads `metadata.decision`; any other text is a `-32602` mismatch and the task
+  **stays** `input-required`, never an implicit denial. Native injects the same object as
+  `ApprovalBroker` / `UserQuestions`; dsh reaches it through the `sessionId` that `SessionTag`
+  injects.
+- **Push callbacks stay small** — `tasks/pushNotification/set|get`, or the `configuration` block of
+  `message/send`, registers an `http(s)` URL with no `user:pass@`; redirects are not followed, each
+  delivery gets 5 s and one retry, and a failure is recorded in `push_last` instead of rolling the
+  task back.
+- **Storage** — `migrations/0010_a2a_tasks.sql` adds `a2a_tasks` and `a2a_task_events` (coarse
+  frames only, `principal_id`-scoped in every query). An in-memory provider covers the same
+  semantics offline.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `A2A_DEFAULT_AGENT` | _(empty)_ | Agent behind `POST /a2a` and the well-known card; empty answers `agent_not_found` while `/v1/agents/{id}/a2a` keeps working |
+| `A2A_PUBLIC_URL` | `http://127.0.0.1:<port>` | Origin callers reach this server on; the card advertises `{A2A_PUBLIC_URL}/a2a`. A card cannot be derived from a proxied request, so set it in any real deployment |
+| `A2A_CARDS_FILE` | _(empty)_ | Optional camelCase JSON replacing the card's `description` and `skills`; a malformed file fails boot instead of being ignored |
+
+### Breaking changes
+
+- `AppState` gained `a2a` and `cancel_harness`; a literal constructor outside this crate must add
+  `a2a: A2aState::disabled()` and `cancel_harness: None`.
+- `A2aRuntime::open` returns `Result<TaskChannel, ContextBusy>`: a caller must decide what a busy
+  context means instead of interleaving two runs.
+
+### Validation
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (1386 passed) and `./scripts/coverage.sh` (every included line covered:
+37218/37218) all pass. Against a real `pgvector/pgvector:pg16` container the cloud suite is 318
+passed, including both `a2a::pg` tests and migration `0010` creating both tables. A curl smoke on a
+real Postgres read the public card without a key, got `401` without a bearer and an HTTP-200
+`-32001` for an unknown task, replayed the stream, completed a real `message/send` (`pong`) from
+inside the dsh container through the thinking-filter proxy, and cancelled a live task that ended
+`canceled` with exactly one container destroyed; `scripts/test-api.sh` is 38/38. `just dsh-e2e` ran
+real gateway turns on a host dsh (3 passed), and the same prompt completed under
+`AGENT_HARNESS=native` over both `/a2a` and `/v1/agents/sessions/{id}/events`.
+
 ## dsh runs in a container now
 
 The default turn runtime used to be a **host child process**: `dsh --profile sdk` executed the

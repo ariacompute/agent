@@ -770,6 +770,7 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
         include_str!("../../../../migrations/0006_scheduled_jobs.sql"),
         include_str!("../../../../migrations/0007_agent_teams.sql"),
         include_str!("../../../../migrations/0008_session_titles.sql"),
+        include_str!("../../../../migrations/0010_a2a_tasks.sql"),
     ] {
         pool.execute(sql).await?;
     }

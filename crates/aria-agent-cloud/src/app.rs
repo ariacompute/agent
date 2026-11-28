@@ -55,6 +55,12 @@ pub type MakeContext = Arc<dyn Fn(&Principal) -> Arc<dyn ContextStore> + Send + 
 pub type MakeHarness =
     Arc<dyn Fn(&Principal, &AgentConfig) -> Arc<dyn agent_core::seams::AgentLoop> + Send + Sync>;
 
+/// Stop a session's harness runtime. For dsh this is how a cancelled A2A task
+/// really stops: the runtime owns the sandbox container, so dropping the Rust
+/// future is not enough (`DshPool::evict` → `shutdown` → `destroy`).
+pub type CancelHarness =
+    Arc<dyn Fn(Principal, String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub agents: Arc<dyn AgentStore>,
@@ -75,6 +81,12 @@ pub struct AppState {
     pub harness: Option<MakeHarness>,
     /// Recursive self-improvement: reports, playbook versions, optional sweep.
     pub rsi: RsiState,
+    /// A2A server surface (ADR-0028). [`crate::a2a::A2aState::disabled`] keeps
+    /// the routes mounted but answers nothing can be started.
+    pub a2a: crate::a2a::A2aState,
+    /// Stop the session's harness runtime on `tasks/cancel`; `None` when runs are
+    /// native and aborting the future is enough.
+    pub cancel_harness: Option<CancelHarness>,
 }
 
 /// Everything the RSI endpoints and the session-log chain need, in one field.
@@ -237,6 +249,15 @@ fn governed(
     }
 }
 
+/// The agent-loop seams a caller may inject. Both default to "not installed",
+/// which is the behaviour every non-A2A run keeps: approvals follow the
+/// deployment preset and `ask_user` is not offered (ADR-0016).
+#[derive(Default, Clone)]
+pub(crate) struct RunSeams {
+    pub approvals: Option<Arc<dyn agent_core::seams::ApprovalBroker>>,
+    pub questions: Option<Arc<dyn agent_core::seams::UserQuestions>>,
+}
+
 /// The real constructor: `allow_subagents = false` builds a **child** agent.
 ///
 /// Children never spawn children, so delegation depth is exactly one and the
@@ -250,6 +271,20 @@ pub(crate) async fn build_agent_inner(
     cfg: AgentConfig,
     principal: &Principal,
     allow_subagents: bool,
+) -> Result<Agent, AppError> {
+    build_agent_inner_with(state, cfg, principal, allow_subagents, RunSeams::default()).await
+}
+
+/// [`build_agent_inner`] with injectable agent-loop seams (A2A, ADR-0028).
+///
+/// The A2A path installs the same `PausingHitl` as both seams, so a remote
+/// caller's approval pauses the task instead of auto-approving it.
+pub(crate) async fn build_agent_inner_with(
+    state: &AppState,
+    cfg: AgentConfig,
+    principal: &Principal,
+    allow_subagents: bool,
+    seams: RunSeams,
 ) -> Result<Agent, AppError> {
     let context = state.context_for(principal);
     let tenant = principal.id.as_str();
@@ -349,9 +384,14 @@ pub(crate) async fn build_agent_inner(
     let policy = agent_core::build_policy(&cfg)
         .map_err(AppError::Core)?
         .expect("policy on success");
-    let set = aria_agent_tools::ToolSet::local(policy, sandbox.clone(), context.clone())
+    let mut set = aria_agent_tools::ToolSet::local(policy, sandbox.clone(), context.clone())
         .with_egress(governance.egress())
         .with_sandbox_transport(network, labels, sandbox_env);
+    // The `ask_user` family exists only when somebody can answer it: an A2A run
+    // installs its per-task pauser, every other run offers no such tool.
+    if let Some(questions) = seams.questions.clone() {
+        set = set.with_questions(questions);
+    }
     handlers.extend(set.handlers());
     let mut tools = set.tools();
     tools.extend(agent_browser::browser_tools());
@@ -392,16 +432,46 @@ pub(crate) async fn build_agent_inner(
         }
         None => Agent::with_handlers(cfg, (state.make_model)(), context, sandbox, handlers),
     };
+    let approvals = seams.approvals.clone();
     built
         // Session titles are projected into `session_titles` instead of a local
         // JSONL artifact: the cloud keeps its audit trail in Postgres.
         .map(|agent| {
-            agent
+            let agent = agent
                 .with_projector(projector)
                 .with_tools(tools)
-                .with_session_log(Arc::new(rsi_session_log(state, principal)))
+                .with_session_log(Arc::new(rsi_session_log(state, principal)));
+            match approvals {
+                Some(broker) => agent.with_approvals(broker),
+                None => agent,
+            }
         })
         .map_err(AppError::Core)
+}
+
+/// Build an [`Agent`] for one A2A task (ADR-0028).
+///
+/// The same [`super::a2a::hitl::PausingHitl`] answers both seams: a tool call
+/// that needs permission parks the task on `input-required` until
+/// `tasks/resume`, instead of being auto-approved by the deployment preset.
+pub async fn build_agent_for_a2a(
+    state: &AppState,
+    cfg: AgentConfig,
+    principal: &Principal,
+    approvals: Arc<dyn agent_core::seams::ApprovalBroker>,
+    questions: Arc<dyn agent_core::seams::UserQuestions>,
+) -> Result<Agent, AppError> {
+    build_agent_inner_with(
+        state,
+        cfg,
+        principal,
+        true,
+        RunSeams {
+            approvals: Some(approvals),
+            questions: Some(questions),
+        },
+    )
+    .await
 }
 
 /// Runs one child agent through [`build_agent_inner`] (depth one).
@@ -771,6 +841,11 @@ pub fn build_router(state: AppState) -> Router {
             post(api::keys::create_api_key).get(api::keys::list_api_keys),
         )
         .route("/v1/api-keys/:id", delete(api::keys::revoke_api_key))
+        // --- A2A JSON-RPC + replay (ADR-0028) ---
+        // Registered here, before the auth layer, so every method inherits Bearer
+        // auth; the agent cards are merged *after* it (like `/healthz`) because a
+        // caller must be able to discover an agent before it holds a key.
+        .merge(crate::a2a::protected_router())
         .with_state(state.clone())
         // Auth gate (Bearer / ApiKey); open when AGENT_CLOUD_API_KEY is unset.
         // `from_fn_with_state` threads `AppState` into the middleware closure.
@@ -790,6 +865,9 @@ pub fn build_router(state: AppState) -> Router {
         // Internal surface for the network-enforcement proxy: token-authenticated
         // (not tenant-authenticated), and only mounted when enforcement=network.
         .merge(internal_routes(crate::internal_egress::state_from_env()))
+        // Public A2A discovery: agent cards carry no secret, and an orchestrator
+        // must be able to read one before it has a key.
+        .merge(crate::a2a::public_router().with_state(state.clone()))
         // Liveness probe for container orchestration. Registered *after* the
         // auth layer on purpose: `layer` only wraps the routes added before it,
         // so `/healthz` answers 200 without credentials (see `healthz`).

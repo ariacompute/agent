@@ -600,6 +600,83 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       skip reason when their dependency is absent. Integration test files are
       outside the coverage report, so the gate is unchanged at 35073/35073.
 
+## Milestone 21 — A2A server surface (ADR-0028)
+- [x] New pure protocol crate `crates/aria-agent-a2a` (`publish = false`, serde
+      only, no I/O): `card` (AgentCard / AgentSkill / Capabilities / Provider),
+      `types` (Task / Message / Part / Artifact / method params / push config),
+      `jsonrpc` (envelope, `RpcError`, method registry, v0.1 aliases, the local
+      error catalogue), `state` (legal transitions + terminal test), `stream`
+      (`StreamFrame`, SSE text) and `time` (RFC3339 UTC without a new
+      dependency). `Part` writes both `kind` and `type`; every frame writes both
+      the canonical `kind` and agenthub's legacy `event`; there is no sentinel.
+- [x] Injection points for a parked seam: `ToolExecutionPipeline.approvals` is
+      an `RwLock<Arc<dyn ApprovalBroker>>` with `set_approvals` (never held across
+      an `await`), `Agent::with_approvals` replaces the broker the way
+      `with_projector` replaces a projector, and `ToolSet::with_questions`
+      registers `ask_user`. Defaults are unchanged and fail closed.
+- [x] dsh: `DshPool::acquire` wraps the per-tenant handler in `SessionTag`,
+      which injects the session's `sessionId` into object params that lack one
+      (the dsh JSON-RPC protocol is untouched), and `DshPool::evict(session)`
+      drains the pooled runtime and shuts it down — through the sandbox transport
+      that `destroy`s the container.
+- [x] Storage: `a2a/store.rs` defines the `A2aTaskStore` port (create / get /
+      CAS `transition` / `add_artifact` / `append_event` / `events_since` /
+      `set_push` / `set_push_last` / `fail_orphans`) and `MemoryA2aTasks`; migration
+      `0010_a2a_tasks.sql` adds `a2a_tasks` + `a2a_task_events` and is replayed
+      through the existing `store/pg.rs::ensure_schema` include list, so boot and
+      `pg_testkit` stay one source. Every statement is `principal_id`-scoped.
+      `PgA2aTasks` has its own DB-gated tests (column round-trip, CAS transition,
+      per-task event sequence, tenant scoping, push config/receipt,
+      `fail_orphans`), run against a real `pgvector/pgvector:pg16` with
+      `DATABASE_URL` set.
+- [x] `a2a/runtime.rs`: `A2aRuntime` keeps the live task handles (broadcast
+      sender + join handle), one live task per context (`ContextBusy`), and the
+      session → `PausingHitl` table the dsh bridge routes through.
+- [x] `a2a/hitl.rs`: `PausingHitl` implements `ApprovalBroker` + `UserQuestions`.
+      It fills the pending slot **before** CASing `working → input-required`,
+      publishes a `final: true` frame and awaits one-shot; `resume` owns
+      `input-required → working`; an answer that does not fit the request (text
+      that is not a decision, a decision for a question) is `Mismatch` → `-32602`
+      and the task stays parked; `abandon` releases a parked caller on cancel.
+      `RoutingBridge` prefers a parked A2A task for the request's `sessionId` and
+      otherwise delegates to the deployment's handler.
+- [x] `a2a/executor.rs`: one spawned run per accepted message (so `send` can
+      block on the settled state while `cancel` aborts). It mirrors the turn into
+      `session_turns` / `session_items` (user / function_call / assistant), maps
+      `AgentEvent` to frames (token → artifact chunk, step/tool → span update,
+      done → final artifact + `completed`), CASes every terminal write so a
+      cancel cannot be overwritten, and notifies push after the terminal frame.
+      `cancel` = CAS → `abandon` → abort → `cancel_harness` (container gone) →
+      broadcast.
+- [x] `a2a/rpc.rs` + `a2a/mod.rs`: dispatcher with per-method scopes, `400` only
+      for a broken envelope, `200 + error` for every method-level failure (so
+      agenthub reads the code), v0.1 aliases, and the replay endpoint that
+      subscribes **before** reading the log and drops a frame it already sent.
+      Public cards are merged after `require_auth`; every JSON-RPC route is
+      registered before it.
+- [x] `app.rs` / `lib.rs`: `AppState` gained `a2a` and `cancel_harness`;
+      `build_agent_inner_with` backs both the existing builder and
+      `build_agent_for_a2a` (which injects the parked seam as both
+      `ApprovalBroker` and `UserQuestions`).
+- [x] `main.rs`: `A2A_DEFAULT_AGENT` / `A2A_PUBLIC_URL` / `A2A_CARDS_FILE`
+      (`a2a_config_from_env`; a malformed cards file fails boot, a missing public
+      URL falls back to loopback with a warning), one shared per-tenant pool
+      registry feeding both the `RoutingBridge` and the cancel hook, then
+      `PgA2aTasks` + `fail_orphans("process restarted; task cannot continue")` +
+      `HttpPushNotifier`. A missing default agent only warns: cards 404 and
+      `/a2a` answers `-32004`, the per-agent routes still work.
+- [x] Tests: `a2a_tests.rs` drives the real router through discovery, scopes,
+      envelope errors, send/stream, cancel/resume (including the container
+      eviction hook), push against a stub server, replay and its live tail, store
+      lifecycle/scoping, runtime, HITL (native + dsh shapes + routing bridge) and
+      faulty store/session providers; the protocol crate has its own serde,
+      alias, transition and SSE tests. `cargo test --workspace` is 1386 passed
+      (318 in `aria-agent-cloud`) and `./scripts/coverage.sh` is 100.00% of
+      included lines (37218/37218, one documented opt-out).
+- [x] Docs/deploy: ADR-0028, `docs/followups/agenthub-a2a.md`, `requirements.md
+      §12`, the `a2a/pg.rs` coverage exclusion and its reason, both READMEs,
+      `.env.example` and AGENTS.md rule 19.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

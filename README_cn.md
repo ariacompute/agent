@@ -42,6 +42,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 - [🧠 记忆图与 memo 工具族](#-记忆图与-memo-工具族)
 - [♻️ 递归自我改进](#-递归自我改进)
 - [🔌 OpenAI Agents API 兼容性](#-openai-agents-api-兼容性)
+- [🤝 A2A 服务端](#-a2a-服务端)
 
 **SDK**
 
@@ -264,6 +265,9 @@ cp .env.example .env
 | `AGENT_RSI_SWEEP_SECS` / `AGENT_RSI_SWEEP_THRESHOLD` / `AGENT_RSI_DOMAIN` | `0` / `3` / `default` | 进程内 sweep 间隔（`0` 表示由外部 cron 调 `POST /v1/rsi/sweep`）、触发一次 sweep 所需的累计不健康轮次、以及进程内定时器 sweep 所用的业务域。 |
 | `AGENT_RSI_SKILLS_DIR` | _(空)_ → `~/.ariacompute/skills` | 唯一的共享技能目录：晋升写入、`FilesystemSkills` 扫描、dsh 工作区链入都用它。留空时先取 `$ARIA_COMPUTE_HOME/skills`，否则取 `$HOME/.ariacompute/skills`。 |
 | `AGENT_RSI_REAL_RERUN` / `AGENT_RSI_RERUN_TIMEOUT_MS` | `false` / `600000` | 第二道验证闸门：把一条历史任务在候选手册下真实跑一轮模型。因为花钱所以默认关闭；每次尝试都会把 token、步数、耗时与结论写进 `rsi_reruns`，探针不挂工具，因此没有沙箱副作用。超时按 inconclusive 处理，绝不放行。 |
+| `A2A_DEFAULT_AGENT` | _(空)_ | 裸 `/a2a` 端点与 well-known 卡背后的智能体。留空（或填了不存在的 id）只表示「没有默认」：这两条路由回 `agent_not_found`，`/v1/agents/{id}/a2a` 仍可用。 |
+| `A2A_PUBLIC_URL` | _(空)_ → `http://127.0.0.1:<port>` | 卡里公布的源站（`url = {A2A_PUBLIC_URL}/a2a`）。卡无法从被代理的请求推断外部地址，所以真实部署必须设；回落 loopback 时启动会打 warn。 |
+| `A2A_CARDS_FILE` | _(空)_ | JSON 文件，覆盖卡的 `description` 与 `skills`（camelCase）。不配置时卡写 `"{name} (A2A agent)"` 并只提供一条中性的 `chat` 技能。文件格式错误会**启动失败**。 |
 | `RUST_LOG` | `info` | Rust 日志级别：`error` \| `warn` \| `info` \| `debug` \| `trace`。 |
 | `CLOUD_PORT` | `3000` | 对 `cloud` 服务**直连**暴露的主机端口（容器内始终监听 3000）。 |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | sandbox 使用的 Docker Engine API 端点（DooD）。可改为远程 / DinD 守护进程。 |
@@ -702,6 +706,57 @@ async for event in streamed.events:
 用 `GET /v1/agents` 可列出当前密钥可见的智能体（管理员看到全部，租户只看自己
 的）。SDK 引用不存在的智能体 **名称** 时，会在首次创建会话时自动建号；显式传入
 不存在的 `agent_id` 仍返回 404，不会静默新建。
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🤝 A2A 服务端
+
+同一个进程同时是一个标准的 **A2A 远端 agent**：编排器从公开的 Agent Card 发现它，
+再用 JSON-RPC 调用。这是第二层投影——beta Agents 路由、SSE 信封与各 SDK 都没有改动，
+也没有新增权限码（`message/*`、`cancel`、`resume`、push `set` 用 `write`；`get`、
+push `get`、续看流用 `read`）。
+
+| 端点 | 鉴权 | 作用 |
+|---|---|---|
+| `GET /.well-known/agent-card.json` | 公开 | `A2A_DEFAULT_AGENT` 的卡（别名 `/.well-known/agent.json`、`/a2a/agent-card`） |
+| `GET /v1/agents/{id}/.well-known/agent-card.json` | 公开 | 该 agent 的卡（别名 `.../agent-card.json`） |
+| `POST /a2a` | Bearer + `write` | 默认 agent 的 JSON-RPC |
+| `POST /v1/agents/{id}/a2a` | Bearer + `write` | 指定 agent 的 JSON-RPC，额外做可见性校验 |
+| `GET /a2a/stream?task=&since=` | Bearer + `read` | 回放粗粒度事件日志，然后跟随活跃任务 |
+
+方法：`message/send`、`message/stream`、`tasks/get`、`tasks/cancel`、`tasks/resume`、
+`tasks/pushNotification/set|get`，外加 v0.1 别名 `tasks/send`、`tasks/sendSubscribe`。
+
+- **`contextId` 就是会话。** 它对应 `agent_sessions.id`，所以同一 context 复用该 dsh
+  会话的容器与卷，这段对话同时以普通 turn 出现在控制台。一个 context 只允许一个活跃
+  任务，第二个回 `-32005`。
+- **`tasks/cancel` 会销毁容器。** 先 CAS 落定 `canceled`，再释放挂起的决定、abort 运行，
+  最后 `DshPool::evict` 关掉该会话的 runtime（沙箱 transport 会 `destroy` 容器）。卷保留，
+  所以该 context 的下一次 prompt 仍能从卷恢复 dsh 历史。
+- **HITL 挂起任务。** 审批或提问把任务移到 `input-required` 并发布 `final: true` 帧；
+  `tasks/resume` 作答（`metadata.decision` → `metadata.answer` → 消息文本）后回到 `working`。
+  答案与挂起请求不匹配时返回 `-32602` 且任务**保持挂起**，绝不当作隐性拒绝。两条运行时
+  路径都接上了：native 把同一个对象注入 `ApprovalBroker`/`UserQuestions`；dsh 通过
+  `SessionTag` 注入的 `sessionId` 与 `RoutingBridge` 抵达同一个挂起通道。
+- **没有哨兵。** 帧同时写 `kind` 与旧 `event` 名，`final: true` 即流结束。token 增量只在
+  广播里，不落库，所以断线重连拿到的是状态、工具 span 与终稿 artifact；全文在 `tasks/get`。
+- **方法级错误走 HTTP 200**（非 2xx 会被 agenthub 判成 `resource_unreachable`）：只有信封
+  解析失败是 `400`，鉴权 `401`、作用域不足 `403` `insufficient_scope`、卡 404。错误码
+  `-32001`…`-32008` 按 A2A 约定。
+- **卡公开但只说真话。** 只含 agent 名与 `A2A_CARDS_FILE` 的 description/skills，绝不写
+  `instructions`、凭据或沙箱卷名/容器名；也不宣传 aria 的 native 工具族——默认 dsh 在容器
+  里跑自己的工具。
+
+```bash
+curl -s localhost:3000/.well-known/agent-card.json | jq '{name,url,protocolVersion,skills}'
+curl -s -X POST localhost:3000/a2a -H 'Authorization: Bearer dev' \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","role":"user","messageId":"m1","parts":[{"kind":"text","text":"hello"}]}}}'
+```
 
 <div align="right">
 

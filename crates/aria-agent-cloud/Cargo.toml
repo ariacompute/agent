@@ -24,6 +24,8 @@ futures = "0.3"
 async-stream = "0.3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 aria-agent-core = { workspace = true, features = ["openai"] }
+# The A2A wire contract: card, JSON-RPC envelopes, task lifecycle, SSE frames.
+aria-agent-a2a.workspace = true
 aria-agent-dsh = { path = "../aria-agent-dsh" }
 aria-agent-plugin.workspace = true
 aria-agent-tools.workspace = true

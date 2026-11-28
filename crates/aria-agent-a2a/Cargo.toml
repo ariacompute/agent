@@ -1,0 +1,17 @@
+[package]
+name = "aria-agent-a2a"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A2A wire contract: agent card, JSON-RPC methods, task lifecycle and SSE frames."
+# Pure protocol crate: no network, no IO, no workspace-internal dependencies, so
+# `cargo package` could publish it, but nothing else here is on crates.io. See
+# `publish-cargo.yml`.
+publish = false
+
+[lib]
+name = "aria_agent_a2a"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

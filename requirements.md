@@ -335,3 +335,82 @@ Tracked in `docs/followups/`:
   `503` when disabled, stale-revision `409`, unadapted `422`, admin-only
   adaptation `403` and the auto-gate happy path. ADR:
   `docs/adr/0026-recursive-self-improvement.md`.
+
+## 12. A2A server surface
+
+* The cloud is discoverable and callable as a standard A2A remote agent. The
+  surface is an **additional projection**: the OpenAI beta Agents routes
+  (`/v1/agents/**`), the SSE envelope (`event_envelope.rs`) and the SDKs are
+  unchanged, and A2A adds **no permission code** (`write` for `message/*`,
+  `cancel`, `resume`, push `set`; `read` for `get`, push `get`, the replay
+  stream).
+* Discovery: `GET /.well-known/agent-card.json` (plus `/.well-known/agent.json`
+  and `/a2a/agent-card`), `GET /v1/agents/{id}/.well-known/agent-card.json`
+  (plus `.../agent-card.json`). Cards are **public** and merged after the auth
+  layer, so a caller can discover an agent before it has a key.
+* Calling: `POST /a2a` (default agent) and `POST /v1/agents/{id}/a2a`, JSON-RPC
+  2.0 with Bearer auth. Methods `message/send`, `message/stream`, `tasks/get`,
+  `tasks/cancel`, `tasks/resume`, `tasks/pushNotification/set|get`, plus the v0.1
+  aliases `tasks/send` and `tasks/sendSubscribe`.
+* Replay: `GET /a2a/stream?task=&since=` (Bearer, `read`) replays the persisted
+  coarse log and then follows the live task; its frames carry **no JSON-RPC
+  envelope** (`event:` + the bare frame), matching agenthub's reader.
+* Error shape: a malformed envelope is `400`; a method-level failure is
+  **HTTP 200** with a JSON-RPC `error` object (agenthub treats non-2xx as
+  `resource_unreachable`); missing auth `401`; missing scope `403`
+  `insufficient_scope`; unknown card `404`
+  `{"error":{"code":"agent_not_found",…}}`. Business failure is a normal result
+  whose `status.state` is `failed`.
+* Codes: `-32700`, `-32600`, `-32601`, `-32602`, `-32603`, `-32001
+  task_not_found`, `-32002 task_not_cancelable`, `-32004 agent_not_found`,
+  `-32005 invalid_state_transition`, `-32006 resource_not_found`, `-32008
+  task_not_resumable`.
+* Task lifecycle: `submitted → working → input-required → working → completed |
+  failed | canceled`, and `working → completed | failed | canceled`. One live
+  task per context; a second one is `-32005`. `contextId` is
+  `agent_sessions.id`, so a context reuses its dsh session volume, and the
+  conversation is mirrored into `session_turns` / `session_items` so the existing
+  console shows it.
+* Frames write both the canonical `kind` (`task|status-update|artifact-update|
+  message`) and agenthub's legacy `event`
+  (`task_status_update|task_artifact_update|message`), and `parts` carry both
+  `kind` and `type`. There is no sentinel: the `final: true` frame ends the
+  stream. Token deltas are broadcast-only; the log keeps the initial task, status
+  transitions, tool spans and the final artifact.
+* HITL: an agent approval/question parks the task in `input-required` and
+  publishes a final status frame; `tasks/resume` answers it (`metadata.decision`,
+  then `metadata.answer`, then message text) and returns the `working` task. An
+  answer that does not fit the pending request is `-32602` and the task **stays**
+  `input-required`; `-32008` means nothing was parked. Both harness paths are
+  covered: native injects the same object as `ApprovalBroker` + `UserQuestions`;
+  dsh reaches it through the per-session `sessionId` that `SessionTag` injects
+  and the `RoutingBridge` that looks the parked task up, with the deployment's
+  own handler as the fail-closed fallback.
+* `tasks/cancel` CASes `canceled` first, releases a parked decision, aborts the
+  run, and **evicts the session's harness runtime** — for dsh that destroys the
+  container, so tools stop instead of running on. The volume survives. Cancelling
+  one task never touches another session.
+* Cards carry only public data: name, `A2A_CARDS_FILE` description and skills (or
+  the neutral `"{name} (A2A agent)"` + one `chat` skill), `protocolVersion =
+  1.0.0`. They never include `instructions`, principals, credentials, tool
+  parameters or sandbox volume/container names, and they do **not** advertise the
+  native tool families — the default dsh harness runs its own tools in the
+  container.
+* Push: `http(s)` only, no userinfo in the authority, redirects not followed, 5 s
+  budget with one retry, `token` as `Authorization: Bearer`, delivery recorded in
+  `push_last`, failure logged and never rolled back into the task.
+* A restart fails every non-terminal task (`fail_orphans`, message "process
+  restarted; task cannot continue"); it never looks alive.
+* Storage: `migrations/0010_a2a_tasks.sql` (`a2a_tasks` + `a2a_task_events`,
+  idempotent), replayed through `store/pg.rs::ensure_schema`. Every query is
+  `principal_id`-scoped.
+* Configuration: `A2A_DEFAULT_AGENT` (agent behind `/a2a`; missing ⇒ card 404 and
+  `-32004`), `A2A_PUBLIC_URL` (origin the card advertises; missing ⇒ loopback +
+  warning), `A2A_CARDS_FILE` (card overrides; malformed ⇒ boot failure).
+* Verification: the pure protocol crate has its own serde/alias/transition/SSE
+  tests; `a2a_tests.rs` drives the real router for every method's normal and
+  failure path (public card without Bearer, `403` scope, tenant isolation, push
+  callback against a stub server, replay, cancel invoking the eviction hook);
+  `MemoryA2aTasks` pins the store lifecycle while `a2a/pg.rs` runs under
+  `DATABASE_URL`. ADR: `docs/adr/0028-a2a-server.md`; orchestrator notes:
+  `docs/followups/agenthub-a2a.md`.

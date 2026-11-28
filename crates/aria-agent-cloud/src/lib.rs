@@ -15,6 +15,9 @@
 //! * [`types`] — wire types (OpenAI shapes),
 //! * [`upgrade`] / [`cli_config`] — self-managed upgrade from Releases.
 
+pub mod a2a;
+#[cfg(test)]
+pub(crate) mod a2a_tests;
 pub mod api;
 #[cfg(test)]
 pub(crate) mod api_tests;
@@ -38,9 +41,11 @@ pub mod types;
 pub mod upgrade;
 pub mod util;
 
+pub use a2a::{A2aConfig, A2aState};
 pub use app::{
-    agent_config, agent_tools, build_agent, build_router, build_sse_stream, AppState, MakeContext,
-    MakeModel, MakeSandbox, RsiState, DEFAULT_MODEL, HEALTH_PATH,
+    agent_config, agent_tools, build_agent, build_agent_for_a2a, build_router, build_sse_stream,
+    AppState, CancelHarness, MakeContext, MakeModel, MakeSandbox, RsiState, DEFAULT_MODEL,
+    HEALTH_PATH,
 };
 pub use auth::{
     generate_key, hash_key, presented_token, require_auth, resolve_principal, ApiKeyScopes,

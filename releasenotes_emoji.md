@@ -1,5 +1,33 @@
 # 发布说明 ✨
 
+## 🤝 同一个端口也是 A2A 远程 agent
+
+除了 OpenAI beta Agents API，这个进程现在也按 Agent Card 公开自己，并用 A2A JSON-RPC 接受编排器的任务。第二层投影，不是重写：旧路由、冻结的 SSE 信封与 SDK 都没动，也没新增权限码。
+
+### 🔍 发现与鉴权
+
+- 🪪 `aria-agent-a2a` 是纯协议 crate（无 axum / sqlx、无 I/O）：卡片、JSON-RPC 信封与错误码、`Last-Event-ID` 解析与 RFC 3339 辅助，`protocolVersion` 钉在 `1.0.0`。
+- 🌐 `/.well-known/agent-card.json`（别名 `agent.json`、`/a2a/agent-card`）与 `/v1/agents/{id}/agent-card.json` 像 `/healthz` 一样在鉴权之后合并 —— 先发现、后持钥。
+- 🙈 卡片只带名字与 `A2A_CARDS_FILE` 的描述/技能，不带 instructions、凭据、主体、沙箱名，也不冒称原生工具族。
+- 📮 方法级错误装在 HTTP 200 里（非 2xx 会被读成 `resource_unreachable`），`-32001`…`-32009` 的机器名放在 `error.data.code`；只有坏信封是 400，缺令牌 401，缺 scope 403。
+
+### 🧠 任务语义
+
+- 🧵 `contextId` 就是 `agent_sessions.id`：A2A 会话复用同一个 dsh 容器与卷，也出现在控制台里；一个 context 只允许一个在跑的任务，第二个 `message/send` 得 `-32005`，未知 context 新建 `sess_<uuid>`。
+- 🧯 `tasks/cancel` 先 CAS、放掉挂起决议、abort，再经 `cancel_harness` → `DshPool::evict` 销毁容器（卷保留给下一次提示）。
+- ⏸️ HITL 把任务停在 `input-required`；`tasks/resume` 只认 `metadata.decision`，别的文本是 `-32602` 且任务继续停着，绝不隐式拒绝。
+- 📡 `/a2a/stream` 按 `Last-Event-ID` 重放再跟实时流；token 增量只广播不落库，重连拿到状态、工具跨度与最终产物。
+- 🔔 push 只收 `http(s)`、不带 userinfo、不跟随重定向，5 秒 + 一次重试，失败记 `push_last` 而不回滚任务。
+
+### ☁️ 配置与存储
+
+- ⚙️ `A2A_DEFAULT_AGENT`（留空则 `/a2a` 与 well-known 回 `agent_not_found`）、`A2A_PUBLIC_URL`（卡片广播的地址，无法从请求推断）、`A2A_CARDS_FILE`（坏文件直接启动失败）。
+- 🗄️ `0010_a2a_tasks.sql` 建 `a2a_tasks` 与 `a2a_task_events`，只存粗粒度帧；内存 provider 覆盖同样的离线语义。
+
+### ✅ 验证
+
+`cargo test --workspace`（1386 ✅）、fmt、`clippy -D warnings` 与覆盖率闸门（计入统计的行 37218/37218，100%）全部通过；真实 pgvector 容器下云端 318 条（含两条 `a2a::pg` 与 `0010` 建表）。curl 冒烟：无钥读公开卡片、无 Bearer 得 401、未知任务 HTTP 200 + `-32001`、重放流、沙箱容器内经 thinking 过滤代理真实 `message/send` 得 `pong`、取消运行中任务变 `canceled` 且恰好少一个容器；`scripts/test-api.sh` 38/38。`just dsh-e2e` 在宿主 dsh 上真跑 3 条（真网关 + 双轮过滤代理），native 下同一提示词在 `/a2a` 与 `/v1/agents/sessions/{id}/events` 都完成。
+
 ## 🐳 dsh 跑进容器了：默认开启，失败即失败
 
 原来的默认运行时是**宿主子进程**：`dsh` 既调模型也跑它自己的工具，唯一的边界只是权限档。现在整条会话在容器里，宿主进程不再充任边界。

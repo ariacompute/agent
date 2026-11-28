@@ -43,7 +43,7 @@ cd "$(dirname "$0")/.."
 #     real request/response path without a daemon.
 # `tools/terminal.rs` stays: the `pty` feature (off by default) needs a real
 # terminal device.
-IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/pg_rsi\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-cloud/src/pg_testkit\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs'
+IGNORE='crates/aria-agent-ffigen/|crates/aria-agent-cloud/src/main\.rs|crates/aria-agent-cloud/src/store/pg\.rs|crates/aria-agent-cloud/src/store/pg_orchestration\.rs|crates/aria-agent-cloud/src/store/pg_rsi\.rs|crates/aria-agent-cloud/src/store/governance\.rs|crates/aria-agent-cloud/src/pg_testkit\.rs|crates/aria-agent-cloud/src/context/pg\.rs|crates/aria-agent-cloud/src/a2a/pg\.rs|crates/aria-agent-tools/src/terminal\.rs|crates/aria-agent-dsh/src/transport\.rs|crates/aria-agent-egress-proxy/src/main\.rs'
 
 # Hermetic environment: the sandbox socket probes and the Docker client
 # constructor are environment-dependent. Give both a stable, local target so

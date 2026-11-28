@@ -158,6 +158,8 @@ pub fn harness_with(
         make_context,
         harness: None,
         rsi: RsiState::disabled(),
+        a2a: crate::a2a::A2aState::disabled(),
+        cancel_harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -188,6 +190,8 @@ pub fn harness_with_rsi(rsi: RsiState) -> Harness {
         make_context,
         harness: None,
         rsi,
+        a2a: crate::a2a::A2aState::disabled(),
+        cancel_harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -236,6 +240,8 @@ pub fn harness_with_schedule(schedule: Arc<dyn agent_core::seams::ScheduleSeam>)
         make_context,
         harness: None,
         rsi: RsiState::disabled(),
+        a2a: crate::a2a::A2aState::disabled(),
+        cancel_harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -271,6 +277,8 @@ pub fn harness_with_context(fail_recall: bool, fail_relations: bool) -> Harness 
         make_context,
         harness: None,
         rsi: RsiState::disabled(),
+        a2a: crate::a2a::A2aState::disabled(),
+        cancel_harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -2040,6 +2048,8 @@ pub fn harness_with_context_failing_all() -> Harness {
         make_context,
         harness: None,
         rsi: RsiState::disabled(),
+        a2a: crate::a2a::A2aState::disabled(),
+        cancel_harness: None,
     };
     Harness {
         app: build_router(state.clone()),
@@ -2118,6 +2128,8 @@ mod faulty {
             make_context,
             harness: None,
             rsi: RsiState::disabled(),
+            a2a: crate::a2a::A2aState::disabled(),
+            cancel_harness: None,
         };
         Harness {
             app: build_router(state.clone()),
@@ -2222,6 +2234,8 @@ pub fn harness_with_session_failure(fail: &'static [&'static str]) -> Harness {
         make_context,
         harness: None,
         rsi: RsiState::disabled(),
+        a2a: crate::a2a::A2aState::disabled(),
+        cancel_harness: None,
     };
     Harness {
         app: build_router(state.clone()),

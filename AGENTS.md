@@ -273,6 +273,33 @@ kept as an explicit `native` fallback (ADR-0019).
      `exec_attached` / `copy_in` / `has_image` or a wrapper turns the capability
      into `Unsupported`. See `docs/adr/0027-dsh-sandbox-runtime.md`.
 
+     19. **The A2A surface is a second projection, and it obeys the dsh sandbox.**
+     `aria-agent-cloud/src/a2a/**` (+ the pure `aria-agent-a2a` crate) is the A2A
+     server. Hard rules: (a) `event_envelope.rs`, the `/v1/agents/**` routes and
+     the SDKs stay untouched, and **no new permission code** is added — `write`
+     for `message/*` / `cancel` / `resume` / push `set`, `read` for `get` /
+     push `get` / `/a2a/stream`; (b) a method-level failure is **HTTP 200 + a
+     JSON-RPC error object** (agenthub reads a non-2xx as `resource_unreachable`);
+     only a malformed envelope is `400`; the public card router is merged after
+     `require_auth`, every JSON-RPC route before it; (c) `contextId` **is**
+     `agent_sessions.id`, one live task per context (`-32005` otherwise), and
+     `tasks/cancel` must CAS first, then release the parked decision, abort the
+     run **and** `DshPool::evict` the session runtime — otherwise the tool keeps
+     running inside the container; the volume survives on purpose; (d) frames
+     carry both `kind` and the legacy `event`, end on `final: true`, and have no
+     sentinel; `GET /a2a/stream` frames carry **no** JSON-RPC envelope; token
+     deltas are broadcast only (never one row per token); (e) the public card
+     must never contain `instructions`, principals, credentials or sandbox
+     names, and must **not** advertise the native tool families (the default dsh
+     harness runs its own tools in the container); (f) dsh HITL depends on
+     `SessionTag` injecting `sessionId` and `RoutingBridge` looking the parked
+     task up — the fallback must stay the deployment's fail-closed handler;
+     (g) an answer that does not fit the parked request is `-32602` and the task
+     **stays** `input-required` (never an implicit denial), and nothing is ever
+     parked unless the harness really asked; (h) a restart runs
+     `fail_orphans(...)`, so a dead run is never shown as alive. See
+     `docs/adr/0028-a2a-server.md` and `docs/followups/agenthub-a2a.md`.
+
 ## SDK（js / python）
 
 端侧/服务端通用的 agent SDK，API 形状对齐 OpenAI Agents SDK（`Agent` / `run` /

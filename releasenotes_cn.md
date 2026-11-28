@@ -1,5 +1,73 @@
 # 发布说明
 
+## 同一个端口现在也是 A2A 远程 agent
+
+`aria-agent-cloud` 原本只说一种协议：OpenAI beta Agents API。agenthub 这类编排器无法把它注册成远程
+agent——它按 Agent Card 约定发现对端，再用 A2A JSON-RPC 驱动。于是同一个进程现在也说这套协议
+（ADR-0028）：同一个端口、同一把 key、同一个会话存储。它是第二层投影而不是重写——`/v1/agents/**`、
+冻结的 SSE 信封与各 SDK 都没改，也没有新增权限码（`write` 覆盖 `message/*`、`cancel`、`resume` 与
+push `set`；`read` 覆盖 `get`、push `get` 与重放流）。
+
+### 主要变更
+
+- **独立的协议 crate** —— `aria-agent-a2a`（不依赖 axum / sqlx，无 I/O）承载卡片与任务类型、
+  JSON-RPC 信封与错误码表、`Last-Event-ID` 解析与 RFC 3339 辅助。`protocolVersion` 为 `1.0.0`。
+  卡片只带 agent 名与 `A2A_CARDS_FILE` 的 description/skills——绝不带 `instructions`、凭据、主体或
+  沙箱名——也不宣传原生工具族，因为默认 dsh harness 的工具跑在容器里。
+- **卡片公开，方法不公开** —— `/.well-known/agent-card.json`（别名 `agent.json`、
+  `/a2a/agent-card`）与 `/v1/agents/{id}/agent-card.json` 像 `/healthz` 一样在 `require_auth`
+  **之后**合并；JSON-RPC 与重放流在它**之前**注册，因此每个方法都继承 Bearer 鉴权，并在分发器里
+  再做一次 scope 判定。未知 agent 返回 `404 {"error":{"code":"agent_not_found"}}`；
+  `A2A_DEFAULT_AGENT` 留空时 well-known 卡片返回同一机器码，而按 agent 的路由照常可用。
+- **方法级错误装在 HTTP 200 里** —— 非 2xx 会被调用方读成 `resource_unreachable`，所以
+  `-32001`…`-32009` 以 JSON-RPC error 对象返回，机器名放在 `error.data.code`
+  （`task_not_found`、`invalid_state_transition`…）。只有信封损坏是 `400`；缺令牌或令牌错误是
+  `401`，缺 scope 是 `403 insufficient_scope`。
+- **`contextId` 就是会话，一个 context 只跑一个任务** —— 它映射到 `agent_sessions.id`，因此 A2A
+  会话复用同一个 dsh 容器与卷，也会作为普通 turn 出现在控制台里。第二个 `message/send` 打到忙碌的
+  context 得到 `-32005`，而不是两条交错的运行；未知 context 会新建 `sess_<uuid>`。
+- **`tasks/cancel` 销毁容器** —— 先 CAS 状态、放掉挂起的决议、abort 运行，再由 `cancel_harness`
+  驱逐会话运行时（`DshPool::evict`），于是沙箱传输层销毁容器，而卷保留给下一次提示。重启后
+  `fail_orphans` 把遗留的行收尾。
+- **流可重放** —— `GET /a2a/stream?task=&since=` 认 `Last-Event-ID`，然后跟实时任务；帧是纯 SSE
+  （没有 JSON-RPC 信封），同时带 `kind` 与旧的 `event`。token 增量只广播、不落库，所以重连拿到的是
+  状态、工具跨度与最终产物。
+- **HITL 把任务停住** —— `PausingHitl` 同时对接审批与提问两个接缝。`tasks/resume` 只认
+  `metadata.decision`；其他文本是 `-32602` 不匹配，任务**继续**停在 `input-required`，绝不隐式
+  拒绝。native 注入同一个对象给 `ApprovalBroker` / `UserQuestions`；dsh 经 `SessionTag` 注入的
+  `sessionId` 到达。
+- **push 回调节制很小** —— `tasks/pushNotification/set|get` 或 `message/send` 的 `configuration`
+  块注册一个 `http(s)` 地址，不允许 `user:pass@`；不跟随重定向，每次投递 5 秒、只重试一次，失败记进
+  `push_last` 而不回滚任务状态。
+- **存储** —— `migrations/0010_a2a_tasks.sql` 建 `a2a_tasks` 与 `a2a_task_events`（只存粗粒度帧，
+  每条查询都按 `principal_id` 过滤）。内存 provider 覆盖同样的离线语义。
+
+### 配置
+
+| 变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `A2A_DEFAULT_AGENT` | _（空）_ | `POST /a2a` 与 well-known 卡片背后的 agent；留空时回 `agent_not_found`，`/v1/agents/{id}/a2a` 仍可用 |
+| `A2A_PUBLIC_URL` | `http://127.0.0.1:<端口>` | 调用方实际访问本服务的源；卡片广播 `{A2A_PUBLIC_URL}/a2a`。卡片无法从被代理的请求推断，真实部署必须显式设置 |
+| `A2A_CARDS_FILE` | _（空）_ | 可选的 camelCase JSON，覆盖卡片的 `description` 与 `skills`；文件损坏会启动失败，而不是被忽略 |
+
+### 破坏性变更
+
+- `AppState` 新增 `a2a` 与 `cancel_harness`；本 crate 之外的字面量构造需补
+  `a2a: A2aState::disabled()` 与 `cancel_harness: None`。
+- `A2aRuntime::open` 返回 `Result<TaskChannel, ContextBusy>`：调用方必须自己决定「context 忙」的
+  含义，而不是让两条运行交错。
+
+### 验证
+
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo test --workspace`（1386 通过）与 `./scripts/coverage.sh`（计入统计的行 37218/37218 全覆盖）
+全部通过。真实 `pgvector/pgvector:pg16` 容器下云端 318 条通过，含两条 `a2a::pg` 用例与 `0010`
+建出两张表。接真 Postgres 的 curl 冒烟：无钥读到公开卡片、无 Bearer 得 `401`、未知任务 HTTP 200
++ `-32001`、重放流、在 dsh 容器内经 thinking 过滤代理真实 `message/send` 得到 `pong`、对运行中的
+任务 `tasks/cancel` 变为 `canceled` 且恰好销毁一个容器；`scripts/test-api.sh` 38/38。`just dsh-e2e`
+在宿主 dsh 上跑通真实网关的 3 条用例，native 模式下同一提示词在 `/a2a` 与
+`/v1/agents/sessions/{id}/events` 都完成。
+
 ## dsh 现在跑在容器里
 
 默认的 turn 运行时原本是**宿主子进程**：`dsh --profile sdk` 在与控制面同一个文件系统上执行

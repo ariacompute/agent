@@ -23,7 +23,7 @@ use aria_agent_cloud::cli_config;
 use aria_agent_cloud::context::PgContextStore;
 use aria_agent_cloud::rsi_rerun::ModelRerunProbe;
 use aria_agent_cloud::store::{ensure_schema, PgStore};
-use aria_agent_cloud::{build_router, upgrade, KeyCache};
+use aria_agent_cloud::{build_router, upgrade, KeyCache, Principal};
 use aria_agent_dsh::{
     parse_filter_mode, DshAgentLoop, DshConfig, DshPool, SeamApprovalBridge, ThinkingFilterProxy,
 };
@@ -227,6 +227,52 @@ fn dsh_permission_mode(preset: PermissionPreset) -> &'static str {
     }
 }
 
+/// A2A deployment configuration (`A2A_DEFAULT_AGENT` / `A2A_PUBLIC_URL` /
+/// `A2A_CARDS_FILE`).
+///
+/// A card's `url` cannot be inferred from the request, so a missing
+/// `A2A_PUBLIC_URL` falls back to a loopback origin and says so: discovery still
+/// works on this host, and the operator is told why a remote orchestrator would
+/// be given an unreachable address. A malformed `A2A_CARDS_FILE` is a boot error
+/// rather than a silently ignored one.
+fn a2a_config_from_env(port: u16) -> Result<aria_agent_cloud::A2aConfig, String> {
+    let default_agent = std::env::var("A2A_DEFAULT_AGENT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let public_url = match std::env::var("A2A_PUBLIC_URL") {
+        Ok(raw) if !raw.trim().is_empty() => raw.trim().trim_end_matches('/').to_string(),
+        _ => {
+            let fallback = format!("http://127.0.0.1:{port}");
+            tracing::warn!(
+                public_url = %fallback,
+                "A2A_PUBLIC_URL is not set: cards advertise a loopback origin that a \
+                 remote orchestrator cannot reach"
+            );
+            fallback
+        }
+    };
+    let cards = match std::env::var("A2A_CARDS_FILE") {
+        Ok(path) if !path.trim().is_empty() => {
+            let raw = std::fs::read_to_string(path.trim())
+                .map_err(|e| format!("A2A_CARDS_FILE `{path}`: {e}"))?;
+            aria_agent_cloud::a2a::card::CardOverrides::from_json(&raw)?
+        }
+        _ => Default::default(),
+    };
+    if default_agent.is_none() {
+        tracing::warn!(
+            "A2A_DEFAULT_AGENT is not set: `/a2a` and `/.well-known/agent-card.json` \
+             answer agent_not_found (the per-agent routes still work)"
+        );
+    }
+    Ok(aria_agent_cloud::A2aConfig {
+        default_agent,
+        public_url,
+        cards,
+    })
+}
+
 async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -286,6 +332,15 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("AGENT_HARNESS", "dsh");
     }
     let harness_name = aria_agent_cloud::app::harness_from_env();
+    // One pool registry per process, shared by two consumers: the harness factory
+    // (a tenant reuses its pool) and `cancel_harness` (an A2A cancel evicts just
+    // that one session's runtime, which for dsh *is* its container).
+    let pools: Arc<std::sync::Mutex<HashMap<String, Arc<DshPool>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    // The A2A runtime is created before the factory: dsh's approval/question
+    // requests are routed through `RoutingBridge` to whichever A2A task parks on
+    // that session (ADR-0028).
+    let a2a_runtime = Arc::new(aria_agent_cloud::a2a::runtime::A2aRuntime::new());
     let make_harness: Option<aria_agent_cloud::app::MakeHarness> = if harness_name == "native" {
         None
     } else {
@@ -382,8 +437,8 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("thinking filter: {e}"))?
         .or_else(|| gateway_base.clone());
         // One pool per tenant: session homes never cross tenants (AGENTS rule 7).
-        let pools: Arc<std::sync::Mutex<HashMap<String, Arc<DshPool>>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let pools = pools.clone();
+        let a2a_runtime = a2a_runtime.clone();
         Some(Arc::new(move |principal, cfg| {
             let tenant = principal.id.clone();
             let mut registry = pools.lock().expect("dsh pool registry poisoned");
@@ -394,12 +449,17 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     "auto" => Arc::new(AutoAllow),
                     _ => Arc::new(DenyAll),
                 };
-                let bridge = Arc::new(SeamApprovalBridge::new(
+                let fallback = Arc::new(SeamApprovalBridge::new(
                     approvals,
                     Arc::new(NoQuestions),
                     cfg.session.clone(),
                     preset,
                 ));
+                // A request that names a session with a parked A2A task goes to
+                // that task; everything else keeps the deployment defaults.
+                let bridge: Arc<dyn aria_agent_dsh::rpc::ServerRequestHandler> = Arc::new(
+                    aria_agent_cloud::a2a::hitl::RoutingBridge::new(a2a_runtime.clone(), fallback),
+                );
                 let dsh_model = model_override
                     .as_deref()
                     .unwrap_or(cfg.model.as_str())
@@ -451,6 +511,35 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         }))
     };
 
+    // A2A `tasks/cancel` reaches the session's harness runtime through this
+    // hook. The native path has no container, so aborting the run is enough and
+    // the hook stays `None`.
+    let cancel_harness: Option<aria_agent_cloud::CancelHarness> = if harness_name == "native" {
+        None
+    } else {
+        let pools = pools.clone();
+        Some(Arc::new(move |principal: Principal, session: String| {
+            let pools = pools.clone();
+            Box::pin(async move {
+                let pool = {
+                    let registry = pools.lock().expect("dsh pool registry poisoned");
+                    registry.get(&principal.id).cloned()
+                };
+                match pool {
+                    Some(pool) => {
+                        let evicted = pool.evict(&session).await;
+                        tracing::info!(session, evicted, "a2a cancel: session runtime evicted");
+                    }
+                    None => tracing::debug!(
+                        session,
+                        tenant = principal.id.as_str(),
+                        "a2a cancel: tenant has no harness pool"
+                    ),
+                }
+            }) as futures::future::BoxFuture<'static, ()>
+        }))
+    };
+
     // One Postgres store implements the metadata, team and schedule seams; each
     // table is `principal_id`-scoped, so no extra wiring is needed here.
     // Governance state lives in Postgres too: policy revisions, audit events,
@@ -475,6 +564,37 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+    // --- A2A server surface (ADR-0028) ---
+    // Always on: every method reuses the existing Bearer auth and scopes, so it
+    // is the same trust boundary as `/v1/agents`. Without `A2A_DEFAULT_AGENT`
+    // there is simply no agent behind `/a2a`; the per-agent routes still work.
+    let a2a_config = a2a_config_from_env(port)?;
+    let a2a_tasks: Arc<dyn aria_agent_cloud::a2a::store::A2aTaskStore> =
+        Arc::new(aria_agent_cloud::a2a::pg::PgA2aTasks::new(pool.clone()));
+    // A task whose run died with the previous process must not look alive.
+    match a2a_tasks
+        .fail_orphans(
+            "process restarted; task cannot continue",
+            aria_agent_cloud::util::now_ms(),
+        )
+        .await
+    {
+        Ok(0) => {}
+        Ok(closed) => tracing::warn!(closed, "a2a: closed tasks orphaned by a restart"),
+        Err(e) => tracing::warn!(error = ?e, "a2a: could not close orphaned tasks"),
+    }
+    let a2a_push: Arc<dyn aria_agent_cloud::a2a::push::PushNotifier> = Arc::new(
+        aria_agent_cloud::a2a::push::HttpPushNotifier::new()
+            .map_err(|e| format!("a2a push notifications: {e}"))?,
+    );
+    let a2a = aria_agent_cloud::A2aState {
+        runtime: a2a_runtime.clone(),
+        tasks: a2a_tasks,
+        push: a2a_push,
+        config: Arc::new(a2a_config),
+        enabled: true,
+    };
+
     let pg = Arc::new(PgStore::new(pool));
     let teams: Arc<dyn aria_agent_orchestrator::teams::TeamStore> = pg.clone();
     let schedule: Arc<dyn agent_core::seams::ScheduleSeam> = pg.clone();
@@ -588,7 +708,27 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         make_context,
         harness: make_harness,
         rsi,
+        a2a,
+        cancel_harness,
     };
+
+    // A default agent that does not exist is not fatal (the deployment may
+    // create it on first boot), but it is the one misconfiguration an operator
+    // will otherwise only find through a 404 card.
+    if let Some(agent) = state.a2a.config.default_agent.clone() {
+        match state.agents.get_agent(&Principal::admin(), &agent).await {
+            Ok(_) => tracing::info!(
+                agent,
+                public_url = %state.a2a.config.public_url,
+                "a2a: default agent"
+            ),
+            Err(_) => tracing::warn!(
+                agent,
+                "a2a: A2A_DEFAULT_AGENT does not exist; the well-known card 404s and \
+                 `/a2a` answers agent_not_found"
+            ),
+        }
+    }
 
     let app = build_router(state);
 

@@ -148,6 +148,17 @@ impl ToolSet {
         )
     }
 
+    /// Register the `ask_user` family against `questions`.
+    ///
+    /// Assembly-time injection: a caller that can answer a question (a UI, an
+    /// A2A task channel) hands its broker over, and the model sees `ask_user`.
+    /// Without it the family is not registered at all — the model never sees a
+    /// tool the deployment cannot serve.
+    pub fn with_questions(mut self, questions: Arc<dyn UserQuestions>) -> Self {
+        self.questions = Some(questions);
+        self
+    }
+
     /// Attach the outbound policy. `web_*` decisions then name the policy
     /// revision, and a denial reaches the model as an actionable error.
     pub fn with_egress(mut self, egress: Arc<dyn EgressSeam>) -> Self {
@@ -504,5 +515,20 @@ mod tests {
             .await
             .unwrap();
         assert!(frags.iter().any(|f| f.kind == FragmentKind::ToolResult));
+    }
+
+    #[test]
+    fn questions_register_the_ask_user_family() {
+        let bare = ToolSet::local(
+            Arc::new(agent_core::seams::SandboxPolicy::default()),
+            Arc::new(NoopSandbox),
+            agent_core::in_memory_context(),
+        );
+        assert!(!bare.tools().iter().any(|t| t.name == "ask_user"));
+        assert!(!bare.handlers().iter().any(|h| h.handles("ask_user")));
+
+        let asking = bare.with_questions(Arc::new(agent_core::seams::NoQuestions));
+        assert!(asking.tools().iter().any(|t| t.name == "ask_user"));
+        assert!(asking.handlers().iter().any(|h| h.handles("ask_user")));
     }
 }

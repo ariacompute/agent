@@ -42,6 +42,7 @@ by default, with pluggable sandboxes.
 - [🧠 Memory graph & memo tools](#-memory-graph--memo-tools)
 - [♻️ Recursive self-improvement](#-recursive-self-improvement)
 - [🔌 OpenAI Agents API compatibility](#-openai-agents-api-compatibility)
+- [🤝 A2A server](#-a2a-server)
 
 **SDK**
 
@@ -270,6 +271,9 @@ cp .env.example .env
 | `AGENT_RSI_SWEEP_SECS` / `AGENT_RSI_SWEEP_THRESHOLD` / `AGENT_RSI_DOMAIN` | `0` / `3` / `default` | In-process sweep interval (`0` = external cron drives `POST /v1/rsi/sweep`), unhealthy turns accumulated before a sweep is due, and the domain the in-process timer sweeps. |
 | `AGENT_RSI_SKILLS_DIR` | _(empty)_ → `~/.ariacompute/skills` | The one catalog promoted skills land in, `FilesystemSkills` scans and every dsh workspace links. Empty resolves `$ARIA_COMPUTE_HOME/skills`, else `$HOME/.ariacompute/skills`. |
 | `AGENT_RSI_REAL_RERUN` / `AGENT_RSI_RERUN_TIMEOUT_MS` | `false` / `600000` | Second validation gate: replay one recorded task through a real model call under the candidate playbook. Off by default because it costs money; every attempt is written to `rsi_reruns` (tokens, steps, duration, verdict) and the probe is tool-free, so a re-run has no sandbox side effects. A timeout is inconclusive, never a pass. |
+| `A2A_DEFAULT_AGENT` | _(empty)_ | Agent behind the bare `/a2a` endpoint and the well-known card. Empty (or an id that does not exist) only means there is no default: those two routes answer `agent_not_found`, while `/v1/agents/{id}/a2a` still works. |
+| `A2A_PUBLIC_URL` | _(empty)_ → `http://127.0.0.1:<port>` | Origin the card advertises (`url = {A2A_PUBLIC_URL}/a2a`). A card cannot be derived from a proxied request, so a real deployment must set it; the loopback fallback logs a warning at boot. |
+| `A2A_CARDS_FILE` | _(empty)_ | JSON file overriding the card's `description` and `skills` (camelCase). Without it the card says `"{name} (A2A agent)"` and offers one neutral `chat` skill. A malformed file **fails boot**. |
 | `RUST_LOG` | `info` | Rust log filter: `error` \| `warn` \| `info` \| `debug` \| `trace`. |
 | `CLOUD_PORT` | `3000` | Host port published for **direct** access to the `cloud` service (the container always listens on 3000). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker Engine API endpoint for the sandbox (DooD). Override for a remote / DinD daemon. |
@@ -765,6 +769,67 @@ visible to your key with `GET /v1/agents` (admins see every agent, tenants
 only their own). An SDK that references an unknown agent **name** creates that
 agent on first session creation; an explicit unknown `agent_id` still returns
 404 instead of silently minting a new one.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🤝 A2A server
+
+The same process is also a standard **A2A remote agent**: an orchestrator
+discovers it from a public Agent Card and drives it over JSON-RPC. This is a
+second projection — the beta-Agents routes, the SSE envelope and the SDKs are
+untouched, and no new permission code exists (`write` for `message/*`, `cancel`,
+`resume` and push `set`; `read` for `get`, push `get` and the replay stream).
+
+| Endpoint | Auth | What it does |
+|---|---|---|
+| `GET /.well-known/agent-card.json` | public | Card of `A2A_DEFAULT_AGENT` (aliases: `/.well-known/agent.json`, `/a2a/agent-card`) |
+| `GET /v1/agents/{id}/.well-known/agent-card.json` | public | That agent's card (alias: `.../agent-card.json`) |
+| `POST /a2a` | Bearer + `write` | JSON-RPC for the default agent |
+| `POST /v1/agents/{id}/a2a` | Bearer + `write` | JSON-RPC for one agent, with visibility check |
+| `GET /a2a/stream?task=&since=` | Bearer + `read` | Replay the coarse event log, then follow the live task |
+
+Methods: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`,
+`tasks/resume`, `tasks/pushNotification/set|get`, plus the v0.1 aliases
+`tasks/send` and `tasks/sendSubscribe`.
+
+- **`contextId` is a session.** It maps to `agent_sessions.id`, so a context
+  reuses that dsh session's container and volume, and the conversation also
+  appears in the console as an ordinary turn. One live task per context; a second
+  is `-32005`.
+- **`tasks/cancel` destroys the container.** The state is CASed first, then the
+  parked decision is released, the run is aborted and `DshPool::evict` shuts the
+  session's runtime down (the sandbox transport destroys the container). The
+  volume survives, so the next prompt in that context resumes dsh's history.
+- **HITL parks the task.** An approval or question moves it to `input-required`
+  and publishes a `final: true` frame; `tasks/resume` answers it (`metadata.decision`,
+  then `metadata.answer`, then message text) and returns it to `working`. An
+  answer that does not fit the request is `-32602` and the task **stays** parked —
+  never an implicit denial. Both harness paths are wired: native injects the same
+  object as `ApprovalBroker`/`UserQuestions`; dsh reaches it through the
+  `sessionId` that `SessionTag` injects and the `RoutingBridge`.
+- **No sentinel.** Frames carry both `kind` and the legacy `event`; the
+  `final: true` frame ends the stream. Token deltas are broadcast only, so a
+  reconnect gets status, tool spans and the final artifact — `tasks/get` has the
+  full answer.
+- **Errors travel inside HTTP 200** (a non-2xx would be read as
+  `resource_unreachable` by agenthub): `400` only for a broken envelope, `401`
+  auth, `403` `insufficient_scope`, card misses `404`. Codes `-32001`…`-32008`
+  follow the A2A convention.
+- **The card is public and honest.** It carries the agent name and the
+  `A2A_CARDS_FILE` description/skills, never `instructions`, credentials or
+  sandbox names — and it does not advertise aria's native tool families, because
+  the default dsh harness runs its own tools inside the container.
+
+```bash
+curl -s localhost:3000/.well-known/agent-card.json | jq '{name,url,protocolVersion,skills}'
+curl -s -X POST localhost:3000/a2a -H 'Authorization: Bearer dev' \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","role":"user","messageId":"m1","parts":[{"kind":"text","text":"hello"}]}}}'
+```
 
 <div align="right">
 

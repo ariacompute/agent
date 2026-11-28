@@ -496,6 +496,38 @@ struct Entry {
     last_used: Instant,
 }
 
+/// Tags every server request with the session that produced it.
+///
+/// dsh's approval and question requests reach the shared handler without
+/// saying *which* session asked; a caller that runs several sessions per tenant
+/// (the A2A bridge) needs that identity to route the answer back. The wrapper
+/// lives in the host process, so it applies to both the host runtime and the
+/// sandboxed one. A request that already names a session keeps its own value,
+/// and a non-object payload is passed through untouched.
+struct SessionTag {
+    inner: Arc<dyn ServerRequestHandler>,
+    session: String,
+}
+
+#[async_trait]
+impl ServerRequestHandler for SessionTag {
+    async fn handle(&self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+        let tagged = tag_session(params, &self.session);
+        self.inner.handle(method, &tagged).await
+    }
+}
+
+fn tag_session(params: &Value, session: &str) -> Value {
+    match params {
+        Value::Object(map) if !map.contains_key("sessionId") => {
+            let mut tagged = map.clone();
+            tagged.insert("sessionId".into(), Value::String(session.to_string()));
+            Value::Object(tagged)
+        }
+        other => other.clone(),
+    }
+}
+
 /// Per-session runtime pool with a hard capacity and an idle reaper.
 pub struct DshPool {
     cfg: DshConfig,
@@ -552,7 +584,11 @@ impl DshPool {
         }
         let mut cfg = self.cfg.for_session_like(session);
         cfg.session = session.to_string();
-        let runtime = self.connector.connect(cfg, self.handler.clone()).await?;
+        let handler: Arc<dyn ServerRequestHandler> = Arc::new(SessionTag {
+            inner: self.handler.clone(),
+            session: session.to_string(),
+        });
+        let runtime = self.connector.connect(cfg, handler).await?;
         let mut entries = self.entries.lock().await;
         entries.insert(
             session.to_string(),
@@ -562,6 +598,26 @@ impl DshPool {
             },
         );
         Ok(runtime)
+    }
+
+    /// Drop and shut down the runtime for `session`.
+    ///
+    /// For a sandboxed runtime `shutdown` closes the transport, which destroys
+    /// the container — so this is how a cancelled task really stops the tools
+    /// running inside it. Only the named session is touched, and a second call
+    /// is a no-op (`false`) rather than another shutdown.
+    pub async fn evict(&self, session: &str) -> bool {
+        let entry = {
+            let mut entries = self.entries.lock().await;
+            entries.remove(session)
+        };
+        match entry {
+            Some(entry) => {
+                let _ = entry.runtime.shutdown().await;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Drop (and shut down) runtimes idle for longer than the TTL.
@@ -1001,5 +1057,137 @@ mod tests {
         assert_eq!(pool.sweep().await, 1);
         assert!(pool.is_empty().await);
         assert_eq!(pool.sweep().await, 0);
+    }
+
+    struct RecordingBridge {
+        seen: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait]
+    impl ServerRequestHandler for RecordingBridge {
+        async fn handle(&self, _method: &str, params: &Value) -> Result<Value, (i64, String)> {
+            self.seen.lock().await.push(params.clone());
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    /// Connector that keeps the handler it was given so the test can talk to it.
+    struct HandlerCapturingConnector {
+        handler: Mutex<Option<Arc<dyn ServerRequestHandler>>>,
+    }
+
+    #[async_trait]
+    impl RuntimeConnector for HandlerCapturingConnector {
+        async fn connect(
+            &self,
+            _cfg: DshConfig,
+            handler: Arc<dyn ServerRequestHandler>,
+        ) -> Result<Arc<dyn HarnessRuntime>, CoreError> {
+            *self.handler.lock().await = Some(handler);
+            Ok(Arc::new(FakeRuntime {
+                prompts: AtomicUsize::new(0),
+                shutdowns: AtomicUsize::new(0),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn acquired_runtimes_tag_server_requests_with_their_session() {
+        let bridge = Arc::new(RecordingBridge {
+            seen: Mutex::new(Vec::new()),
+        });
+        let connector = Arc::new(HandlerCapturingConnector {
+            handler: Mutex::new(None),
+        });
+        let pool = DshPool::with_connector(
+            DshConfig::for_session(Path::new("/srv"), "seed", "m"),
+            2,
+            Duration::from_secs(60),
+            bridge.clone(),
+            connector.clone(),
+        );
+        pool.acquire("tenant-a::s1").await.expect("runtime");
+        let handler = connector
+            .handler
+            .lock()
+            .await
+            .clone()
+            .expect("connect captured the handler");
+
+        let out = handler
+            .handle("approval/request", &json!({"tool": "shell"}))
+            .await
+            .expect("delegated");
+        assert_eq!(out, json!({"ok": true}));
+        handler
+            .handle("ask_user_question", &json!({"sessionId": "other"}))
+            .await
+            .expect("delegated");
+        handler
+            .handle("weird", &json!("plain"))
+            .await
+            .expect("delegated");
+
+        let seen = bridge.seen.lock().await;
+        assert_eq!(seen[0]["sessionId"], "tenant-a::s1");
+        assert_eq!(seen[0]["tool"], "shell");
+        // An explicit session id wins over the pool's.
+        assert_eq!(seen[1]["sessionId"], "other");
+        // A non-object payload is passed through untouched.
+        assert_eq!(seen[2], json!("plain"));
+    }
+
+    struct SharedRuntimeConnector {
+        runtimes: Mutex<Vec<Arc<FakeRuntime>>>,
+    }
+
+    #[async_trait]
+    impl RuntimeConnector for SharedRuntimeConnector {
+        async fn connect(
+            &self,
+            _cfg: DshConfig,
+            _handler: Arc<dyn ServerRequestHandler>,
+        ) -> Result<Arc<dyn HarnessRuntime>, CoreError> {
+            let runtime = Arc::new(FakeRuntime {
+                prompts: AtomicUsize::new(0),
+                shutdowns: AtomicUsize::new(0),
+            });
+            self.runtimes.lock().await.push(runtime.clone());
+            Ok(runtime)
+        }
+    }
+
+    #[tokio::test]
+    async fn evict_stops_only_the_named_session_and_starts_fresh_afterwards() {
+        let connector = Arc::new(SharedRuntimeConnector {
+            runtimes: Mutex::new(Vec::new()),
+        });
+        let pool = DshPool::with_connector(
+            DshConfig::for_session(Path::new("/srv"), "seed", "m"),
+            4,
+            Duration::from_secs(60),
+            no_bridge(),
+            connector.clone(),
+        );
+        pool.acquire("s1").await.expect("runtime");
+        pool.acquire("s2").await.expect("runtime");
+        assert!(pool.evict("s1").await);
+        assert_eq!(pool.len().await, 1);
+        {
+            let runtimes = connector.runtimes.lock().await;
+            assert_eq!(runtimes[0].shutdowns.load(Ordering::SeqCst), 1);
+            assert_eq!(runtimes[1].shutdowns.load(Ordering::SeqCst), 0);
+        }
+        // A second evict is a no-op, not a second shutdown.
+        assert!(!pool.evict("s1").await);
+        assert_eq!(
+            connector.runtimes.lock().await[0]
+                .shutdowns
+                .load(Ordering::SeqCst),
+            1
+        );
+        // The next acquire for the same session is a cold start.
+        pool.acquire("s1").await.expect("runtime");
+        assert_eq!(connector.runtimes.lock().await.len(), 3);
     }
 }
