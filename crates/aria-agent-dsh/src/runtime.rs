@@ -138,8 +138,8 @@ impl DshConfig {
             // are the same for every session (the volume carries identity).
             Some(sandbox) => {
                 let (home, cwd) = sandbox.paths();
-                cfg.home = home;
-                cfg.cwd = cwd;
+                cfg.home = PathBuf::from(home);
+                cfg.cwd = PathBuf::from(cwd);
             }
             None => {
                 let leaf = session_dir_name(session);
@@ -156,8 +156,8 @@ impl DshConfig {
     /// host paths behind would point the harness at a directory it cannot see.
     pub fn with_sandbox(mut self, sandbox: DshSandbox) -> Self {
         let (home, cwd) = sandbox.paths();
-        self.home = home;
-        self.cwd = cwd;
+        self.home = PathBuf::from(home);
+        self.cwd = PathBuf::from(cwd);
         self.sandbox = Some(sandbox);
         self
     }
@@ -284,7 +284,7 @@ impl DshConfig {
         // Derived from the sandbox mount when present so a caller that forgot to
         // re-derive `home` cannot hand dsh a host path.
         let home = match &self.sandbox {
-            Some(sandbox) => sandbox.paths().0,
+            Some(sandbox) => PathBuf::from(sandbox.paths().0),
             None => self.home.clone(),
         };
         let mut env = vec![

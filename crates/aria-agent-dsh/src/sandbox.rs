@@ -25,7 +25,7 @@
 //! silent fallback to a host process — that would turn "sandboxed" into a claim.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -109,11 +109,33 @@ impl fmt::Debug for DshSandbox {
     }
 }
 
+/// Join one segment onto a container path with `/`, never the host separator.
+///
+/// These paths are only ever interpreted **inside** the Linux container, so
+/// `Path::join` is wrong: on a Windows control plane it yields
+/// `/aria/session\dsh`, and the daemon then creates a directory literally named
+/// `session\dsh` — the harness starts with a home it cannot find. Docker mount
+/// targets are POSIX strings by definition, so the join has to be explicit.
+pub fn container_path(base: &str, leaf: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let leaf = leaf.trim_start_matches('/');
+    match (base.is_empty(), leaf.is_empty()) {
+        (_, true) => base.to_string(),
+        (true, false) => format!("/{leaf}"),
+        (false, false) => format!("{base}/{leaf}"),
+    }
+}
+
 impl DshSandbox {
     /// Container paths a session uses on its volume.
-    pub fn paths(&self) -> (PathBuf, PathBuf) {
-        let root = Path::new(&self.root);
-        (root.join("dsh"), root.join("cwd"))
+    ///
+    /// Returned as strings because these are container paths, not host paths;
+    /// see [`container_path`] for why `Path::join` must not be used here.
+    pub fn paths(&self) -> (String, String) {
+        (
+            container_path(&self.root, "dsh"),
+            container_path(&self.root, "cwd"),
+        )
     }
 
     /// Volume name (or bind source) for one session.
@@ -348,15 +370,15 @@ async fn prepare(
     handle: &SandboxHandle,
 ) -> Result<AttachedExec, CoreError> {
     let (home, cwd) = sandbox.paths();
-    let aria_dir = cwd.join(".aria");
+    let aria_dir = container_path(&cwd, ".aria");
     // The volume is mounted at `root`; its subdirectories are not created by
     // Docker, and dsh refuses to invent its own home.
     let mkdir = vec![
         "mkdir".to_string(),
         "-p".to_string(),
-        home.to_string_lossy().to_string(),
-        cwd.to_string_lossy().to_string(),
-        aria_dir.to_string_lossy().to_string(),
+        home,
+        cwd.clone(),
+        aria_dir.clone(),
     ];
     let prepared = sandbox
         .sandbox
@@ -372,7 +394,7 @@ async fn prepare(
     if let Some(tar) = skill_catalog_tar(&cfg.skill_catalog()) {
         sandbox
             .sandbox
-            .copy_in(handle, &aria_dir.to_string_lossy(), tar)
+            .copy_in(handle, &aria_dir, tar)
             .await
             .map_err(|e| CoreError::Config(format!("dsh sandbox skill catalog: {e}")))?;
     }
@@ -381,7 +403,7 @@ async fn prepare(
         "--profile".to_string(),
         SDK_PROFILE.to_string(),
     ]);
-    attached.workdir = Some(cwd.to_string_lossy().to_string());
+    attached.workdir = Some(cwd);
     sandbox
         .sandbox
         .exec_attached(handle, &attached)
@@ -434,6 +456,7 @@ mod tests {
     use crate::transport::RpcTransport;
     use agent_sandbox::{ExecOutput, MountKind, SandboxError};
     use serde_json::json;
+    use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Clone, Default)]
@@ -672,6 +695,26 @@ mod tests {
             volume_name("aria-dsh", "tenant/a:b", "s"),
             "aria-dsh-tenant-a-b-s"
         );
+    }
+
+    #[test]
+    fn container_paths_never_take_the_host_separator() {
+        assert_eq!(container_path("/aria/session", "dsh"), "/aria/session/dsh");
+        assert_eq!(
+            container_path("/aria/session/", "/dsh"),
+            "/aria/session/dsh"
+        );
+        assert_eq!(container_path("/", "dsh"), "/dsh");
+        assert_eq!(container_path("/aria/session", ""), "/aria/session");
+
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = sandbox_cfg(Arc::new(StubSandbox::default()), temp.path());
+        let (home, cwd) = cfg.sandbox.clone().unwrap().paths();
+        assert_eq!(home, "/aria/session/dsh");
+        assert_eq!(cwd, "/aria/session/cwd");
+        // The regression this pins: `Path::join` on a Windows control plane
+        // produced `/aria/session\dsh`, a directory the container never made.
+        assert!(!home.contains('\\') && !cwd.contains('\\'));
     }
 
     #[test]
