@@ -27,7 +27,7 @@
 
 ### ✅ 验证
 
-`cargo test --workspace`（1287 ✅）、`fmt`、`clippy -D warnings` 与覆盖率闸门（计入统计的行 35073/35073，100%；测量值 99.98%，仅剩 7 个闭合括号伪影）全部通过；`just sandbox-image` 构建出 650 MB 镜像，Docker 原语的 gated 用例（`ARIA_E2E_DOCKER=1`，2 条）在真实守护进程上通过，`ARIA_DSH_SANDBOX_E2E=1` 跑通容器内 `initialize` 握手。
+`cargo test --workspace`（1290 ✅）、`fmt`、`clippy -D warnings` 与覆盖率闸门（计入统计的行 35073/35073，100%；测量值 99.98%，仅剩 7 个闭合括号伪影）全部通过；`just sandbox-image` 构建出 650 MB 镜像，Docker 原语的 gated 用例（`ARIA_E2E_DOCKER=1`，2 条）在真实守护进程上通过，`ARIA_DSH_SANDBOX_E2E=1` 跑通容器内 `initialize` 握手。
 
 ## ♻️ 递归自我改进：账本变成能力 🧠
 

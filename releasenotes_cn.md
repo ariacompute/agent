@@ -71,7 +71,7 @@
 ### 验证
 
 `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
-`cargo test --workspace`（1287 通过）与 `./scripts/coverage.sh`（计入统计的行
+`cargo test --workspace`（1290 通过）与 `./scripts/coverage.sh`（计入统计的行
 35073/35073 全覆盖；测量值 99.98%，7 个闭合括号伪影不计入）全部通过。
 `just sandbox-image` 构建出 650 MB 镜像，Docker 原语的 gated 用例对
 （`ARIA_E2E_DOCKER=1`，2 条）在真实守护进程上通过，`ARIA_DSH_SANDBOX_E2E=1`

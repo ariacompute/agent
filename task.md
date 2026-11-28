@@ -574,13 +574,31 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       names a turn the bounded RSI ledger already trimmed.
 - [x] Tests: 13 new cases across `aria-agent-core` (2), `aria-agent-dsh` (6),
       `aria-agent-governance` (4), `aria-agent-cloud` (1) and one extended
-      `aria-agent-sandbox` case; `cargo test --workspace` is 1287 passed.
+      `aria-agent-sandbox` case; `cargo test --workspace` is 1290 passed.
 - [x] Result: measured **99.93% → 99.98%**, artifacts **25 → 7**, and
       `./scripts/coverage.sh` stays green at **100.00% of included lines**
       (35073/35073). The seven left are block ends with no statement of their
       own (two test-harness closures, the never-returning `pending()` dial, the
       ledger's two impossible `None` arms and two already-asserted `if let`
       bodies in the RSI validation tests); `docs/coverage.md` records them.
+
+## E2E hardening (after M20)
+- [x] The real-socket suite covered the beta-Agents lifecycle plus the
+      governance and orchestration families, but four surfaces were only
+      proven in-process or not at all: the subagent read routes, the `501`
+      stubs, the RSI read routes with the switch off, and a model failure
+      mid-stream.
+- [x] New scenarios (15 → 18): the subagent lists answer empty but well formed,
+      a single unknown subagent/turn is `404`, and every read is `404` for an
+      unknown session; all eleven recognised-but-unimplemented resources answer
+      `501` with `error.resource`; the disabled RSI surface answers `404` for a
+      missing report, playbook or proposal action and `[]` for version lists; a
+      failing model ends the SSE stream with the terminal `agent.turn.failed`
+      frame (`session_id`, monotonic `sequence_number`) and leaves the
+      persisted turn `failed`.
+- [x] `just e2e` is 18 scenarios; the Postgres and Docker ones still print a
+      skip reason when their dependency is absent. Integration test files are
+      outside the coverage report, so the gate is unchanged at 35073/35073.
 
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process

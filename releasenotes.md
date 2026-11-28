@@ -80,7 +80,7 @@ ADR-0027 moves that session into a container, and it is on by default.
 ### Validation
 
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace` (1287 passed) and `./scripts/coverage.sh` (every included
+`cargo test --workspace` (1290 passed) and `./scripts/coverage.sh` (every included
 line covered: 35073/35073; measured 99.98% with 7 closing-delimiter artifacts,
 which carry no statement) all pass. `just sandbox-image` builds the 650 MB image,
 the Docker primitives' gated pair (`ARIA_E2E_DOCKER=1`, 2 tests) passes against a

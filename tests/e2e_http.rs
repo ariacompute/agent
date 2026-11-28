@@ -197,6 +197,24 @@ impl ModelClient for ToolCallModel {
     }
 }
 
+/// Fails every completion, so the socket path must end the stream itself.
+struct FailingModel;
+
+#[async_trait::async_trait]
+impl ModelClient for FailingModel {
+    async fn complete(&self, _req: &ModelRequest) -> Result<ModelResponse, agent_core::CoreError> {
+        Err(agent_core::CoreError::Model("gateway down".into()))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _req: &ModelRequest,
+        _tools: &[agent_core::Tool],
+    ) -> Result<ModelTurn, agent_core::CoreError> {
+        Err(agent_core::CoreError::Model("gateway down".into()))
+    }
+}
+
 /// Shared per-principal context stores, like the tenant-sharded production DB.
 #[derive(Clone, Default)]
 struct Contexts(Arc<Mutex<HashMap<String, Arc<MemoryContextStore>>>>);
@@ -583,6 +601,52 @@ async fn tool_calls_stream_and_persist_over_a_real_socket() {
         .expect("items")
         .iter()
         .any(|i| i["content"].to_string().contains("done after tool")));
+}
+
+#[tokio::test]
+async fn a_model_failure_ends_the_stream_with_a_terminal_frame_over_a_real_socket() {
+    let h = memory_harness(
+        Arc::new(|| Box::new(FailingModel) as Box<dyn ModelClient>),
+        stub_sandbox(),
+    )
+    .await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let tag = uuid::Uuid::new_v4();
+    let (_aid, sid) = agent_and_session(&h, auth, &tag).await;
+
+    let (status, sse) = h
+        .api
+        .call(
+            Method::POST,
+            &format!("/v1/agents/sessions/{sid}/events/stream"),
+            auth,
+            Some(json!({"input": "boom"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sse}");
+    let frames = sse_frames(&sse);
+    let failed = frames.last().expect("at least one frame");
+    assert_eq!(failed["type"], "agent.turn.failed", "{sse}");
+    assert_eq!(failed["session_id"], json!(sid), "{sse}");
+    assert!(
+        failed["sequence_number"].as_u64().unwrap_or_default() >= 1,
+        "{sse}"
+    );
+
+    // The failure is persisted, not just streamed: the turn is `failed` on a
+    // later read.
+    let (status, turns) = h
+        .api
+        .send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{sid}/turns"),
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{turns}");
+    assert_eq!(turns["data"][0]["status"], "failed", "{turns}");
 }
 
 #[tokio::test]
@@ -1798,6 +1862,111 @@ async fn memory_relations_and_bounded_graph_over_a_real_socket() {
 }
 
 #[tokio::test]
+async fn subagent_reads_are_empty_and_scoped_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+    let tag = uuid::Uuid::new_v4();
+    let (_aid, sid) = agent_and_session(&h, auth, &tag).await;
+
+    // The projection does not invent subagents: an existing session answers
+    // with empty, well-formed collections.
+    for path in [
+        format!("/v1/agents/sessions/{sid}/subagents"),
+        format!("/v1/agents/sessions/{sid}/subagents/sa/items"),
+        format!("/v1/agents/sessions/{sid}/subagents/sa/turns"),
+    ] {
+        let (status, body) = h.api.send(Method::GET, &path, auth, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body["object"], json!("list"), "{path}");
+        assert_eq!(body["data"], json!([]), "{path}");
+    }
+
+    // One subagent (and one turn) that never ran is a 404, not an empty object.
+    for path in [
+        format!("/v1/agents/sessions/{sid}/subagents/sa"),
+        format!("/v1/agents/sessions/{sid}/subagents/sa/turns/t1"),
+    ] {
+        let (status, body) = h.api.send(Method::GET, &path, auth, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+    }
+
+    // Every read is gated on the session: an unknown one is 404 even for the
+    // list endpoints that would otherwise answer `[]`.
+    for path in [
+        "/v1/agents/sessions/nope/subagents",
+        "/v1/agents/sessions/nope/subagents/sa",
+        "/v1/agents/sessions/nope/subagents/sa/items",
+        "/v1/agents/sessions/nope/subagents/sa/turns",
+        "/v1/agents/sessions/nope/subagents/sa/turns/t1",
+    ] {
+        let (status, body) = h.api.send(Method::GET, path, auth, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn unimplemented_resources_answer_501_over_a_real_socket() {
+    let h = memory_harness(stub_model(), stub_sandbox()).await;
+    let token = bootstrap_token();
+    let auth = token.as_deref();
+
+    // Recognised-but-unimplemented resources must be self-describing: an
+    // OpenAI client enumerating the surface gets 501 + the resource name,
+    // never a 404 that reads like a typo.
+    for (method, path, resource) in [
+        (Method::GET, "/v1/vaults", "vaults"),
+        (Method::POST, "/v1/vaults", "vaults"),
+        (Method::GET, "/v1/vaults/v1", "vaults"),
+        (
+            Method::GET,
+            "/v1/vaults/v1/credentials",
+            "vaults.credentials",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/environments",
+            "agents.environments",
+        ),
+        (
+            Method::POST,
+            "/v1/agents/environments",
+            "agents.environments",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/environments/e1",
+            "agents.environments",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/environments/e1/files",
+            "agents.environments.files",
+        ),
+        (
+            Method::POST,
+            "/v1/agents/environments/e1/files",
+            "agents.environments.files",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/environments/templates",
+            "agents.environments.templates",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/sessions/s1/artifacts",
+            "agents.sessions.artifacts",
+        ),
+    ] {
+        let (status, body) = h.api.send(method.clone(), path, auth, None).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{method} {path}");
+        assert_eq!(body["error"]["type"], json!("not_implemented"), "{path}");
+        assert_eq!(body["error"]["resource"], json!(resource), "{path}");
+    }
+}
+
+#[tokio::test]
 async fn rsi_off_is_visible_over_a_real_socket() {
     let h = memory_harness(stub_model(), stub_sandbox()).await;
     let token = bootstrap_token();
@@ -1823,6 +1992,56 @@ async fn rsi_off_is_visible_over_a_real_socket() {
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
         assert_eq!(body["data"], json!([]), "{path}");
     }
+
+    // A single missing object is a 404, never a fabricated empty shell; a
+    // promotion/discard of an unknown proposal is also 404 (nothing to act
+    // on), while the version list is an honest empty collection.
+    let (status, body) = h
+        .api
+        .send(Method::GET, "/v1/rsi/reports/missing", auth, None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = h
+        .api
+        .send(
+            Method::GET,
+            "/v1/rsi/playbooks/retry_storm:shell",
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = h
+        .api
+        .send(
+            Method::GET,
+            "/v1/rsi/playbooks/retry_storm:shell/versions",
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"], json!([]));
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/rsi/proposals/missing/discard",
+            auth,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = h
+        .api
+        .send(
+            Method::POST,
+            "/v1/rsi/proposals/missing/promote",
+            auth,
+            Some(json!({"expected_revision": 0})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
 #[tokio::test]
