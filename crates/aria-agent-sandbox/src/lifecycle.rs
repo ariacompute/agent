@@ -142,6 +142,10 @@ pub struct SandboxCapabilities {
     pub checkpoint: bool,
     pub restore: bool,
     pub resize_memory: bool,
+    /// `exec_attached` really returns a duplex stdio channel.
+    pub attach: bool,
+    /// `copy_in` really unpacks an archive into the session.
+    pub copy_in: bool,
 }
 
 impl SandboxCapabilities {
@@ -156,6 +160,8 @@ impl SandboxCapabilities {
             checkpoint: true,
             restore: true,
             resize_memory: false,
+            attach: true,
+            copy_in: true,
         }
     }
 
@@ -166,6 +172,8 @@ impl SandboxCapabilities {
             checkpoint: true,
             restore: true,
             resize_memory: true,
+            attach: true,
+            copy_in: true,
         }
     }
 }

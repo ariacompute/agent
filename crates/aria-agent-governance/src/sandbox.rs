@@ -84,6 +84,29 @@ impl Sandbox for QuotaGuardSandbox {
         result
     }
 
+    async fn exec_attached(
+        &self,
+        handle: &SandboxHandle,
+        spec: &agent_sandbox::AttachedSpec,
+    ) -> Result<agent_sandbox::AttachedExec, SandboxError> {
+        // The quota was reserved at `spawn`; attaching another process to an
+        // already-admitted sandbox must not be reported as unsupported.
+        self.inner.exec_attached(handle, spec).await
+    }
+
+    async fn copy_in(
+        &self,
+        handle: &SandboxHandle,
+        target: &str,
+        tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        self.inner.copy_in(handle, target, tar).await
+    }
+
+    async fn has_image(&self, image: &str) -> Result<bool, SandboxError> {
+        self.inner.has_image(image).await
+    }
+
     fn capabilities(&self) -> SandboxCapabilities {
         self.inner.capabilities()
     }
@@ -177,6 +200,28 @@ mod tests {
             self.destroyed.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+        async fn exec_attached(
+            &self,
+            _handle: &SandboxHandle,
+            spec: &agent_sandbox::AttachedSpec,
+        ) -> Result<agent_sandbox::AttachedExec, SandboxError> {
+            Ok(agent_sandbox::AttachedExec {
+                exec_id: spec.command.join(" "),
+                stdin: Box::pin(tokio::io::sink()),
+                output: Box::pin(futures::stream::empty()),
+            })
+        }
+        async fn copy_in(
+            &self,
+            _handle: &SandboxHandle,
+            _target: &str,
+            _tar: Vec<u8>,
+        ) -> Result<(), SandboxError> {
+            Ok(())
+        }
+        async fn has_image(&self, _image: &str) -> Result<bool, SandboxError> {
+            Ok(true)
+        }
         async fn checkpoint(&self, handle: &SandboxHandle) -> Result<CheckpointRef, SandboxError> {
             Ok(CheckpointRef::new("img:latest", handle.id.clone(), 1))
         }
@@ -224,6 +269,29 @@ mod tests {
         guarded.destroy(handle).await.unwrap();
         assert_eq!(ledger.reserved_weight("p"), 0);
         assert_eq!(inner.destroyed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn attach_copy_and_image_probes_pass_through_the_quota_gate() {
+        // The quota is reserved at spawn; attaching another process to an
+        // admitted sandbox must not be reported as unsupported.
+        let inner = Arc::new(FakeSandbox::new());
+        let ledger = Arc::new(MeteringLedger::new(None, Some(QuotaPolicy::new(10_000))));
+        let guarded = QuotaGuardSandbox::new(inner.clone(), ledger, "p", request());
+        let handle = SandboxHandle { id: "sbx-1".into() };
+        assert!(guarded.has_image("aria-dsh-sandbox:latest").await.unwrap());
+        guarded
+            .copy_in(&handle, "/aria/session/.aria", Vec::new())
+            .await
+            .unwrap();
+        let attached = guarded
+            .exec_attached(
+                &handle,
+                &agent_sandbox::AttachedSpec::command(vec!["dsh".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attached.exec_id, "dsh");
     }
 
     #[tokio::test]

@@ -27,3 +27,6 @@ ring = "0.17"
 [dev-dependencies]
 tempfile = "3"
 socket2 = "0.6"
+# Test doubles model `AttachedExec` (the duplex harness channel), which carries
+# a `futures::Stream`. Already in the lock, so this adds no new download.
+futures = "0.3"

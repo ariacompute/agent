@@ -1,5 +1,92 @@
 # Release notes
 
+## dsh runs in a container now
+
+The default turn runtime used to be a **host child process**: `dsh --profile sdk` executed the
+model call *and* its own tools on the same filesystem as the control plane, with dsh's
+`workspace-write` permission preset as the only boundary — a logical rule, not a filesystem one.
+ADR-0027 moves that session into a container, and it is on by default.
+
+### Highlights
+
+- **A session container, not a command container** — the sandbox seam gained `exec_attached`
+  (one long-lived `exec` with duplex stdin/stdout), `copy_in` (tar upload) and `has_image`;
+  `ExecSpec` gained `mounts`, `hardening` and `resources`. Existing backends keep compiling
+  because every new `Sandbox` method defaults to `Unsupported`.
+- **Keep-alive + attach (form F2)** — `attach_container` was rejected: Docker's
+  `NewlineLogOutputDecoder` assumes a tty, but the harness speaks 8-byte-framed JSON-RPC.
+  Instead the container runs `while true; do sleep 3600; done`, the workspace is prepared inside
+  it, and only then is `dsh --profile sdk` attached. The old one-hour cap is gone: the container
+  lives exactly as long as the session.
+- **Named volume, not a bind mount** — the cloud talks to the daemon over
+  `/var/run/docker.sock` (DooD), so a bind source would resolve on the *daemon's* host. Sessions
+  live on `aria-dsh-<tenant>-<session>`, which is why a resumed session finds its state after an
+  idle reap **and** after a container rebuild. `DSH_SANDBOX_MOUNT=bind` exists for deployments
+  that do share a filesystem with the daemon.
+- **Fail-closed** — `DSH_SANDBOX` defaults to `1`; a missing image (nothing pulls), an
+  unpreparable workspace, a refused catalog upload or an unattachable harness aborts the boot or
+  destroys the container. There is no silent host fallback, because that would turn "sandboxed"
+  into an unchecked claim. `DSH_SANDBOX=0` is the explicit, logged escape hatch.
+- **The thinking filter learns about containers** — a container's `127.0.0.1` is the container,
+  so `DSH_THINKING_FILTER_BIND` chooses where the proxy listens and `DSH_THINKING_FILTER_URL` is
+  the address the harness dials. Enabling the filter while sandboxed without a reachable,
+  non-loopback URL fails at boot instead of failing the first turn.
+- **A separate budget** — the harness container is not a shell command: it gets its own
+  `DSH_SANDBOX_CPUS/MEMORY/PIDS` (default 1 CPU / 1 GiB / 512 pids), joins the governed egress
+  network with tenant/session labels, and receives `GATEWAY_*` plus the proxy variables through
+  the allow-list — never the host environment.
+- **`SandboxShell` owns its timeout** — a command that exceeds its `timeout_ms` is reported as
+  `Unavailable`, and the container is destroyed on every path, including the timeout path.
+- **A buildable image** — `docker build --target sandbox` produces it (venv dsh symlinked to
+  `/usr/local/bin/dsh`, uid 10001, `WORKDIR /aria` so runc never creates a root-owned directory
+  inside the session mount). The stage stays first, because the legacy builder would otherwise
+  compile the whole workspace for `--target sandbox`, and its pip step defaults to a PyPI mirror
+  with resume enabled — the ~100 MB runtime wheel did not finish from pypi.org on a consumer link.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DSH_SANDBOX` | `1` | Containerise the harness; boot fails if the image or workspace is unusable |
+| `DSH_SANDBOX_IMAGE` | `aria-dsh-sandbox:latest` | Built by `just sandbox-image`; never pulled |
+| `DSH_SANDBOX_MOUNT` | `volume` | `volume` (`aria-dsh-<tenant>-<session>`) or `bind` (the directory must be writable by `DSH_SANDBOX_USER`) |
+| `DSH_SANDBOX_ROOT` / `DSH_SANDBOX_BIN` | `/aria/session` / `/usr/local/bin/dsh` | Container-side mount point and executable |
+| `DSH_SANDBOX_VOLUME_PREFIX` | `aria-dsh` | Volume name prefix |
+| `DSH_SANDBOX_CPUS` / `DSH_SANDBOX_MEMORY` / `DSH_SANDBOX_PIDS` | `1.0` / `1g` / `512` | Harness container budget |
+| `DSH_SANDBOX_USER` / `DSH_SANDBOX_HARDEN` | `10001:10001` / `1` | Non-root user; drop all caps + `no-new-privileges` |
+| `DSH_THINKING_FILTER_BIND` / `DSH_THINKING_FILTER_URL` | `127.0.0.1:0` / _(empty)_ | Where the filter listens / the container-reachable address |
+
+### Breaking changes
+
+- `build_host_config(res, runtime, spec: &ExecSpec)` replaced its `network: Option<&str>`
+  argument; out-of-tree callers must pass the spec (mounts, hardening and limits are read from
+  it).
+- `DshConfig` gained `session_root`, `session` and `sandbox`; build it with
+  `DshConfig::for_session_like(..)` or `..Default`-style construction.
+- `DSH_SANDBOX` defaults to on: a deployment with a `dsh` harness now needs the image locally.
+  Set `DSH_SANDBOX=0` to keep the previous host-process behaviour (and its weaker boundary).
+- An explicitly empty `DSH_SANDBOX_IMAGE` / `DSH_SANDBOX_BIN` / `DSH_SANDBOX_VOLUME_PREFIX` is
+  now an error instead of falling back to the default.
+
+### Residual risks (recorded in ADR-0027, not solved here)
+
+- `EGRESS_MODE=network` removes the default route; whether dsh honours `HTTPS_PROXY` there is
+  unverified, and the filter proxy would need a sidecar.
+- `cap_drop=ALL` may break dsh's own internal sandbox; `DSH_SANDBOX_HARDEN=0` is the fallback.
+- 1 GiB is a first guess: raise `DSH_SANDBOX_MEMORY` if a real turn is OOM-killed.
+- Credentials reach the container as environment variables, so `docker inspect` shows them.
+- The harness container is not metered by `QuotaGuardSandbox`.
+
+### Validation
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (1274 passed) and `./scripts/coverage.sh` (every included
+line covered: 34859/34859; measured 99.93% with 25 closing-delimiter artifacts,
+which carry no statement) all pass. `just sandbox-image` builds the 650 MB image,
+the Docker primitives' gated pair (`ARIA_E2E_DOCKER=1`, 2 tests) passes against a
+real daemon, and `ARIA_DSH_SANDBOX_E2E=1` completes the containerised
+`initialize` handshake.
+
 ## Recursive self-improvement: the ledger becomes capability
 
 Every task already leaves a `SessionEvent` ledger. RSI (ADR-0026) folds that

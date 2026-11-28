@@ -17,3 +17,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# The sandbox double models `AttachedExec`, which carries a `futures::Stream`.
+# Already in the lock, so this adds no new download.
+futures = "0.3"

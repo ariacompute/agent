@@ -294,6 +294,17 @@ impl ThinkingFilterProxy {
         Self::start_with(upstream_root, || TcpListener::bind("127.0.0.1:0")).await
     }
 
+    /// Bind at an explicit address.
+    ///
+    /// A sandboxed harness cannot reach the control plane's `127.0.0.1`, so a
+    /// containerised deployment binds somewhere reachable (`0.0.0.0:<port>` on a
+    /// governed network) and tells dsh that address through
+    /// `DSH_THINKING_FILTER_URL` — the bound address and the advertised one are
+    /// deliberately separate facts.
+    pub async fn start_on(upstream_root: &str, addr: SocketAddr) -> Result<Self, CoreError> {
+        Self::start_with(upstream_root, || TcpListener::bind(addr)).await
+    }
+
     /// `bind` is a seam so tests can exercise the binding and address failures.
     async fn start_with<L, B, F>(upstream_root: &str, bind: B) -> Result<Self, CoreError>
     where
@@ -1482,6 +1493,35 @@ mod tests {
             .await
             .expect_err("empty upstream");
         assert!(err.to_string().contains("empty upstream"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_on_binds_the_requested_address() {
+        // Port 0 lets the OS pick, but the bind address (the part a containerised
+        // harness needs) is the caller's.
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let proxy = ThinkingFilterProxy::start_on("https://gateway.example", addr)
+            .await
+            .expect("proxy");
+        assert!(
+            proxy.local_base_url().starts_with("http://127.0.0.1:"),
+            "{}",
+            proxy.local_base_url()
+        );
+    }
+
+    #[tokio::test]
+    async fn start_on_reports_a_bind_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = listener.local_addr().unwrap();
+        let err = ThinkingFilterProxy::start_on("https://gateway.example", taken)
+            .await
+            .expect_err("address in use");
+        assert!(
+            err.to_string()
+                .contains("cannot bind thinking filter proxy"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

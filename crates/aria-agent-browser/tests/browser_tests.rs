@@ -63,6 +63,28 @@ impl Sandbox for FakeSandbox {
     async fn destroy(&self, _handle: SandboxHandle) -> Result<(), SandboxError> {
         Ok(())
     }
+    async fn exec_attached(
+        &self,
+        _handle: &SandboxHandle,
+        spec: &agent_sandbox::AttachedSpec,
+    ) -> Result<agent_sandbox::AttachedExec, SandboxError> {
+        Ok(agent_sandbox::AttachedExec {
+            exec_id: spec.command.join(" "),
+            stdin: Box::pin(tokio::io::sink()),
+            output: Box::pin(futures::stream::empty()),
+        })
+    }
+    async fn copy_in(
+        &self,
+        _handle: &SandboxHandle,
+        _target: &str,
+        _tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        Ok(())
+    }
+    async fn has_image(&self, _image: &str) -> Result<bool, SandboxError> {
+        Ok(true)
+    }
 }
 
 fn sandbox_with(response: &str, kind: BrowserKind) -> Arc<BrowserSandbox> {
@@ -77,6 +99,26 @@ fn sandbox_with(response: &str, kind: BrowserKind) -> Arc<BrowserSandbox> {
 fn construct_without_daemon_never_panics() {
     // Construction is lazy; no Docker connection is attempted.
     let _ = BrowserSandbox::new();
+}
+
+#[tokio::test]
+async fn sandbox_methods_delegate_to_the_wrapped_backend() {
+    // `BrowserSandbox` is a drop-in `Sandbox`; the three optional capabilities
+    // must reach the inner backend instead of degrading to `Unsupported`.
+    let bs = sandbox_with(r#"{"ok":true}"#, BrowserKind::Chromium);
+    let handle = SandboxHandle { id: "fake".into() };
+    assert!(bs.has_image("browser:latest").await.unwrap());
+    bs.copy_in(&handle, "/aria/session", Vec::new())
+        .await
+        .unwrap();
+    let attached = bs
+        .exec_attached(
+            &handle,
+            &agent_sandbox::AttachedSpec::command(vec!["node".into()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(attached.exec_id, "node");
 }
 
 #[tokio::test]

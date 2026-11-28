@@ -14,6 +14,9 @@ name = "aria_agent_dsh"
 
 [dependencies]
 aria-agent-core = { path = "../aria-agent-core" }
+# The sandboxed runtime drives the `Sandbox` seam (container-owned harness), so
+# the seam crate is a real dependency, not a test-only one.
+aria-agent-sandbox = { path = "../aria-agent-sandbox" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,6 +26,9 @@ uuid.workspace = true
 tracing.workspace = true
 futures = "0.3"
 async-stream = "0.3"
+# Skill catalogs are uploaded as a tar archive (`copy_in`); the crate is already
+# in the tree through bollard.
+tar = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 # eMudhra/emSign CA key compromise (2026-10): 1.0.10+ drops the compromised
 # emSign roots. The thinking-filter proxy talks TLS to the model gateway, so it
@@ -31,4 +37,3 @@ webpki-roots = "1.0.10"
 
 [dev-dependencies]
 tempfile = "3"
-aria-agent-sandbox = { path = "../aria-agent-sandbox" }

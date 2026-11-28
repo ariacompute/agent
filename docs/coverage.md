@@ -9,9 +9,9 @@ statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
 opt-outs (see below). The summary prints both numbers, so a run reads:
 
 ```
-lines measured: 32978/33002 (99.93%)
-closing-delimiter artifacts: 24 (no statement; not counted)
-lines included: 32978/32978 (100.00%)
+lines measured: 34859/34884 (99.93%)
+closing-delimiter artifacts: 25 (no statement; not counted)
+lines included: 34859/34859 (100.00%)
 OK: every included line is covered (or explicitly excluded).
 ```
 
@@ -121,6 +121,17 @@ No test reaches the public internet or a live database:
 
 Tests that genuinely need an external binary or database stay gated and are
 excluded above; they must never assert a fabricated success.
+
+Integration test files (`crates/*/tests/`) are outside this report in any case —
+`cargo llvm-cov` leaves test code out unless `--include-tests` is passed — so a
+gated suite cannot inflate the number either. Two of them belong to the dsh
+sandbox, and both print a skip reason and return when their variable is unset:
+`crates/aria-agent-sandbox/tests/e2e_docker.rs` (`ARIA_E2E_DOCKER=1`: duplex
+attach, `copy_in`, and a volume that survives a container rebuild) and
+`crates/aria-agent-dsh/tests/sandbox_live.rs` (`ARIA_DSH_SANDBOX_E2E=1`: the
+containerised `initialize` handshake). Both were run against a real daemon; the
+volume test deletes its own named volume on the way out, because a volume is
+global state that would otherwise collect run after run.
 
 ## Adding new code
 

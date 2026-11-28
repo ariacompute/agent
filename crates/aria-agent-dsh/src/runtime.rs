@@ -24,6 +24,7 @@ use crate::rpc::{
     RpcClient, ServerRequestHandler, UnsupportedRequests, DEFAULT_NOTIFICATION_CAPACITY,
     METHOD_INITIALIZE, METHOD_SESSION_PROMPT,
 };
+use crate::sandbox::DshSandbox;
 use crate::transport::{RpcTransport, StdioTransport, DEFAULT_MAX_FRAME_BYTES};
 
 /// dsh `sdk` profile flag (`dsh --profile sdk` owns the JSON-RPC server).
@@ -86,6 +87,15 @@ pub struct DshConfig {
     /// `skills` tool family and RSI's sink use); tests and non-standard
     /// deployments pin it explicitly.
     pub skills: Option<PathBuf>,
+    /// Deployment-owned root the per-session directories are derived from.
+    ///
+    /// Kept explicitly so `acquire` can re-derive a session's `home`/`cwd`
+    /// without nesting `.aria/dsh` a second time.
+    pub session_root: PathBuf,
+    /// Session this config belongs to (drives the volume/bind name).
+    pub session: String,
+    /// Run the harness in a sandbox container instead of on the host.
+    pub sandbox: Option<DshSandbox>,
 }
 
 impl DshConfig {
@@ -95,11 +105,10 @@ impl DshConfig {
     /// per-session subdirectory is derived deterministically so a resumed
     /// session finds its own home again.
     pub fn for_session(root: &Path, session: &str, model: &str) -> Self {
-        let leaf = session_dir_name(session);
-        Self {
+        let base = Self {
             bin: std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string()),
-            home: root.join(".aria/dsh").join(&leaf),
-            cwd: root.join(".aria/dsh-workspaces").join(leaf),
+            home: PathBuf::new(),
+            cwd: PathBuf::new(),
             provider: provider_from_env(std::env::var("DSH_PROVIDER").ok()),
             model: model.to_string(),
             permission_mode: std::env::var("DSH_PERMISSION_MODE")
@@ -109,7 +118,48 @@ impl DshConfig {
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             extra_env: Vec::new(),
             skills: None,
+            session_root: root.to_path_buf(),
+            session: session.to_string(),
+            sandbox: None,
+        };
+        base.for_session_like(session)
+    }
+
+    /// Clone this config for `session`, re-deriving only the paths.
+    ///
+    /// Every other setting (provider, timeouts, sandbox wiring, skill catalog) is
+    /// inherited: the pool used to rebuild the config from scratch, which dropped
+    /// the mounted catalog and doubled the `.aria/dsh` prefix.
+    pub fn for_session_like(&self, session: &str) -> Self {
+        let mut cfg = self.clone();
+        cfg.session = session.to_string();
+        match &cfg.sandbox {
+            // Inside a container both paths live on the session volume, so they
+            // are the same for every session (the volume carries identity).
+            Some(sandbox) => {
+                let (home, cwd) = sandbox.paths();
+                cfg.home = home;
+                cfg.cwd = cwd;
+            }
+            None => {
+                let leaf = session_dir_name(session);
+                cfg.home = cfg.session_root.join(".aria/dsh").join(&leaf);
+                cfg.cwd = cfg.session_root.join(".aria/dsh-workspaces").join(leaf);
+            }
         }
+        cfg
+    }
+
+    /// Run this session in a sandbox container.
+    ///
+    /// Also re-derives `home`/`cwd` to the container's volume paths: leaving the
+    /// host paths behind would point the harness at a directory it cannot see.
+    pub fn with_sandbox(mut self, sandbox: DshSandbox) -> Self {
+        let (home, cwd) = sandbox.paths();
+        self.home = home;
+        self.cwd = cwd;
+        self.sandbox = Some(sandbox);
+        self
     }
 
     /// Override the executable (tests / non-standard installs).
@@ -163,6 +213,24 @@ impl DshConfig {
         if self.model.trim().is_empty() {
             return Err(CoreError::Config("dsh model is empty".into()));
         }
+        if let Some(sandbox) = &self.sandbox {
+            if sandbox.image.trim().is_empty() {
+                return Err(CoreError::Config(
+                    "dsh sandbox image is empty (set DSH_SANDBOX_IMAGE)".into(),
+                ));
+            }
+            if sandbox.bin.trim().is_empty() {
+                return Err(CoreError::Config(
+                    "dsh sandbox executable is empty (set DSH_SANDBOX_BIN)".into(),
+                ));
+            }
+            if !sandbox.root.starts_with('/') {
+                return Err(CoreError::Config(format!(
+                    "dsh sandbox root must be absolute, got `{}`",
+                    sandbox.root
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -205,6 +273,25 @@ impl DshConfig {
             (
                 "PATH".to_string(),
                 std::env::var("PATH").unwrap_or_default(),
+            ),
+        ];
+        env.extend(self.extra_env.iter().cloned());
+        env
+    }
+
+    /// The **container** environment: the image's `PATH`, never the host's.
+    pub(crate) fn container_env(&self) -> Vec<(String, String)> {
+        // Derived from the sandbox mount when present so a caller that forgot to
+        // re-derive `home` cannot hand dsh a host path.
+        let home = match &self.sandbox {
+            Some(sandbox) => sandbox.paths().0,
+            None => self.home.clone(),
+        };
+        let mut env = vec![
+            ("DSH_HOME".to_string(), home.to_string_lossy().to_string()),
+            (
+                "PATH".to_string(),
+                crate::sandbox::CONTAINER_PATH.to_string(),
             ),
         ];
         env.extend(self.extra_env.iter().cloned());
@@ -284,38 +371,33 @@ pub struct DshRuntime {
 
 impl DshRuntime {
     /// Spawn the runtime and complete the `initialize` handshake.
+    ///
+    /// Two transports share one handshake: a host child process ([`StdioTransport`])
+    /// or a container-attached process ([`crate::sandbox::SandboxTransport`]). The
+    /// choice is `cfg.sandbox`, and there is no fallback — a sandboxed session that
+    /// cannot get its container fails instead of silently running on the host.
     pub async fn connect(
         cfg: DshConfig,
         handler: Arc<dyn ServerRequestHandler>,
     ) -> Result<Self, CoreError> {
         cfg.validate()?;
-        std::fs::create_dir_all(&cfg.home).map_err(|e| {
-            CoreError::Config(format!(
-                "cannot create dsh home {}: {e}",
-                cfg.home.display()
-            ))
-        })?;
-        std::fs::create_dir_all(&cfg.cwd).map_err(|e| {
-            CoreError::Config(format!(
-                "cannot create dsh workspace {}: {e}",
-                cfg.cwd.display()
-            ))
-        })?;
-        // dsh runs tools in its own workspace, so a skill distilled by RSI has to
-        // be visible *there*, not only in the aria sandbox root.
-        link_skill_catalog(&cfg);
-        let args = vec!["--profile".to_string(), SDK_PROFILE.to_string()];
-        let transport = StdioTransport::spawn(
-            &cfg.bin,
-            &args,
-            &cfg.child_env(),
-            &cfg.cwd,
-            cfg.max_frame_bytes,
-        )?;
-        let client = RpcClient::new(Arc::new(transport) as Arc<dyn RpcTransport>);
+        let transport: Arc<dyn RpcTransport> = match &cfg.sandbox {
+            Some(sandbox) => Arc::new(crate::sandbox::sandbox_transport(&cfg, sandbox).await?)
+                as Arc<dyn RpcTransport>,
+            None => Arc::new(host_transport(&cfg)?) as Arc<dyn RpcTransport>,
+        };
+        Self::handshake(cfg, transport, handler).await
+    }
+
+    async fn handshake(
+        cfg: DshConfig,
+        transport: Arc<dyn RpcTransport>,
+        handler: Arc<dyn ServerRequestHandler>,
+    ) -> Result<Self, CoreError> {
+        let client = RpcClient::new(transport);
         let arc = Arc::new(client.clone());
         arc.start_reader(handler);
-        client
+        let init = client
             .call(
                 METHOD_INITIALIZE,
                 json!({
@@ -327,10 +409,42 @@ impl DshRuntime {
                 }),
                 cfg.init_timeout,
             )
-            .await?;
+            .await;
+        if let Err(e) = init {
+            // A container whose handshake failed must not keep billing.
+            let _ = client.shutdown().await;
+            return Err(e);
+        }
         tracing::debug!(model = %cfg.model, provider = %cfg.provider, "dsh runtime initialized");
         Ok(Self { client, cfg })
     }
+}
+
+/// Host transport: a real child process in a workspace this process owns.
+fn host_transport(cfg: &DshConfig) -> Result<StdioTransport, CoreError> {
+    std::fs::create_dir_all(&cfg.home).map_err(|e| {
+        CoreError::Config(format!(
+            "cannot create dsh home {}: {e}",
+            cfg.home.display()
+        ))
+    })?;
+    std::fs::create_dir_all(&cfg.cwd).map_err(|e| {
+        CoreError::Config(format!(
+            "cannot create dsh workspace {}: {e}",
+            cfg.cwd.display()
+        ))
+    })?;
+    // dsh runs tools in its own workspace, so a skill distilled by RSI has to
+    // be visible *there*, not only in the aria sandbox root.
+    link_skill_catalog(cfg);
+    let args = vec!["--profile".to_string(), SDK_PROFILE.to_string()];
+    StdioTransport::spawn(
+        &cfg.bin,
+        &args,
+        &cfg.child_env(),
+        &cfg.cwd,
+        cfg.max_frame_bytes,
+    )
 }
 
 #[async_trait]
@@ -436,15 +550,8 @@ impl DshPool {
                 )));
             }
         }
-        let mut cfg = self.cfg.clone();
-        let root = cfg
-            .home
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| cfg.home.clone());
-        let per_session = DshConfig::for_session(&root, session, &cfg.model);
-        cfg.home = per_session.home;
-        cfg.cwd = per_session.cwd;
+        let mut cfg = self.cfg.for_session_like(session);
+        cfg.session = session.to_string();
         let runtime = self.connector.connect(cfg, self.handler.clone()).await?;
         let mut entries = self.entries.lock().await;
         entries.insert(
@@ -526,6 +633,52 @@ mod tests {
         assert_eq!(session_dir_name(""), "default");
         assert_eq!(session_dir_name(&"a".repeat(200)).len(), 96);
         assert_eq!(session_dir_name("../../etc"), "______etc");
+    }
+
+    fn sandboxed_cfg() -> DshConfig {
+        let sandbox = crate::sandbox::DshSandbox {
+            sandbox: std::sync::Arc::new(agent_sandbox::DockerSandbox::new()),
+            image: "aria-dsh-sandbox:latest".into(),
+            mount: crate::sandbox::SandboxMount::Volume,
+            root: "/aria/session".into(),
+            bin: "/usr/local/bin/dsh".into(),
+            volume_prefix: "aria-dsh".into(),
+            resources: agent_sandbox::SandboxResourceLimits::default(),
+            hardening: agent_sandbox::SandboxHardening::default(),
+            network: None,
+            labels: Vec::new(),
+        };
+        DshConfig::for_session(Path::new("/srv"), "s1", "m").with_sandbox(sandbox)
+    }
+
+    #[test]
+    fn a_sandboxed_config_rejects_an_empty_image_bin_or_relative_root() {
+        let cfg = sandboxed_cfg();
+        cfg.validate().expect("valid");
+
+        let mut empty_image = cfg.clone();
+        empty_image.sandbox.as_mut().unwrap().image = "  ".into();
+        let err = empty_image.validate().unwrap_err().to_string();
+        assert!(err.contains("image is empty"), "{err}");
+
+        let mut empty_bin = cfg.clone();
+        empty_bin.sandbox.as_mut().unwrap().bin = String::new();
+        let err = empty_bin.validate().unwrap_err().to_string();
+        assert!(err.contains("executable is empty"), "{err}");
+
+        let mut relative = cfg.clone();
+        relative.sandbox.as_mut().unwrap().root = "aria/session".into();
+        let err = relative.validate().unwrap_err().to_string();
+        assert!(err.contains("must be absolute"), "{err}");
+    }
+
+    #[test]
+    fn the_container_environment_falls_back_to_the_host_home_without_a_sandbox() {
+        let cfg = DshConfig::for_session(Path::new("/srv"), "s1", "m");
+        let env = cfg.container_env();
+        let (key, home) = env.iter().find(|(key, _)| key == "DSH_HOME").unwrap();
+        assert_eq!(key, "DSH_HOME");
+        assert_eq!(*home, cfg.home.to_string_lossy());
     }
 
     #[test]

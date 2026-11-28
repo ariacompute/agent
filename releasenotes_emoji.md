@@ -1,5 +1,34 @@
 # 发布说明 ✨
 
+## 🐳 dsh 跑进容器了：默认开启，失败即失败
+
+原来的默认运行时是**宿主子进程**：`dsh` 既调模型也跑它自己的工具，唯一的边界只是权限档。现在整条会话在容器里，宿主进程不再充任边界。
+
+### 🧱 沙箱接缝补齐
+
+- 🔌 `Sandbox` 新增 `exec_attached`（一次长连接 `exec`，双向 stdio）、`copy_in`（tar 上传）、`has_image`；`ExecSpec` 新增 `mounts` / `hardening` / `resources`。默认实现是 `Unsupported`，旧后端不改也能编译。
+- ⏱️ 容器跑 keep-alive 而不是 `sleep 3600`：workspace 在容器内准备，再 attach `dsh --profile sdk`，容器活多久会话就活多久。
+- 📦 会话工作区落在**命名卷** `aria-dsh-<tenant>-<session>`，不是 bind —— 云端经 `/var/run/docker.sock` 与守护进程对话，bind 源会解析到守护进程那台机器上。
+- 🧯 `SandboxShell` 自己强制 `timeout_ms`，超时报 `Unavailable`，并且每条路径都销毁容器。
+
+### 🛡️ 默认与失败语义
+
+- ✅ `DSH_SANDBOX` 默认 `1`：镜像缺失（从不拉取）、workspace 准备失败、技能册上传被拒、harness 无法 attach，任一项都中止启动或销毁容器。
+- 🚪 `DSH_SANDBOX=0` 是显式且会打日志的逃生门，绝不静默降级。
+- 🧠 thinking 过滤器区分「监听地址」与「容器可达地址」：`DSH_THINKING_FILTER_BIND` / `_URL` 缺一个就在启动时失败，而不是第一轮才炸。
+- 💰 harness 容器有独立预算（`DSH_SANDBOX_CPUS/MEMORY/PIDS`，默认 1 CPU / 1 GiB / 512 pids），加入受治理的出网网络并带租户/会话标签。
+- 🏗️ `docker build --target sandbox` 产出镜像（uid 10001、`WORKDIR /aria` 不落在挂载点里、pip 走镜像源并可续传），阶段置于最前，`--target sandbox` 不再连带编译整个 workspace。
+
+### ⚠️ 遗留风险（ADR-0027）
+
+- `EGRESS_MODE=network` 下 dsh 是否遵守 `HTTPS_PROXY` 未验证；过滤器需要 sidecar。
+- `cap_drop=ALL` 可能与 dsh 自带 sandbox 冲突，回退 `DSH_SANDBOX_HARDEN=0`。
+- 1 GiB 是初值；凭据经环境变量进入容器，`docker inspect` 可见；harness 容器不计入 `QuotaGuardSandbox`。
+
+### ✅ 验证
+
+`cargo test --workspace`（1274 ✅）、`fmt`、`clippy -D warnings` 与覆盖率闸门（计入统计的行 34859/34859，100%）全部通过；`just sandbox-image` 构建出 650 MB 镜像，Docker 原语的 gated 用例（`ARIA_E2E_DOCKER=1`，2 条）在真实守护进程上通过，`ARIA_DSH_SANDBOX_E2E=1` 跑通容器内 `initialize` 握手。
+
 ## ♻️ 递归自我改进：账本变成能力 🧠
 
 每次任务留下的 `SessionEvent` 账本，现在还会被折成诊断：病症 → 候选 → 重放打分 → 人工闸门 → 新版本。没有第二套事件流、没有后台守护、也不热替换。账本与诊断**默认开启**，唯一花钱的真实重跑默认关闭。

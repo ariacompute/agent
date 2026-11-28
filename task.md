@@ -500,6 +500,66 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       on with the paid step off, additive events, explicit gate, receipted
       re-runs, one catalog, no hot swap, adaptation before reuse).
 
+## Milestone 20 — dsh sandbox runtime (ADR-0027)
+- [x] `agent_sandbox` grew the container primitives a long-lived harness needs:
+      `MountSpec` (bind/volume, `read_only`), `SandboxHardening` (`user`,
+      `cap_drop`, `read_only_rootfs`, `no_new_privileges`), `AttachedSpec` /
+      `AttachedExec` (duplex stdin+output over one `exec`) and three new `Sandbox`
+      provided methods — `exec_attached`, `copy_in`, `has_image` — each defaulting
+      to `Unsupported`, so existing backends compile untouched.
+- [x] Docker backend: `spawn` sets `OpenStdin`/`StdinOnce`, user, limits and the
+      mounts; the command is a **keep-alive** (`while true; do sleep 3600; done`)
+      so the container lives as long as the session instead of being capped at
+      one hour. `exec_attached` is `create_exec` + `start_exec` with hijacked
+      stdio; `copy_in` uploads a tar; `has_image` maps a 404 from `inspect_image`
+      to `Ok(false)`. `parse_size` is public for the deployment layer.
+- [x] Decorators (`NetworkingSandbox`, `QuotaGuardSandbox`, `BrowserSandbox`)
+      forward all three new methods, and `SandboxCapabilities` reports `attach` /
+      `copy_in`; a decorator that forgot to forward would silently turn "attach"
+      into "no such feature", so the tests pin each hop.
+- [x] `SandboxShell` enforces its own `timeout_ms` with `tokio::time::timeout`
+      (mapping expiry to `SeamError::Unavailable`) and always destroys the
+      container; `with_timeout(..)` lets the cloud shorten the default.
+- [x] New `aria-agent-dsh/src/sandbox.rs`: `DshSandbox` (image, mount mode, root,
+      in-container bin, volume prefix, limits, hardening, network, labels),
+      `volume_name()` = `<prefix>-<tenant>-<session>`, `skill_catalog_tar()` (one
+      `skills/` root), `prepare()` (mkdir → `copy_in` catalog → `exec_attached`),
+      and `SandboxTransport` (line-buffered `recv_line` with an idle watchdog,
+      `send_line`, idempotent `close` that destroys the container through a
+      `Teardown`). Any prepare failure destroys the container before returning.
+- [x] `DshConfig` gained `session_root`, `session` and `sandbox`; `for_session_like`
+      (kills the `<root>/.aria/dsh/.aria/dsh` double nesting), `with_sandbox`
+      (re-derives `home`/`cwd`/`PATH` from the mount so the child env is the
+      container's) and `container_env()`. `validate()` rejects a relative root or
+      an empty image/bin, `connect()` shuts the transport down when `initialize`
+      fails, and `DshPool::acquire` builds through `for_session_like`.
+- [x] `ThinkingFilterProxy::start_on(upstream, addr)` binds an operator-chosen
+      address so a container can reach the filter; the advertised base URL is a
+      separate setting.
+- [x] New `aria-agent-cloud/src/dsh_sandbox.rs`: `SandboxedDshConfig`
+      (`from_env` / `from_lookup` / `to_dsh_sandbox` / `container_proxy_env`),
+      `preflight()` (the image must exist; nothing pulls), and
+      `thinking_filter_base()` (a sandboxed harness with the filter on needs a
+      non-loopback http(s) URL). An explicit empty value is an error, never a
+      silent default. `main.rs` runs preflight before the first turn, logs the
+      `DSH_SANDBOX=0` escape hatch, and gives each tenant container the egress
+      network, tenant/session labels and the proxy variable set.
+- [x] Deploy surface: `Dockerfile` gained an `AS sandbox` stage (venv dsh
+      symlinked to `/usr/local/bin/dsh`, uid 10001, `/aria/session`), `.env.example`
+      the `DSH_SANDBOX*` block, `docker-compose.yml` the corresponding service
+      env, and `justfile` the `sandbox-image` / `dsh-sandbox-e2e` recipes.
+- [x] Gated E2E, never a fake pass: `crates/aria-agent-sandbox/tests/e2e_docker.rs`
+      (real duplex attach + `copy_in`; a volume survives a container rebuild) and
+      `crates/aria-agent-dsh/tests/sandbox_live.rs` (containerised `initialize`)
+      both print a skip reason and return when their env var is unset. The Docker
+      pair (2 cases, `ARIA_E2E_DOCKER=1`) was run against a real daemon, and the
+      containerised handshake (`ARIA_DSH_SANDBOX_E2E=1`) was run against the
+      locally built image.
+- [x] Docs: ADR-0027 (form F2 chosen over `attach_container`; named volume over
+      bind; tar upload over symlink; default-on fail-closed), `requirements.md §10`,
+      architecture "harness boundary" table, both READMEs, release notes and
+      AGENTS.md.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

@@ -588,6 +588,30 @@ impl crate::Sandbox for NetworkingSandbox {
         self.inner.destroy(handle).await
     }
 
+    async fn exec_attached(
+        &self,
+        handle: &crate::SandboxHandle,
+        spec: &crate::AttachedSpec,
+    ) -> Result<crate::AttachedExec, SandboxError> {
+        // The process is created in a container this decorator already put on the
+        // governed network, so there is nothing to attach here — but it must be
+        // forwarded, or the decorator would report the capability as missing.
+        self.inner.exec_attached(handle, spec).await
+    }
+
+    async fn copy_in(
+        &self,
+        handle: &crate::SandboxHandle,
+        target: &str,
+        tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        self.inner.copy_in(handle, target, tar).await
+    }
+
+    async fn has_image(&self, image: &str) -> Result<bool, SandboxError> {
+        self.inner.has_image(image).await
+    }
+
     fn capabilities(&self) -> crate::SandboxCapabilities {
         self.inner.capabilities()
     }
@@ -712,6 +736,7 @@ mod tests {
     #[derive(Default)]
     struct Capture {
         last: std::sync::Mutex<Option<crate::ExecSpec>>,
+        last_target: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -733,6 +758,57 @@ mod tests {
         async fn destroy(&self, _handle: crate::SandboxHandle) -> Result<(), SandboxError> {
             Ok(())
         }
+        async fn exec_attached(
+            &self,
+            _handle: &crate::SandboxHandle,
+            spec: &crate::AttachedSpec,
+        ) -> Result<crate::AttachedExec, SandboxError> {
+            Ok(crate::AttachedExec {
+                exec_id: spec.command.join(" "),
+                stdin: Box::pin(tokio::io::sink()),
+                output: Box::pin(futures::stream::empty()),
+            })
+        }
+        async fn copy_in(
+            &self,
+            _handle: &crate::SandboxHandle,
+            target: &str,
+            _tar: Vec<u8>,
+        ) -> Result<(), SandboxError> {
+            *self.last_target.lock().unwrap() = Some(target.to_string());
+            Ok(())
+        }
+        async fn has_image(&self, _image: &str) -> Result<bool, SandboxError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_decorator_forwards_attach_copy_and_image_probes() {
+        // A network wrapper that forgot to forward would turn "attach" into
+        // `Unsupported` and break the sandboxed harness.
+        let capture = std::sync::Arc::new(Capture::default());
+        let sandbox = NetworkingSandbox::new(
+            capture.clone(),
+            "aria-egress",
+            vec![(TENANT_LABEL.into(), "tenant-a".into())],
+            Vec::new(),
+        );
+        let handle = crate::SandboxHandle { id: "sbx".into() };
+        assert!(sandbox.has_image("aria-dsh-sandbox:latest").await.unwrap());
+        sandbox
+            .copy_in(&handle, "/aria/session/.aria", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            capture.last_target.lock().unwrap().as_deref(),
+            Some("/aria/session/.aria")
+        );
+        let attached = sandbox
+            .exec_attached(&handle, &crate::AttachedSpec::command(vec!["dsh".into()]))
+            .await
+            .unwrap();
+        assert_eq!(attached.exec_id, "dsh");
     }
 
     #[tokio::test]

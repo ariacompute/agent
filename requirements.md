@@ -217,7 +217,8 @@ Tracked in `docs/followups/`:
 * `AgentConfig::harness` selects `native` or `dsh`. The library default is
   `native`; the cloud binary defaults to `dsh`; an unknown value, or `dsh` without
   an injected loop, is a hard error (never a silent fallback).
-* `harness = "dsh"` runs `dsh --profile sdk` as a child process and speaks
+* `harness = "dsh"` runs `dsh --profile sdk` as a child process — inside the
+  session container by default, see below — and speaks
   newline-delimited JSON-RPC on stdio (no third-party gateway plugin). Frames are
   capped, stderr is drained, requests time out, and a runtime that dies fails the
   turn instead of yielding an empty answer.
@@ -225,6 +226,36 @@ Tracked in `docs/followups/`:
   `ToolExecutionPipeline` and registered handlers do not run for that session.
   aria still owns recall, memory writes, compaction, session events/titles,
   approval/question bridging and the frozen wire envelope.
+* **The dsh session is containerised by default** (ADR-0027). `spawn` owns a
+  keep-alive container, the harness runs inside it as an attached `exec`
+  (`exec_attached`: stdin + incremental stdout/stderr), and the session's
+  workspace, `DSH_HOME` and `.aria/skills` live on a per-session **named volume**
+  (`aria-dsh-<tenant>-<session>` → `DSH_SANDBOX_ROOT`, default `/aria/session`).
+  A named volume, not a bind: the cloud is Docker-out-of-Docker, so a bind source
+  resolves on the daemon's host. The volume outlives the container, so an evicted
+  runtime resumes its session. `DSH_SANDBOX_MOUNT=bind` is available when the two
+  share a filesystem, and then the directory must be writable by
+  `DSH_SANDBOX_USER` (Docker populates a volume from the image; it does not
+  populate a bind source).
+* The skill catalog is **uploaded** as a tar into `<cwd>/.aria` at spawn (a
+  container cannot see the control-plane directory); an empty catalog uploads
+  nothing.
+* Fail-closed: a missing image, an unprepared workspace, a refused upload, an
+  unattachable harness or a failed handshake fails the turn and destroys the
+  container. There is no fallback to a host process. `DSH_SANDBOX=0` is the
+  explicit, logged escape hatch. Boot preflight requires the image to be present
+  locally (this repository never pulls).
+* The harness container is hardened (`cap_drop=ALL`, `no-new-privileges`, the
+  image's non-root uid; `read_only_rootfs` stays off because dsh needs `/tmp` and
+  its volume), joins the governed egress network with the tenant/session labels,
+  and gets its own budget (`DSH_SANDBOX_CPUS/MEMORY/PIDS`, default 1 CPU / 1 GiB /
+  512 pids).
+* The thinking filter is bound and advertised separately: `DSH_THINKING_FILTER_BIND`
+  (default `127.0.0.1:0`) is the listener, `DSH_THINKING_FILTER_URL` is what the
+  harness is told to use. With a sandboxed harness, `enable` plus a missing or
+  loopback URL fails boot, and the advertised host is appended to `NO_PROXY`.
+* `ExecSpec::timeout_ms` is enforced by the shell seam (and the container is
+  destroyed on timeout); the sandboxed transport also bounds idle reads.
 * Approvals and user questions are answered from the installed seams and fail
   closed when absent.
 * Each session gets its own `DSH_HOME` and workspace; the child environment is an
@@ -234,8 +265,9 @@ Tracked in `docs/followups/`:
   accepted as aliases, registration order = precedence, `dispose` releases in
   reverse assembly order, `service` keys reject providers.
 * Verification: offline fake-transport/scripted-runtime tests, a scripted real
-  child process (`just dsh-smoke`), and one env-gated live turn (`just dsh-e2e`)
-  that skips loudly instead of fabricating a result.
+  child process (`just dsh-smoke`), one env-gated live turn (`just dsh-e2e`), and a
+  containerised handshake against the real image (`just dsh-sandbox-e2e`) — all of
+  which skip loudly instead of fabricating a result.
 
 ## 11. Recursive self-improvement (RSI)
 * RSI closes the loop *execution ledger → diagnosis → proposal → validation →

@@ -22,3 +22,6 @@ tracing.workspace = true
 bollard = "0.18"
 futures = "0.3"
 
+[dev-dependencies]
+# The e2e test packs a filesystem into the archive `copy_in` expects.
+tar = "0.4"

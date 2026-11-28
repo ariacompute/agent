@@ -297,17 +297,57 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let model_override = gateway_model();
         let gateway_base = gateway_base_url();
         let gateway_key = gateway_api_key();
+        // --- Sandboxed runtime (ADR-0027) ---
+        // On by default: with `harness = dsh` the harness executes the tools, so
+        // the host process would *be* the boundary. `DSH_SANDBOX=0` is the
+        // explicit, logged escape hatch.
+        let sandboxed = aria_agent_cloud::dsh_sandbox::SandboxedDshConfig::from_env()
+            .map_err(|e| format!("dsh sandbox configuration: {e}"))?;
+        if let Some(cfg) = &sandboxed {
+            let probe: Arc<dyn Sandbox> = Arc::new(agent_sandbox::DockerSandbox::new());
+            aria_agent_cloud::dsh_sandbox::preflight(probe.as_ref(), cfg)
+                .await
+                .map_err(|e| format!("dsh sandbox preflight: {e}"))?;
+            tracing::info!(
+                image = %cfg.image,
+                mount = ?cfg.mount,
+                root = %cfg.root,
+                "dsh runs in a sandbox container (volume-backed session workspace)"
+            );
+        } else {
+            tracing::warn!(
+                "DSH_SANDBOX=0: the dsh session runs on the host; dsh's permission \
+                 preset is the only boundary (ADR-0019)"
+            );
+        }
         // `deepseek-official` cannot replay an Anthropic `redacted_thinking`
         // block (second turn => UNSUPPORTED_CONTENT). With
-        // `DSH_THINKING_FILTER=enable` (the default) dsh talks to a loopback
-        // proxy that strips the block in both directions; `disable` connects
-        // straight to the gateway, for a dsh build whose adapter handles it.
+        // `DSH_THINKING_FILTER=enable` (the default) dsh talks to a proxy that
+        // strips the block in both directions; `disable` connects straight to the
+        // gateway, for a dsh build whose adapter handles it.
         let thinking_filter =
             parse_filter_mode(std::env::var("DSH_THINKING_FILTER").ok().as_deref())?;
+        // A sandboxed harness cannot reach the control plane's loopback, so the
+        // bind address is configurable and the advertised URL is separate.
+        let filter_bind = std::env::var("DSH_THINKING_FILTER_BIND")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|raw| !raw.is_empty());
         let thinking_proxy = if thinking_filter {
             match gateway_base.as_deref().map(str::trim) {
                 Some(base) if !base.is_empty() => {
-                    let proxy = ThinkingFilterProxy::start(base).await?;
+                    let proxy = match filter_bind.as_deref() {
+                        Some(raw) => {
+                            let addr: std::net::SocketAddr = raw.parse().map_err(|_| {
+                                format!(
+                                    "DSH_THINKING_FILTER_BIND `{raw}` is not an address \
+                                     (expected e.g. 0.0.0.0:8787)"
+                                )
+                            })?;
+                            ThinkingFilterProxy::start_on(base, addr).await?
+                        }
+                        None => ThinkingFilterProxy::start(base).await?,
+                    };
                     tracing::info!(
                         local = %proxy.local_base_url(),
                         "thinking filter proxy enabled (strips redacted_thinking)"
@@ -330,10 +370,17 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         };
         // The proxy's accept loop runs in its own task, so the handle may be
         // dropped after the base URL is derived.
-        let dsh_gateway_base = thinking_proxy
-            .as_ref()
-            .map(ThinkingFilterProxy::local_base_url)
-            .or_else(|| gateway_base.clone());
+        let dsh_gateway_base = aria_agent_cloud::dsh_sandbox::thinking_filter_base(
+            thinking_filter,
+            sandboxed.is_some(),
+            thinking_proxy
+                .as_ref()
+                .map(ThinkingFilterProxy::local_base_url)
+                .as_deref(),
+            std::env::var("DSH_THINKING_FILTER_URL").ok().as_deref(),
+        )
+        .map_err(|e| format!("thinking filter: {e}"))?
+        .or_else(|| gateway_base.clone());
         // One pool per tenant: session homes never cross tenants (AGENTS rule 7).
         let pools: Arc<std::sync::Mutex<HashMap<String, Arc<DshPool>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -373,6 +420,31 @@ async fn cmd_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     dsh_gateway_base.as_deref().unwrap_or_default(),
                     gateway_key.as_str(),
                 );
+                if let Some(sandboxed) = &sandboxed {
+                    // The container is a sandbox session like any other: it joins
+                    // the governed network, carries the tenant/session labels and
+                    // reaches the internet only through the proxy.
+                    let network =
+                        Some(cfg.egress_network.clone()).filter(|name| !name.trim().is_empty());
+                    let labels: Vec<(String, String)> = if network.is_some() {
+                        vec![
+                            ("aria.tenant_id".to_string(), tenant.clone()),
+                            ("aria.session_id".to_string(), cfg.session.clone()),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    for (key, value) in sandboxed
+                        .container_proxy_env(&cfg.egress_proxy_url, dsh_gateway_base.as_deref())
+                    {
+                        dsh = dsh.with_env(key, value);
+                    }
+                    dsh = dsh.with_sandbox(sandboxed.to_dsh_sandbox(
+                        Arc::new(agent_sandbox::DockerSandbox::new()),
+                        network,
+                        labels,
+                    ));
+                }
                 Arc::new(DshPool::new(dsh, pool_max, idle, bridge))
             });
             Arc::new(DshAgentLoop::new(pool.clone()))

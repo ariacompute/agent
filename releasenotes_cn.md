@@ -1,5 +1,82 @@
 # 发布说明
 
+## dsh 现在跑在容器里
+
+默认的 turn 运行时原本是**宿主子进程**：`dsh --profile sdk` 在与控制面同一个文件系统上执行
+模型调用**和它自己的工具**，唯一的边界是 dsh 的 `workspace-write` 权限档——那是一条逻辑规则，
+不是文件系统边界。ADR-0027 把这条会话搬进容器，且**默认开启**。
+
+### 主要变更
+
+- **会话容器，不是命令容器** —— sandbox 接缝补上 `exec_attached`（一次长连接 `exec`，双向
+  stdin/stdout）、`copy_in`（tar 上传）与 `has_image`；`ExecSpec` 补上 `mounts` / `hardening` /
+  `resources`。新增的 `Sandbox` 方法默认 `Unsupported`，所以既有后端不改也能编译。
+- **keep-alive + attach（形态 F2）** —— 否决 `attach_container`：Docker 的
+  `NewlineLogOutputDecoder` 假定 tty，而 harness 说的是 8 字节帧的 JSON-RPC。改为让容器跑
+  `while true; do sleep 3600; done`，在容器内准备 workspace，然后才 attach
+  `dsh --profile sdk`。原来 1 小时的上限消失：容器活多久，会话就活多久。
+- **命名卷而非 bind** —— 云端经 `/var/run/docker.sock` 与守护进程对话（DooD），bind 源路径会在
+  **守护进程那台机器**上解析。会话落在 `aria-dsh-<tenant>-<session>`，也正是因此，会话在空闲
+  回收后、以及容器重建后都能找回状态。控制面与守护进程确实共享文件系统时可用
+  `DSH_SANDBOX_MOUNT=bind`。
+- **失败即失败** —— `DSH_SANDBOX` 默认 `1`；镜像缺失（任何地方都不拉取）、workspace 准备失败、
+  技能册上传被拒、harness 无法 attach，都会中止启动或销毁容器。没有静默的宿主回退——那会把
+  "已沙箱化"变成一句没人校验的声明。`DSH_SANDBOX=0` 是显式、会打日志的逃生门。
+- **thinking 过滤器认识容器** —— 容器里的 `127.0.0.1` 就是容器自己，所以
+  `DSH_THINKING_FILTER_BIND` 决定代理监听在哪，`DSH_THINKING_FILTER_URL` 是 harness 实际拨号
+  的地址。沙箱模式下开着过滤器却没有可达的非回环 URL，会在启动时就失败，而不是拖到第一轮。
+- **独立预算** —— harness 容器不是一条 shell 命令：它有单独的
+  `DSH_SANDBOX_CPUS/MEMORY/PIDS`（默认 1 CPU / 1 GiB / 512 pids），加入受治理的出网网络并带上
+  租户/会话标签，`GATEWAY_*` 与代理变量经白名单注入——绝不透传宿主环境。
+- **`SandboxShell` 自己管超时** —— 超过 `timeout_ms` 的命令报 `Unavailable`，且无论走哪条路径
+  （含超时路径）都会销毁容器。
+- **镜像可构建** —— `docker build --target sandbox` 产出它（venv dsh 软链到
+  `/usr/local/bin/dsh`、uid 10001、`WORKDIR /aria`，避免 runc 在会话挂载点里建出 root 属主的
+  目录）。该阶段置于最前，否则旧版 builder 会为 `--target sandbox` 编译整个 workspace；pip
+  默认走镜像源并开启续传——约 100 MB 的 runtime wheel 从 pypi.org 在消费级网络上下不完。
+
+### 配置
+
+| 变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `DSH_SANDBOX` | `1` | 容器化 harness；镜像或 workspace 不可用则启动失败 |
+| `DSH_SANDBOX_IMAGE` | `aria-dsh-sandbox:latest` | 由 `just sandbox-image` 构建；从不拉取 |
+| `DSH_SANDBOX_MOUNT` | `volume` | `volume`（`aria-dsh-<tenant>-<session>`）或 `bind`（目录必须对 `DSH_SANDBOX_USER` 可写） |
+| `DSH_SANDBOX_ROOT` / `DSH_SANDBOX_BIN` | `/aria/session` / `/usr/local/bin/dsh` | 容器内挂载点与可执行文件 |
+| `DSH_SANDBOX_VOLUME_PREFIX` | `aria-dsh` | 卷名前缀 |
+| `DSH_SANDBOX_CPUS` / `DSH_SANDBOX_MEMORY` / `DSH_SANDBOX_PIDS` | `1.0` / `1g` / `512` | harness 容器预算 |
+| `DSH_SANDBOX_USER` / `DSH_SANDBOX_HARDEN` | `10001:10001` / `1` | 非 root 用户；丢弃全部 capability + `no-new-privileges` |
+| `DSH_THINKING_FILTER_BIND` / `DSH_THINKING_FILTER_URL` | `127.0.0.1:0` / _（空）_ | 过滤器监听地址 / 容器可达地址 |
+
+### 破坏性变更
+
+- `build_host_config(res, runtime, spec: &ExecSpec)` 取代了原 `network: Option<&str>` 参数；
+  仓库外调用方需传 spec（挂载、加固与限额都从它读）。
+- `DshConfig` 新增 `session_root` / `session` / `sandbox`；请用
+  `DshConfig::for_session_like(..)` 或 `..Default` 式构造。
+- `DSH_SANDBOX` 默认开启：用 `dsh` harness 的部署现在必须本地已有镜像。要保留旧的宿主子进程
+  行为（以及它更弱的边界），设 `DSH_SANDBOX=0`。
+- 显式留空的 `DSH_SANDBOX_IMAGE` / `DSH_SANDBOX_BIN` / `DSH_SANDBOX_VOLUME_PREFIX` 现在是错误，
+  不再回落默认值。
+
+### 遗留风险（记录在 ADR-0027，本轮未解决）
+
+- `EGRESS_MODE=network` 会移除默认路由；dsh 在该模式下是否遵守 `HTTPS_PROXY` 未经验证，
+  过滤器代理还需要 sidecar。
+- `cap_drop=ALL` 可能弄坏 dsh 自带的内部 sandbox；回退是 `DSH_SANDBOX_HARDEN=0`。
+- 1 GiB 是初值：真实回合被 OOM kill 就调高 `DSH_SANDBOX_MEMORY`。
+- 凭据以环境变量进入容器，`docker inspect` 能看到。
+- harness 容器不计入 `QuotaGuardSandbox` 的计量。
+
+### 验证
+
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo test --workspace`（1274 通过）与 `./scripts/coverage.sh`（计入统计的行
+34859/34859 全覆盖；测量值 99.93%，25 个闭合括号伪影不计入）全部通过。
+`just sandbox-image` 构建出 650 MB 镜像，Docker 原语的 gated 用例对
+（`ARIA_E2E_DOCKER=1`，2 条）在真实守护进程上通过，`ARIA_DSH_SANDBOX_E2E=1`
+完成容器内的 `initialize` 握手。
+
 ## 递归自我改进：让账本变成能力
 
 每次任务本来就会留下 `SessionEvent` 账本。RSI（ADR-0026）把同一份账本折成诊断，

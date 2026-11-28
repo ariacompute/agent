@@ -23,6 +23,17 @@ test:
 e2e:
     cargo test -p agent-tests --test e2e_http
 
+# Sandbox image for the dsh runtime (ADR-0027). Built once; the cloud never
+# pulls it, so a missing image fails boot with this command in the message.
+sandbox-image:
+    docker build --target sandbox -t aria-dsh-sandbox:latest .
+
+# DeepSeek Harness in a real container: needs DSH_SANDBOX_IMAGE (or the default
+# `aria-dsh-sandbox:latest`), a reachable GATEWAY_BASE_URL/GATEWAY_API_KEY and a
+# thinking-filter URL the container can reach. Skips loudly when unset.
+dsh-sandbox-e2e:
+    ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture
+
 # DeepSeek Harness: spawn a scripted fake `dsh` and verify the JSON-RPC
 
 # handshake + turn framing (offline, no credentials).

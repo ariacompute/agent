@@ -10,6 +10,7 @@ use agent_sandbox::{ExecSpec, Sandbox};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Combined result of one command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +51,8 @@ pub struct SandboxShell {
     env: Vec<(String, String)>,
     network: Option<String>,
     labels: Vec<(String, String)>,
+    /// Overrides [`ExecSpec::timeout_ms`] for every command this seam runs.
+    timeout_ms: Option<u64>,
 }
 
 impl SandboxShell {
@@ -60,7 +63,15 @@ impl SandboxShell {
             env: Vec::new(),
             network: None,
             labels: Vec::new(),
+            timeout_ms: None,
         }
+    }
+
+    /// Per-command budget. Defaults to [`ExecSpec`]'s 60 s; a deployment that
+    /// expects long builds raises it here.
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
     }
 
     /// Default working directory for every command (typically the policy root).
@@ -104,14 +115,31 @@ impl ShellSeam for SandboxShell {
         spec.env = self.env.clone();
         spec.network = self.network.clone();
         spec.labels = self.labels.clone();
+        if let Some(timeout_ms) = self.timeout_ms {
+            spec.timeout_ms = timeout_ms;
+        }
         let handle = self
             .sandbox
             .spawn(&spec)
             .await
             .map_err(|e| super::SeamError::Unavailable(format!("sandbox spawn: {e}")))?;
-        let out = self.sandbox.exec(&handle, argv).await;
+        // `timeout_ms` is part of the seam contract, so it is enforced here: a
+        // command that outlives its budget must fail the call instead of leaving
+        // the turn waiting on a stream that will never end. The container is
+        // destroyed either way, so a timeout cannot leak a session.
+        let budget = Duration::from_millis(spec.timeout_ms.max(1));
+        let out = tokio::time::timeout(budget, self.sandbox.exec(&handle, argv)).await;
         let _ = self.sandbox.destroy(handle).await;
-        let out = out.map_err(|e| super::SeamError::Io(format!("sandbox exec: {e}")))?;
+        let out = match out {
+            Err(_) => {
+                return Err(super::SeamError::Unavailable(format!(
+                    "sandbox exec timed out after {}ms",
+                    spec.timeout_ms
+                )))
+            }
+            Ok(Err(e)) => return Err(super::SeamError::Io(format!("sandbox exec: {e}"))),
+            Ok(Ok(out)) => out,
+        };
         Ok(ShellOutput {
             exit_code: out.exit_code as i64,
             stdout: out.stdout,
@@ -129,10 +157,13 @@ mod tests {
     #[derive(Default)]
     struct Recording {
         calls: AtomicUsize,
+        destroys: AtomicUsize,
         last: std::sync::Mutex<Option<Vec<String>>>,
         last_env: std::sync::Mutex<Option<Vec<(String, String)>>>,
         fail_exec: bool,
         fail_spawn: bool,
+        /// How long `exec` pretends the command runs.
+        delay: Option<std::time::Duration>,
     }
 
     #[async_trait]
@@ -152,6 +183,9 @@ mod tests {
         ) -> Result<ExecOutput, SandboxError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.last.lock().unwrap() = Some(cmd.to_vec());
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
             if self.fail_exec {
                 return Err(SandboxError::Exec("boom".into()));
             }
@@ -163,6 +197,7 @@ mod tests {
         }
 
         async fn destroy(&self, _handle: SandboxHandle) -> Result<(), SandboxError> {
+            self.destroys.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -225,6 +260,35 @@ mod tests {
         let shell = SandboxShell::new(sb.clone()).with_cwd("/tmp");
         shell.exec(&["ls".into()], None).await.unwrap();
         assert_eq!(sb.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_command_that_outlives_the_budget_fails_and_still_destroys() {
+        let sb = Arc::new(Recording {
+            delay: Some(std::time::Duration::from_millis(500)),
+            ..Default::default()
+        });
+        let shell = SandboxShell::new(sb.clone()).with_timeout(10);
+        let err = shell
+            .exec(&["sleep".into(), "9".into()], None)
+            .await
+            .unwrap_err();
+        match err {
+            super::super::SeamError::Unavailable(message) => {
+                assert!(message.contains("timed out"), "{message}");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+        // The session must not leak just because the command overran.
+        assert_eq!(sb.destroys.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_command_within_its_budget_succeeds() {
+        let sb = Arc::new(Recording::default());
+        let shell = SandboxShell::new(sb.clone()).with_timeout(5_000);
+        assert!(shell.exec(&["true".into()], None).await.unwrap().success());
+        assert_eq!(sb.destroys.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

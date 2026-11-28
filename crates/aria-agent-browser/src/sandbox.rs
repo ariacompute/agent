@@ -92,6 +92,9 @@ impl BrowserSandbox {
             // deployment's choice, so the wrapper stays the single source.
             network: None,
             labels: Vec::new(),
+            mounts: Vec::new(),
+            hardening: agent_sandbox::SandboxHardening::default(),
+            resources: None,
         };
         self.inner
             .spawn(&spec)
@@ -166,6 +169,25 @@ impl Sandbox for BrowserSandbox {
     }
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError> {
         self.inner.destroy(handle).await
+    }
+    async fn exec_attached(
+        &self,
+        handle: &SandboxHandle,
+        spec: &agent_sandbox::AttachedSpec,
+    ) -> Result<agent_sandbox::AttachedExec, SandboxError> {
+        self.inner.exec_attached(handle, spec).await
+    }
+    async fn copy_in(
+        &self,
+        handle: &SandboxHandle,
+        target: &str,
+        tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        self.inner.copy_in(handle, target, tar).await
+    }
+
+    async fn has_image(&self, image: &str) -> Result<bool, SandboxError> {
+        self.inner.has_image(image).await
     }
 }
 

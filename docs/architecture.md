@@ -81,14 +81,27 @@ records (ADR-0019).
 
 ### Harness boundary
 
-`harness = "dsh"` starts `dsh --profile sdk` per session (its own `DSH_HOME` and
-workspace under the deployment root) and speaks newline-delimited JSON-RPC over
-stdio. dsh executes the model call **and** its own tools in its own sandbox, so
-aria's `Sandbox` / `ToolExecutionPipeline` / registered handlers are idle for that
-session. aria keeps: recall injection, memory writes, graph relations,
-compaction, session events and titles, approval/question bridging, and the frozen
-wire envelope. `just dsh-smoke` covers the protocol offline; `just dsh-e2e` runs
-one real turn when `ARIA_DSH_E2E=1` and a provider key are present.
+`harness = "dsh"` runs `dsh --profile sdk` **inside a sandbox container**
+(ADR-0027) and speaks newline-delimited JSON-RPC over the attached process's
+stdio. dsh executes the model call **and** its own tools there, so aria's
+`Sandbox` / `ToolExecutionPipeline` / registered handlers are idle for that
+session — but the container, not the host process, is now the tool boundary:
+
+| Piece | Where it lives |
+| --- | --- |
+| `dsh` process, its tools | inside the session container (`exec_attached`) |
+| `DSH_HOME`, workspace, `.aria/skills` | per-session named volume at `DSH_SANDBOX_ROOT` (`/aria/session`) |
+| skill catalog source | control plane, uploaded as a tar at spawn |
+| model traffic | session container → governed egress proxy (`aria.tenant_id` / `aria.session_id` labels) |
+| thinking filter | control plane, bound per `DSH_THINKING_FILTER_BIND` and advertised per `DSH_THINKING_FILTER_URL` |
+| recall, memory, compaction, session events/titles, approvals, wire envelope | aria, unchanged |
+
+`DSH_SANDBOX=0` restores the host child process (dsh's permission preset is then
+the only boundary) and is logged at boot. Failures never fall back silently: a
+missing image, workspace, upload, attach or handshake fails the turn and destroys
+the container. `just dsh-smoke` covers the protocol offline, `just dsh-e2e` runs
+one real host turn, and `just dsh-sandbox-e2e` completes a handshake in a real
+container (`just sandbox-image` builds the image; nothing pulls it).
 
 ## Recursive self-improvement (ADR-0026)
 

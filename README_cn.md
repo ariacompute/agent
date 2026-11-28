@@ -62,7 +62,7 @@ SDK**（该 HTTP API 的客户端），以及 (c) **Swift / Kotlin 原生 SDK** 
 `agent` 让每个 SDK 都遵循同样的三步形态——定义 `Agent`、运行一次，然后复用会话
 继续对话并流式输出——而运行时自行决定记忆存于何处、工具在何处执行：
 
-- 🐋 **默认由 DeepSeek Harness 执行** —— 每一轮对话跑在外部 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh --profile sdk`，stdio 上的逐行 JSON-RPC）上，turn/step 编排、模型调用与工具执行都归 dsh；进程内 Rust 循环保留为显式 `native` 回退（`aria-agent-dsh`）。
+- 🐋 **默认由 DeepSeek Harness 执行** —— 每一轮对话跑在外部 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh --profile sdk`，stdio 上的逐行 JSON-RPC）上，且**跑在 `docker build --target sandbox` 构建的容器里**（`DSH_SANDBOX=1`，默认开启），turn/step 编排、模型调用与工具执行都归 dsh，宿主进程不再充任边界；进程内 Rust 循环保留为显式 `native` 回退（`aria-agent-dsh`）。
 - 🧩 **Agent 外壳** —— `aria-agent-core` 负责 `recall → memorize`、提示词装配、工具管线、会话事件与冻结的流式信封，与"由谁驱动本轮"解耦。
 - 🔌 **能力接缝** —— 模型、sandbox、存储、会话、工具、审批、子智能体与调度都是可替换接缝，由插件注册表在启动期装配并 fail-closed（`aria-agent-plugin`）。
 - 🛠️ **统一工具管线** —— 解析 → 权限预设 → 审批 → 分发 → 结果后处理（截断 + 外置），无审批方时拒绝并回灌原因而不是放行（`aria-agent-tools`）。
@@ -109,11 +109,11 @@ provider；云端与原生前端共享同一套 `recall → runtime → memorize
 | **aria-agent-sandbox** | 可插拔 `Sandbox`：Docker（默认）/ Kata / Cube / Browser。 |
 | **aria-agent-browser** | 浏览器 sandbox：六镜像 `BrowserCatalog` + `BrowserSandbox`（复用 Docker/Kata）+ 浏览器工具族。 |
 | **aria-agent-core** | Agent 外壳：`recall → runtime → memorize`、接缝定义（含 `agent_loop`）、会话事件流、工具管线、提示词装配。 |
-| **aria-agent-dsh** | `agent_loop` 接缝的 DeepSeek Harness 提供方：stdio JSON-RPC 传输、按会话复用的运行时池、审批/提问桥接、通知 → `AgentEvent` 映射。 |
+| **aria-agent-dsh** | `agent_loop` 接缝的 DeepSeek Harness 提供方：stdio JSON-RPC 传输、按会话复用的运行时池、容器化的会话工作区、审批/提问桥接、通知 → `AgentEvent` 映射。 |
 | **aria-agent-plugin** | 插件注册表：manifest、接缝键/角色、依赖拓扑排序、环与 core 唯一性校验、冻结快照。 |
 | **aria-agent-tools** | 内置工具族：fs、shell、jobs、terminal（`pty`）、skills、web（`web`）、ask_user、plan、todo、memo。 |
-| **aria-agent-governance** | 出站判定与 `${credential}` 替换、JSONL 审计、用量计量、工具输出投影、加密凭据库、空闲检测、配额守卫与检查点（ADR-0021 … 0025）。 |
-| **aria-agent-rsi** | 递归自我改进：账本入账、确定性提案器、重放评分、带版本号的手册、有回执的真实重跑、共享技能目录与 sweep（ADR-0026）。 |
+| **aria-agent-governance** | 出站判定与 `${credential}` 替换、JSONL 审计、用量计量、工具输出投影、加密凭据库、空闲检测、配额守卫与检查点。 |
+| **aria-agent-rsi** | 递归自我改进：账本入账、确定性提案器、重放评分、带版本号的手册、有回执的真实重跑、共享技能目录与 sweep。 |
 | **aria-agent-egress-proxy** | `network` 强制模式下的无密钥 sidecar：经 `/internal/egress/*` 回控制面，用来源 IP 解析租户，批量上报审计。 |
 | **aria-agent-orchestrator** | 子智能体（进程内 fork）、智能体团队（任务 DAG）、定时任务（单飞 ticker）。 |
 | **ariacompute-agent** | UniFFI `cdylib`（`libaria-agent_ffi`）：云端 API 客户端 —— `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`。 |
@@ -124,8 +124,7 @@ provider；云端与原生前端共享同一套 `recall → runtime → memorize
 
 > **存储边界：** **云端**把对话 / 长期上下文保存在 Postgres + pgvector
 >（`context_fragments`，按 principal 分片）—— pgvector 为必需，缺少则启动失败。
-> SDK 的 `local` 后端则在端侧保留一份 aria memo（SQLite）副本。详见
->`docs/adr/0010-context-storage-pgvector.md`。
+> SDK 的 `local` 后端则在端侧保留一份 aria memo（SQLite）副本。
 
 <div align="right">
 
@@ -172,6 +171,10 @@ cargo run -p aria-agent-cloud
 
 > 每次运行都会重建该临时 pgvector 容器；表结构由 `ensure_schema` 在启动时创建。
 > 若 55432 被占用，请同时修改 `-p` 与 `DATABASE_URL`。
+>
+> `.env.example` 里 `DSH_SANDBOX=1`，所以第一次 `cargo run` 还要求本地已有
+> `aria-dsh-sandbox:latest`：先跑一次 `just sandbox-image`（不会自动拉取），或设
+> `DSH_SANDBOX=0` 做纯本地运行——此时 harness 仍是宿主子进程，唯一的边界是 dsh 的权限档。
 
 <div align="right">
 
@@ -239,13 +242,21 @@ cp .env.example .env
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres（pgvector）账号与库：元数据 **与** 上下文记忆。 |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | 连接串。主机名 `postgres` 即 compose 服务名。 |
 | `AGENT_HARNESS` | `dsh` | 本轮运行时：`dsh`（DeepSeek Harness）或 `native`（内置 Rust 循环）；未知取值启动即失败。 |
-| `DSH_BIN` | `/opt/dsh/bin/dsh` | 运行时可执行文件（未设置时取 `PATH` 上的 `dsh`）。缺失即给出可操作报错，绝不降级。 |
+| `DSH_BIN` | `/opt/dsh/bin/dsh` | 宿主侧运行时可执行文件，仅在 `DSH_SANDBOX=0` 时使用；沙箱模式在容器内执行 `DSH_SANDBOX_BIN`。缺失即给出可操作报错，绝不降级。 |
 | `DSH_PROVIDER` | `deepseek-official` | dsh 内部的 provider 路由。aria 原样透传；未知路由会在 harness 内失败，而不是被改写。 |
 | `DSH_HOME_ROOT` | `/app/.aria/dsh` | 每租户/每会话 `DSH_HOME` 的根目录（未设置时取 `.aria/dsh`）。 |
 | `DSH_POOL_MAX` | `8` | 每租户保留的活跃运行时上限。 |
 | `DSH_IDLE_TTL_SEC` | `900` | 池化运行时被回收前的空闲窗口（会话可凭 `DSH_HOME` 续用）。 |
-| `DSH_THINKING_FILTER` | `enable` | `enable` 让 dsh 经本地回环代理访问网关，双向剥离 Anthropic `redacted_thinking` 块（内置 adapter 无法回放该块，第二轮会报 `UNSUPPORTED_CONTENT`），`thinking` 块保留；`disable` 直连网关。其它取值启动即失败。 |
+| `DSH_THINKING_FILTER` | `enable` | `enable` 让 dsh 经本地代理访问网关，双向剥离 Anthropic `redacted_thinking` 块（内置 adapter 无法回放该块，第二轮会报 `UNSUPPORTED_CONTENT`），`thinking` 块保留；`disable` 直连网关。其它取值启动即失败。 |
 | `DSH_PERMISSION_MODE` | `workspace-write` | dsh 在沙箱内应用的权限上限（`read-only` \| `workspace-write` \| `danger-full-access`）。不要设得比沙箱本身更宽。 |
+| `DSH_SANDBOX` | `1` | 在容器里跑 harness，而不是宿主子进程（**默认开启**，失败即失败）。镜像缺失、工作区无法准备、harness 无法 attach 都会在启动时中止；没有宿主回退。`0` 是显式且会打日志的逃生门。 |
+| `DSH_SANDBOX_IMAGE` | `aria-dsh-sandbox:latest` | 由 `just sandbox-image`（`docker build --target sandbox`）构建的镜像。**任何地方都不拉取**：本地必须已有，否则 preflight 失败。 |
+| `DSH_SANDBOX_MOUNT` | `volume` | 会话工作区的承载方式：`volume`（命名卷 `aria-dsh-<tenant>-<session>`，DooD 下安全）或 `bind`（宿主路径；仅当控制面与守护进程同一文件系统，且该目录必须对 `DSH_SANDBOX_USER` 可写，本地可用 `DSH_SANDBOX_USER="$(id -u):$(id -g)"`）。 |
+| `DSH_SANDBOX_ROOT` / `DSH_SANDBOX_BIN` | `/aria/session` / `/usr/local/bin/dsh` | 容器**内**的挂载点，以及容器**内**的 harness 可执行文件。宿主 `DSH_BIN` 与 `PATH` 从不透传。 |
+| `DSH_SANDBOX_VOLUME_PREFIX` | `aria-dsh` | 每会话卷名前缀。卷故意比容器活得久（会话续用），按名字清理。 |
+| `DSH_SANDBOX_CPUS` / `DSH_SANDBOX_MEMORY` / `DSH_SANDBOX_PIDS` | `1.0` / `1g` / `512` | harness 容器的资源预算，与 `SANDBOX_*` 相互独立——dsh 比一条 shell 命令重得多。 |
+| `DSH_SANDBOX_USER` / `DSH_SANDBOX_HARDEN` | `10001:10001` / `1` | 镜像内的非 root 用户，以及丢弃全部 capability + `no-new-privileges`。user 留空表示沿用镜像自带用户。 |
+| `DSH_THINKING_FILTER_BIND` / `DSH_THINKING_FILTER_URL` | `127.0.0.1:0` / _（空）_ | 过滤器的监听地址，以及**容器**实际拨号的地址。容器里的 `127.0.0.1` 就是它自己，所以「沙箱 + 过滤器开启」必须两者都设（例如 `0.0.0.0:8787` 与 `http://172.17.0.1:8787`），否则启动失败。 |
 | `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / `your-api-key`（占位） / `ariacompute/ariamodel` | **两种运行时（`dsh` 与 `native`）共用**的模型网关配置。该值是网关根地址；`native` 追加 `/v1/chat/completions`，`dsh` 追加 `/anthropic/v1/messages`。不再回退 `OPENAI_*`。`dsh` 通过子进程白名单接收这些值。仅 stub/离线可留空。 |
 | `AGENT_CLOUD_API_KEY` | `your-api-key`（占位） | 引导/管理员密钥。设置后作为 Admin principal（以 `Authorization: Bearer <key>` 或 `ApiKey <key>` 携带）；管理员可经 `POST /v1/api-keys` 发放租户密钥。无有效密钥的请求返回 `401`。模板里是占位值，务必替换；留空则为开放模式（`default` 租户）。 |
 | `API_KEY_CACHE_TTL_SEC` | `60` | API key 解析结果的缓存时间（秒）。 |
@@ -437,6 +448,8 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | `just e2e` | 运行真实 socket 的 HTTP E2E 套件（`cargo test -p agent-tests --test e2e_http`）；可选 DB/Docker 场景缺依赖时跳过。 |
 | `just dsh-smoke` | 拉起脚本化假 `dsh`，校验 JSON-RPC 握手与回合帧序（`cargo test -p aria-agent-dsh --test stdio -- --nocapture`）；离线、无需凭据。 |
 | `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需本地 `dsh` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`）。该 `just` 任务只设置 `ARIA_DSH_E2E=1`；`just` 默认不加载 `.env`，请用下面两种方式之一加载。 |
+| `just sandbox-image` | 构建 harness 镜像（`docker build --target sandbox -t aria-dsh-sandbox:latest .`）。沙箱启动前必须有；不会自动拉取。 |
+| `just dsh-sandbox-e2e` | 在真实容器里完成 `initialize` 握手（`ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture`）；需上面的镜像与 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`，缺任一项会响亮地跳过。 |
 
 **本地安装 `dsh`。** 镜像通过 `deepseek-harness-sdk`（它会拉
 `deepseek-harness-runtime-bin`）把 `dsh` 装到 `/opt/dsh/bin/dsh`。本地同样安装：
@@ -485,13 +498,22 @@ turn 循环本身就是 `agent_loop` 接缝，默认提供方是 **DeepSeek Harn
 会话事件与标题、审批/提问桥接以及对外信封。`AGENT_HARNESS=native` 可显式切回
 内置 Rust 循环；未知取值，或选了 `dsh` 却没有可用运行时，都直接报错，绝不静默降级。
 
-默认（`DSH_THINKING_FILTER=enable`）dsh 经本地回环过滤代理访问网关：内置
-`deepseek-official` adapter 首轮接受 Anthropic `redacted_thinking` 块并持久化，第二轮回放
+默认（`DSH_THINKING_FILTER=enable`）dsh 经本地过滤代理访问网关（默认回环；
+容器化的 harness 必须用 `DSH_THINKING_FILTER_BIND` 换个容器可达的监听地址）：
+内置 `deepseek-official` adapter 首轮接受 Anthropic `redacted_thinking` 块并持久化，第二轮回放
 历史时抛 `UNSUPPORTED_CONTENT`；代理在请求体与 JSON/SSE 响应两侧剥离该块（并重排
 content-block 序号），dsh 因此永远看不到它。`thinking` 块**刻意保留**——DeepSeek 的
 Anthropic 兼容层要求 thinking 模式下原样回传，剥离会把该错误换成 400。代价是思考内容
 仅作展示、从不回放（与 OpenCode 同样的取舍）。只有确认所用 dsh build 的 adapter 能处理
 redacted thinking 时，才应设为 `DSH_THINKING_FILTER=disable`。
+
+**放置位置。** 沙箱化的 harness（`DSH_SANDBOX=1`）是容器而不是子进程：`aria-agent-dsh`
+用 keep-alive 命令拉起镜像，在容器内准备 `DSH_SANDBOX_ROOT`，把技能册打成 tar 上传，
+再经一次长连接的 `exec` attach `dsh --profile sdk`（换行分隔的 JSON-RPC、双向 stdio）。
+工作区落在**命名卷**上而非宿主 bind——控制面经 `/var/run/docker.sock` 与守护进程对话，
+bind 源路径会在守护进程那台机器上解析；正因如此，会话既能跨空闲回收、也能跨容器重建续用。
+容器加入受治理的出网网络，带上与其他沙箱相同的租户/会话标签，资源预算取
+`DSH_SANDBOX_CPUS/MEMORY/PIDS`，`GATEWAY_*` 与代理变量经白名单注入——绝不透传宿主环境。
 
 <div align="right">
 
@@ -537,8 +559,7 @@ redacted thinking 时，才应设为 `DSH_THINKING_FILTER=disable`。
 ```
 
 镜像标签可按引擎经 `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`（如
-`ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`）覆盖，缺省回退内置默认值。详见
-`docs/adr/0012-browser-sandbox.md`。
+`ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`）覆盖，缺省回退内置默认值。
 
 <div align="right">
 
@@ -568,7 +589,6 @@ agent 不只是读/写 `aria-agent-memo` 存储——它会在**运行过程中�
 记忆图与自动压缩都由 `AgentConfig::memory_graph` 控制（在 `aria-agent-core` 中默认
 关闭以保证其单测封闭；SDK 默认开启）。`aria-agent-core` 只依赖 `ContextStore` trait、
 绝不依赖 `aria-agent-memo`，因此本地（aria memo / SQLite）与云端（pgvector）后端可互换。
-详见 `docs/adr/0013-agent-memo-integration.md`。
 
 <div align="right">
 
@@ -622,8 +642,7 @@ TurnCompleted / TurnFailed
   `rsi_reruns`；回执写不进去就 fail-closed，什么都不晋升。
 - **不热替换** —— 晋升只产生「下一轮读取」的新版本，运行中会话的系统提示词不会被改写。
 
-`AGENT_RSI_AUTO_PROMOTE` 仅供受控部署使用。详见
-`docs/adr/0026-recursive-self-improvement.md` 与 `requirements.md §11`。
+`AGENT_RSI_AUTO_PROMOTE` 仅供受控部署使用。
 
 <div align="right">
 
@@ -1163,7 +1182,7 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 
 ## 🛡️ 受控执行
 
-每个出站请求都经过同一条边界：判定、替换、记录（ADR-0025）。默认值一律收紧，且只来自
+每个出站请求都经过同一条边界：判定、替换、记录。默认值一律收紧，且只来自
 `AgentConfig`，因此 CLI 与云端部署不会对「默认是什么」产生分歧。
 
 | 变量 | 默认值 | 含义 |
@@ -1271,6 +1290,7 @@ docker compose up
 | [空闲与轮换](./docs/adr/0023-idle-detection-and-credential-rotation.md) | 五信号空闲检测、凭据轮换 |
 | [网络强制](./docs/adr/0024-network-enforcement-sidecar.md) | internal 网络 + 无密钥出站代理 |
 | [递归自我改进](./docs/adr/0026-recursive-self-improvement.md) | 账本诊断、确定性提案、重放验证、带版本号的手册、有回执的真实重跑 |
+| [dsh 沙箱运行时](./docs/adr/0027-dsh-sandbox-runtime.md) | 容器化 harness：keep-alive + attach exec、命名卷会话工作区、失败即失败的 preflight |
 
 <div align="right">
 

@@ -249,6 +249,30 @@ kept as an explicit `native` fallback (ADR-0019).
      never re-add a per-crate `<root>/.aria/skills` derivation. See
      `docs/adr/0026-recursive-self-improvement.md`.
 
+     18. **The dsh session runs in a container, and "sandboxed" is never a
+     claim.** With `harness = dsh` the harness executes the tools, so a host
+     process would *be* the boundary; `DSH_SANDBOX` therefore defaults to `1` and
+     a session is a keep-alive container plus an attached `exec`
+     (`Sandbox::exec_attached`: stdin + incremental stdout/stderr). Hard rules:
+     (a) session state (`DSH_HOME`, the workspace, `.aria/skills`) lives on a
+     **named volume** mounted at `DSH_SANDBOX_ROOT` — never a host bind, because
+     the cloud is Docker-out-of-Docker and a bind source resolves on the daemon's
+     host; (b) inside the container only container paths exist, so
+     `DshConfig::with_sandbox` re-derives `home`/`cwd` and the exec env uses the
+     image's `PATH`, not the host's; (c) the skill catalog is **uploaded** as a
+     tar (`copy_in`), not symlinked; (d) no silent fallback: a missing image, an
+     unprepared workspace, a refused upload, an unattachable harness or a failed
+     handshake fails the turn and destroys the container, and boot preflight
+     requires the image to exist locally (nothing pulls); (e) the harness
+     container is hardened (`cap_drop=ALL`, `no-new-privileges`, non-root) and
+     joins the governed network with the tenant/session labels; (f) a container
+     cannot reach the control plane's loopback, so an enabled thinking filter
+     needs both `DSH_THINKING_FILTER_BIND` and a non-loopback
+     `DSH_THINKING_FILTER_URL` or boot fails; (g) `Sandbox` decorators
+     (`NetworkingSandbox`, `QuotaGuardSandbox`, `BrowserSandbox`) must forward
+     `exec_attached` / `copy_in` / `has_image` or a wrapper turns the capability
+     into `Unsupported`. See `docs/adr/0027-dsh-sandbox-runtime.md`.
+
 ## SDK（js / python）
 
 端侧/服务端通用的 agent SDK，API 形状对齐 OpenAI Agents SDK（`Agent` / `run` /

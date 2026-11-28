@@ -22,6 +22,9 @@ pub mod app;
 pub mod auth;
 pub mod cli_config;
 pub mod context;
+/// Sandboxed dsh runtime: image/volume/hardening policy and boot preflight
+/// (ADR-0027).
+pub mod dsh_sandbox;
 pub mod event_envelope;
 pub mod governance;
 pub mod internal_egress;

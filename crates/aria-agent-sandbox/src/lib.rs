@@ -26,14 +26,19 @@ pub use lifecycle::{SandboxCapabilities, SandboxLifecycle};
 use async_trait::async_trait;
 use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
+    UploadToContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::image::CommitContainerOptions;
+use bollard::service::{Mount, MountTypeEnum};
 use bollard::{Docker, API_DEFAULT_VERSION};
 use checkpoint::checkpoint_image;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::pin::Pin;
 use thiserror::Error;
+use tokio::io::AsyncWrite;
 use tokio::sync::OnceCell;
 
 /// Resource limits applied to every sandbox container/VM.
@@ -43,7 +48,7 @@ use tokio::sync::OnceCell;
 /// on hosts where these vars are unset. The Docker/Kata backends push these
 /// straight into a bollard `HostConfig`; the Cube backend best-effort maps them
 /// to `cube` CLI flags.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SandboxResourceLimits {
     /// Logical CPUs (e.g. `1.0`, `0.5`).
     pub cpus: f64,
@@ -51,6 +56,18 @@ pub struct SandboxResourceLimits {
     pub memory_bytes: i64,
     /// Maximum number of processes (pids cgroup).
     pub pids_limit: i64,
+}
+
+impl Default for SandboxResourceLimits {
+    /// The conservative defaults [`SandboxResourceLimits::from_env`] falls back
+    /// to when a variable is unset or unparseable.
+    fn default() -> Self {
+        Self {
+            cpus: 1.0,
+            memory_bytes: 512 * 1024 * 1024,
+            pids_limit: 256,
+        }
+    }
 }
 
 impl SandboxResourceLimits {
@@ -65,16 +82,105 @@ impl SandboxResourceLimits {
     }
 }
 
-/// Build a bollard `HostConfig` carrying the resource limits. `runtime` is only
-/// set for Kata (`"kata"`); `None` means the default Docker runtime.
+/// How a [`MountSpec`] resolves its `source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountKind {
+    /// A host path. Under Docker-in-Docker ("DooD") the path is resolved on the
+    /// **daemon's** host, not inside the control-plane container — use a volume
+    /// when the two differ.
+    Bind,
+    /// A daemon-owned named volume. This is the only cross-host-safe way to give
+    /// a sandbox a workspace that is also visible to the control plane.
+    Volume,
+}
+
+/// One directory a sandbox session needs, mounted at `target` inside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountSpec {
+    /// Host path (`Bind`) or volume name (`Volume`).
+    pub source: String,
+    /// Absolute path inside the sandbox.
+    pub target: String,
+    pub read_only: bool,
+    pub kind: MountKind,
+}
+
+impl MountSpec {
+    pub fn bind(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+            read_only: false,
+            kind: MountKind::Bind,
+        }
+    }
+
+    pub fn volume(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+            read_only: false,
+            kind: MountKind::Volume,
+        }
+    }
+
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+}
+
+/// Optional isolation hardening. Everything is off by default so the historical
+/// shell/jobs behaviour does not change; deployments that run untrusted code
+/// (the dsh runtime) opt in explicitly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxHardening {
+    /// User (or `uid[:gid]`) the container's processes run as. `None` keeps the
+    /// image default — `alpine` is root, which is not a boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Capabilities to drop (`["ALL"]` for the dsh runtime).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cap_drop: Vec<String>,
+    /// Mount the container root filesystem read-only. Off by default: a harness
+    /// needs `/tmp` and its home volume.
+    #[serde(default)]
+    pub read_only_rootfs: bool,
+    /// Set `no-new-privileges:true` so a setuid helper cannot escalate.
+    #[serde(default)]
+    pub no_new_privileges: bool,
+}
+
+impl SandboxHardening {
+    /// Drop every capability and refuse privilege escalation.
+    pub fn locked_down() -> Self {
+        Self {
+            user: None,
+            cap_drop: vec!["ALL".to_string()],
+            read_only_rootfs: false,
+            no_new_privileges: true,
+        }
+    }
+
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+}
+
+/// Build a bollard `HostConfig` carrying the resource limits, the mounts and the
+/// optional hardening. `runtime` is only set for Kata (`"kata"`); `None` means
+/// the default Docker runtime.
 ///
 /// `memory_swap = -1` disables swap accounting so a memory cap does not trip the
 /// cgroup "memory swap must be >= memory" constraint.
 pub fn build_host_config(
     res: &SandboxResourceLimits,
     runtime: Option<&str>,
-    network: Option<&str>,
+    spec: &ExecSpec,
 ) -> bollard::service::HostConfig {
+    let hardening = &spec.hardening;
     bollard::service::HostConfig {
         nano_cpus: Some((res.cpus * 1e9).round() as i64),
         memory: Some(res.memory_bytes),
@@ -84,9 +190,41 @@ pub fn build_host_config(
         // `network_mode` replaces the default bridge: a container placed on an
         // `internal` network has no route out, which is what makes the egress
         // proxy the only way to reach the internet (ADR-0024).
-        network_mode: network.map(|n| n.to_string()),
+        network_mode: spec.network.clone(),
+        mounts: mounts_to_docker(&spec.mounts),
+        cap_drop: if hardening.cap_drop.is_empty() {
+            None
+        } else {
+            Some(hardening.cap_drop.clone())
+        },
+        readonly_rootfs: hardening.read_only_rootfs.then_some(true),
+        security_opt: hardening
+            .no_new_privileges
+            .then(|| vec!["no-new-privileges:true".to_string()]),
         ..Default::default()
     }
+}
+
+/// Map the seam's mounts onto Docker's `Mount` shape.
+fn mounts_to_docker(mounts: &[MountSpec]) -> Option<Vec<Mount>> {
+    if mounts.is_empty() {
+        return None;
+    }
+    Some(
+        mounts
+            .iter()
+            .map(|m| Mount {
+                target: Some(m.target.clone()),
+                source: Some(m.source.clone()),
+                typ: Some(match m.kind {
+                    MountKind::Bind => MountTypeEnum::BIND,
+                    MountKind::Volume => MountTypeEnum::VOLUME,
+                }),
+                read_only: Some(m.read_only),
+                ..Default::default()
+            })
+            .collect(),
+    )
 }
 
 fn parse_cpu(raw: Option<String>, default: f64) -> f64 {
@@ -131,7 +269,7 @@ fn parse_pids(raw: Option<String>, default: i64) -> i64 {
 /// Parse a human-readable size (`512m`, `1g`, `1024`) into bytes. No unit or `b`
 /// means bytes; `k/m/g/t` are powers of 1024. Returns `None` on any error or a
 /// non-positive value.
-fn parse_size(s: &str) -> Option<i64> {
+pub fn parse_size(s: &str) -> Option<i64> {
     let s = s.trim();
     let split = s
         .find(|c: char| !c.is_ascii_digit() && c != '.')
@@ -172,6 +310,17 @@ pub struct ExecSpec {
     /// resolves a source IP to a tenant; they are written by the control plane
     /// and never by the sandbox user.
     pub labels: Vec<(String, String)>,
+    /// Directories the session container must see (workspace, harness home,
+    /// skill catalog). Empty keeps the historical "container-only" filesystem.
+    #[serde(default)]
+    pub mounts: Vec<MountSpec>,
+    /// Optional isolation hardening (non-root user, dropped capabilities, …).
+    #[serde(default)]
+    pub hardening: SandboxHardening,
+    /// Per-session resource limits. `None` uses the backend's `SANDBOX_*`
+    /// defaults; a long-lived harness container needs its own budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<SandboxResourceLimits>,
 }
 
 impl ExecSpec {
@@ -184,7 +333,69 @@ impl ExecSpec {
             timeout_ms: 60_000,
             network: None,
             labels: Vec::new(),
+            mounts: Vec::new(),
+            hardening: SandboxHardening::default(),
+            resources: None,
         }
+    }
+}
+
+/// A long-running process started **inside** an existing session container, with
+/// its stdio attached in both directions.
+///
+/// This is what a supervised child process needs (dsh speaks newline-delimited
+/// JSON-RPC): `exec`'s buffered `ExecOutput` cannot carry a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedSpec {
+    /// The command and its arguments, executed as argv (never a shell string).
+    pub command: Vec<String>,
+    /// Working directory inside the sandbox.
+    pub workdir: Option<String>,
+    /// Environment variables for this process only.
+    pub env: Vec<(String, String)>,
+}
+
+impl AttachedSpec {
+    pub fn command(command: Vec<String>) -> Self {
+        Self {
+            command,
+            workdir: None,
+            env: Vec::new(),
+        }
+    }
+}
+
+/// One chunk of a sandboxed process's output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogChunk {
+    Stdout(String),
+    Stderr(String),
+}
+
+/// Bytes written to an attached process's stdin.
+pub type AttachedInput = Pin<Box<dyn AsyncWrite + Send>>;
+
+/// Incremental output of an attached process.
+pub type AttachedOutput = Pin<Box<dyn Stream<Item = Result<LogChunk, SandboxError>> + Send>>;
+
+/// A live duplex handle on a process running inside the sandbox.
+///
+/// Dropping the streams does **not** terminate the process: the container is the
+/// lifetime owner (`destroy` kills it). `exec_id` is kept so a caller can inspect
+/// the exit code after the stream ends.
+pub struct AttachedExec {
+    pub exec_id: String,
+    /// Bytes written here reach the process's stdin.
+    pub stdin: AttachedInput,
+    /// Incremental output; ends when the process closes its stdio.
+    pub output: AttachedOutput,
+}
+
+impl std::fmt::Debug for AttachedExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachedExec")
+            .field("exec_id", &self.exec_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -230,6 +441,51 @@ pub trait Sandbox: Send + Sync {
     ) -> Result<ExecOutput, SandboxError>;
     /// Tear down a sandbox session.
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError>;
+
+    // ---- optional process attachment -----------------------------------
+    // Defaults fail closed: a backend without a duplex channel says so instead
+    // of pretending it started the process.
+
+    /// Start `spec` inside `handle` with stdin/stdout/stderr attached.
+    ///
+    /// The process lifetime is bounded by the container's: callers stop it by
+    /// destroying the session. Backends that cannot attach return
+    /// [`SandboxError::Unsupported`].
+    async fn exec_attached(
+        &self,
+        _handle: &SandboxHandle,
+        _spec: &AttachedSpec,
+    ) -> Result<AttachedExec, SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot attach a process's stdio".into(),
+        ))
+    }
+
+    /// Unpack a tar archive into `target` **inside** the sandbox.
+    ///
+    /// Used to give a session files the control plane produced (a skill
+    /// catalog, a seed workspace) without assuming a shared filesystem.
+    async fn copy_in(
+        &self,
+        _handle: &SandboxHandle,
+        _target: &str,
+        _tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot copy files into a session".into(),
+        ))
+    }
+
+    /// Whether `image` is already present in the backend.
+    ///
+    /// Boot-time preflight for backends that must not pull images (this repo has
+    /// no registry client): a deployment that names an image the daemon does not
+    /// have must fail at startup, not on the first turn.
+    async fn has_image(&self, _image: &str) -> Result<bool, SandboxError> {
+        Err(SandboxError::Unsupported(
+            "this sandbox backend cannot report local images".into(),
+        ))
+    }
 
     // ---- optional lifecycle (ADR-0022) ---------------------------------
     // Defaults fail closed: a backend that cannot pause says so, rather than
@@ -373,8 +629,7 @@ impl CliSandbox {
             args.push(format!("{name}={value}"));
         }
         args.push(self.image_of(spec));
-        args.push("sleep".to_string());
-        args.push("3600".to_string());
+        args.extend(keep_alive_command());
         args
     }
 
@@ -403,6 +658,18 @@ impl Sandbox for CliSandbox {
         if !spec.labels.is_empty() {
             return Err(SandboxError::Unsupported(
                 "the cube backend cannot apply sandbox identity labels".into(),
+            ));
+        }
+        // No mount flag and no user/capability control in the CLI: a caller that
+        // needs a workspace or a hardened container must not be told it got one.
+        if !spec.mounts.is_empty() {
+            return Err(SandboxError::Unsupported(
+                "the cube backend cannot mount a workspace into the sandbox".into(),
+            ));
+        }
+        if spec.hardening != SandboxHardening::default() {
+            return Err(SandboxError::Unsupported(
+                "the cube backend cannot apply isolation hardening".into(),
             ));
         }
         // Create a long-lived session container; real commands run via `exec`.
@@ -640,6 +907,7 @@ impl Sandbox for DockerSandbox {
             .clone()
             .unwrap_or_else(|| "alpine:latest".to_string());
         let name = format!("aria-sandbox-{}", uuid::Uuid::new_v4());
+        let resources = spec.resources.unwrap_or(self.resources);
         docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -648,16 +916,21 @@ impl Sandbox for DockerSandbox {
                 }),
                 Config {
                     image: Some(image),
-                    cmd: Some(vec!["sleep".to_string(), "3600".to_string()]),
+                    // A session container outlives any single command, so it
+                    // needs a keep-alive loop — `sleep 3600` would silently kill
+                    // the session after an hour.
+                    cmd: Some(keep_alive_command()),
                     tty: Some(false),
+                    // `exec_attached` attaches to its own exec, but a backend may
+                    // refuse stdin attachment unless the container keeps stdin
+                    // open.
+                    open_stdin: Some(true),
+                    stdin_once: Some(false),
+                    user: spec.hardening.user.clone(),
                     env: Some(env_to_docker(&spec.env)),
                     working_dir: spec.workdir.clone(),
                     labels: labels_to_docker(&spec.labels),
-                    host_config: Some(build_host_config(
-                        &self.resources,
-                        self.runtime.as_deref(),
-                        spec.network.as_deref(),
-                    )),
+                    host_config: Some(build_host_config(&resources, self.runtime.as_deref(), spec)),
                     ..Default::default()
                 },
             )
@@ -694,41 +967,36 @@ impl Sandbox for DockerSandbox {
             .map_err(|e| SandboxError::Exec(e.to_string()))?;
 
         let id = exec.id.clone();
-        match docker
-            .start_exec(&id, None)
-            .await
-            .map_err(|e| SandboxError::Exec(e.to_string()))?
-        {
-            StartExecResults::Attached { mut output, .. } => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                use futures::StreamExt;
-                while let Some(frame) = output.next().await {
-                    match frame.map_err(|e| SandboxError::Exec(e.to_string()))? {
-                        bollard::container::LogOutput::StdOut { message } => {
-                            stdout.push_str(&String::from_utf8_lossy(&message));
-                        }
-                        bollard::container::LogOutput::StdErr { message } => {
-                            stderr.push_str(&String::from_utf8_lossy(&message));
-                        }
-                        _ => {}
-                    }
+        let (mut output, _input) = split_started(
+            docker
+                .start_exec(&id, None)
+                .await
+                .map_err(|e| SandboxError::Exec(e.to_string()))?,
+        )?;
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        use futures::StreamExt;
+        while let Some(frame) = output.next().await {
+            match frame.map_err(|e| SandboxError::Exec(e.to_string()))? {
+                bollard::container::LogOutput::StdOut { message } => {
+                    stdout.push_str(&String::from_utf8_lossy(&message));
                 }
-                let exit_code = docker
-                    .inspect_exec(&id)
-                    .await
-                    .map(|r| r.exit_code.unwrap_or(-1) as i32)
-                    .unwrap_or(-1);
-                Ok(ExecOutput {
-                    exit_code,
-                    stdout,
-                    stderr,
-                })
+                bollard::container::LogOutput::StdErr { message } => {
+                    stderr.push_str(&String::from_utf8_lossy(&message));
+                }
+                _ => {}
             }
-            StartExecResults::Detached => Err(SandboxError::Exec(
-                "docker exec returned a detached stream".into(),
-            )),
         }
+        let exit_code = docker
+            .inspect_exec(&id)
+            .await
+            .map(|r| r.exit_code.unwrap_or(-1) as i32)
+            .unwrap_or(-1);
+        Ok(ExecOutput {
+            exit_code,
+            stdout,
+            stderr,
+        })
     }
 
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError> {
@@ -744,6 +1012,91 @@ impl Sandbox for DockerSandbox {
             .await
             .map_err(|e| SandboxError::Exec(e.to_string()))?;
         Ok(())
+    }
+
+    async fn exec_attached(
+        &self,
+        handle: &SandboxHandle,
+        spec: &AttachedSpec,
+    ) -> Result<AttachedExec, SandboxError> {
+        if spec.command.is_empty() {
+            return Err(SandboxError::Exec("empty command".into()));
+        }
+        let docker = self.client().await?;
+        let exec = docker
+            .create_exec(
+                &handle.id,
+                CreateExecOptions {
+                    // argv, never a shell string: the caller owns the command.
+                    cmd: Some(spec.command.clone()),
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    working_dir: spec.workdir.clone(),
+                    env: if spec.env.is_empty() {
+                        None
+                    } else {
+                        Some(env_to_docker(&spec.env))
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| SandboxError::Exec(e.to_string()))?;
+        let exec_id = exec.id.clone();
+        let (output, input) = split_started(
+            docker
+                .start_exec(&exec_id, None)
+                .await
+                .map_err(|e| SandboxError::Exec(e.to_string()))?,
+        )?;
+        use futures::StreamExt;
+        let chunks = output.filter_map(|frame| async move {
+            match frame {
+                Ok(bollard::container::LogOutput::StdOut { message }) => Some(Ok(
+                    LogChunk::Stdout(String::from_utf8_lossy(&message).to_string()),
+                )),
+                Ok(bollard::container::LogOutput::StdErr { message }) => Some(Ok(
+                    LogChunk::Stderr(String::from_utf8_lossy(&message).to_string()),
+                )),
+                // Console/stdin frames carry nothing a caller can use.
+                Ok(_) => None,
+                Err(e) => Some(Err(SandboxError::Exec(e.to_string()))),
+            }
+        });
+        Ok(AttachedExec {
+            exec_id,
+            stdin: input,
+            output: Box::pin(chunks),
+        })
+    }
+
+    async fn copy_in(
+        &self,
+        handle: &SandboxHandle,
+        target: &str,
+        tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        let docker = self.client().await?;
+        docker
+            .upload_to_container(
+                &handle.id,
+                Some(UploadToContainerOptions {
+                    path: target.to_string(),
+                    // Refuse a type conflict instead of silently replacing a
+                    // directory with a file (or the reverse).
+                    no_overwrite_dir_non_dir: "1".to_string(),
+                }),
+                tar.into(),
+            )
+            .await
+            .map_err(|e| SandboxError::Exec(format!("copy_in {target}: {e}")))
+    }
+
+    async fn has_image(&self, image: &str) -> Result<bool, SandboxError> {
+        let docker = self.client().await?;
+        image_available(docker.inspect_image(image).await)
+            .map_err(|message| SandboxError::Exec(format!("{message}: {image}")))
     }
 
     fn capabilities(&self) -> SandboxCapabilities {
@@ -866,15 +1219,18 @@ impl Sandbox for DockerSandbox {
                 }),
                 Config {
                     image: Some(checkpoint.image.clone()),
-                    cmd: Some(vec!["sleep".to_string(), "3600".to_string()]),
+                    cmd: Some(keep_alive_command()),
                     tty: Some(false),
+                    open_stdin: Some(true),
+                    stdin_once: Some(false),
+                    user: spec.hardening.user.clone(),
                     env: Some(env_to_docker(&spec.env)),
                     working_dir: spec.workdir.clone(),
                     labels: labels_to_docker(&spec.labels),
                     host_config: Some(build_host_config(
-                        &self.resources,
+                        &spec.resources.unwrap_or(self.resources),
                         self.runtime.as_deref(),
-                        spec.network.as_deref(),
+                        spec,
                     )),
                     ..Default::default()
                 },
@@ -892,6 +1248,59 @@ impl Sandbox for DockerSandbox {
 /// Convert `(KEY, VALUE)` pairs into Docker's `KEY=VALUE` env strings.
 fn env_to_docker(env: &[(String, String)]) -> Vec<String> {
     env.iter().map(|(k, v)| format!("{k}={v}")).collect()
+}
+
+/// Whether an `inspect_image` result means "present".
+///
+/// A `404` is an **answer** ("the image is not there"), not an infrastructure
+/// failure: preflight must report `false` so the operator gets the build command
+/// instead of a generic daemon error.
+fn image_available(
+    result: Result<bollard::models::ImageInspect, bollard::errors::Error>,
+) -> Result<bool, String> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(false),
+        Err(e) => Err(format!("inspect image failed: {e}")),
+    }
+}
+
+/// The command a session container idles on.
+///
+/// A session must stay alive for as long as its caller keeps the handle, so the
+/// old `sleep 3600` was a latent one-hour cap. A loop re-arms the sleep and
+/// `trap`-free `sh` stays a valid pid 1 for every image we ship (busybox and
+/// coreutils alike).
+fn keep_alive_command() -> Vec<String> {
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "while true; do sleep 3600; done".to_string(),
+    ]
+}
+
+/// Boxed output stream of one attached exec.
+pub type ExecFrames = Pin<
+    Box<dyn Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + Send>,
+>;
+
+/// Boxed writer to one attached exec's stdin.
+pub type ExecSink = Pin<Box<dyn AsyncWrite + Send>>;
+
+/// Split `start_exec`'s result into (frames, stdin).
+///
+/// `Detached` is a protocol violation here: every caller attaches because it
+/// needs the conversation. Keeping the branch in one place means it is covered
+/// by a unit test instead of being an unreachable arm inside two async fns.
+fn split_started(started: StartExecResults) -> Result<(ExecFrames, ExecSink), SandboxError> {
+    match started {
+        StartExecResults::Attached { input, output } => Ok((output, input)),
+        StartExecResults::Detached => Err(SandboxError::Exec(
+            "docker exec returned a detached stream".into(),
+        )),
+    }
 }
 
 /// Container labels tell the egress proxy which tenant a source IP belongs to.
@@ -926,6 +1335,15 @@ impl KataSandbox {
     pub fn runtime(&self) -> Option<&str> {
         self.inner.runtime()
     }
+
+    /// Point the wrapper at a scripted client (tests only): the forwarders must
+    /// be provable without a real daemon.
+    #[cfg(test)]
+    fn with_client(client: Docker) -> Self {
+        let mut inner = DockerSandbox::with_client(client);
+        inner.runtime = Some("kata".into());
+        Self { inner }
+    }
 }
 
 #[async_trait]
@@ -942,6 +1360,24 @@ impl Sandbox for KataSandbox {
     }
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError> {
         self.inner.destroy(handle).await
+    }
+    async fn exec_attached(
+        &self,
+        handle: &SandboxHandle,
+        spec: &AttachedSpec,
+    ) -> Result<AttachedExec, SandboxError> {
+        self.inner.exec_attached(handle, spec).await
+    }
+    async fn copy_in(
+        &self,
+        handle: &SandboxHandle,
+        target: &str,
+        tar: Vec<u8>,
+    ) -> Result<(), SandboxError> {
+        self.inner.copy_in(handle, target, tar).await
+    }
+    async fn has_image(&self, image: &str) -> Result<bool, SandboxError> {
+        self.inner.has_image(image).await
     }
     fn capabilities(&self) -> SandboxCapabilities {
         self.inner.capabilities()
@@ -1299,7 +1735,29 @@ mod tests {
             ),
             "{args:?}"
         );
-        assert_eq!(args.last().map(String::as_str), Some("3600"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("while true; do sleep 3600; done")
+        );
+    }
+
+    #[tokio::test]
+    async fn kata_forwards_attach_copy_and_image_probes() {
+        // Kata reuses the Docker transport, so the three optional methods must
+        // reach the daemon instead of degrading to `Unsupported`.
+        let stub = EngineStub::start();
+        let kata = KataSandbox::with_client(stub.client());
+        assert_eq!(kata.runtime(), Some("kata"));
+        assert!(kata.has_image("aria-dsh-sandbox:latest").await.unwrap());
+        let handle = SandboxHandle { id: "c".into() };
+        kata.copy_in(&handle, "/aria/session", Vec::new())
+            .await
+            .unwrap();
+        let attached = kata
+            .exec_attached(&handle, &AttachedSpec::command(vec!["dsh".into()]))
+            .await
+            .unwrap();
+        assert_eq!(attached.exec_id, "exec-1");
     }
 
     #[tokio::test]
@@ -1578,6 +2036,10 @@ mod tests {
         StopContainer,
         CommitContainer,
         RemoveContainer,
+        /// `PUT /containers/{id}/archive` (the `copy_in` path).
+        UploadArchive,
+        /// `GET /images/{name}/json` (the `has_image` preflight).
+        InspectImage,
         Other,
     }
 
@@ -1585,6 +2047,12 @@ mod tests {
         let path = path.split('?').next().unwrap_or(path);
         if method == "DELETE" && path.contains("/containers/") {
             return Route::RemoveContainer;
+        }
+        if method == "PUT" && path.contains("/containers/") && path.ends_with("/archive") {
+            return Route::UploadArchive;
+        }
+        if method == "GET" && path.contains("/images/") && path.ends_with("/json") {
+            return Route::InspectImage;
         }
         if path.ends_with("/containers/create") {
             return Route::CreateContainer;
@@ -1762,6 +2230,8 @@ mod tests {
             | Route::PauseContainer
             | Route::UnpauseContainer
             | Route::StopContainer => no_content(stream),
+            Route::UploadArchive => no_content(stream),
+            Route::InspectImage => json(stream, "200 OK", r#"{"Id":"sha256:present"}"#),
             Route::InspectContainer => {
                 let state = states
                     .lock()
@@ -1851,11 +2321,338 @@ mod tests {
             memory_bytes: 512 * 1024 * 1024,
             pids_limit: 128,
         };
-        assert_eq!(build_host_config(&res, None, None).network_mode, None);
+        let plain = ExecSpec::command(vec!["true".into()]);
+        assert_eq!(build_host_config(&res, None, &plain).network_mode, None);
+        let mut governed = ExecSpec::command(vec!["true".into()]);
+        governed.network = Some("aria-egress".into());
         assert_eq!(
-            build_host_config(&res, None, Some("aria-egress")).network_mode,
+            build_host_config(&res, None, &governed).network_mode,
             Some("aria-egress".to_string())
         );
+    }
+
+    #[test]
+    fn host_config_carries_mounts_and_hardening() {
+        let res = SandboxResourceLimits::default();
+        let mut spec = ExecSpec::command(vec!["true".into()]);
+        spec.mounts = vec![
+            MountSpec::volume("aria-dsh-s1", "/aria/session"),
+            MountSpec::bind("/srv/skills", "/aria/session/cwd/.aria/skills").read_only(),
+        ];
+        spec.hardening = SandboxHardening::locked_down().with_user("10001:10001");
+        let host = build_host_config(&res, Some("kata"), &spec);
+        assert_eq!(host.runtime.as_deref(), Some("kata"));
+        assert_eq!(host.cap_drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(host.readonly_rootfs, None);
+        assert_eq!(
+            host.security_opt,
+            Some(vec!["no-new-privileges:true".to_string()])
+        );
+        let mounts = host.mounts.expect("mounts");
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].typ, Some(MountTypeEnum::VOLUME));
+        assert_eq!(mounts[0].source.as_deref(), Some("aria-dsh-s1"));
+        assert_eq!(mounts[0].target.as_deref(), Some("/aria/session"));
+        assert_eq!(mounts[0].read_only, Some(false));
+        assert_eq!(mounts[1].typ, Some(MountTypeEnum::BIND));
+        assert_eq!(mounts[1].read_only, Some(true));
+    }
+
+    #[test]
+    fn host_config_leaves_hardening_off_by_default() {
+        let host = build_host_config(
+            &SandboxResourceLimits::default(),
+            None,
+            &ExecSpec::command(vec!["true".into()]),
+        );
+        assert!(host.mounts.is_none());
+        assert!(host.cap_drop.is_none());
+        assert!(host.security_opt.is_none());
+        assert!(host.readonly_rootfs.is_none());
+        assert_eq!(host.memory, Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn read_only_rootfs_is_expressible() {
+        let mut spec = ExecSpec::command(vec!["true".into()]);
+        spec.hardening.read_only_rootfs = true;
+        let host = build_host_config(&SandboxResourceLimits::default(), None, &spec);
+        assert_eq!(host.readonly_rootfs, Some(true));
+    }
+
+    #[test]
+    fn the_keep_alive_command_outlives_one_sleep() {
+        let cmd = keep_alive_command();
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert!(cmd[2].contains("while true"));
+    }
+
+    #[tokio::test]
+    async fn attach_and_copy_are_unsupported_by_default() {
+        // A backend without a duplex channel must say so, never pretend.
+        struct Minimal;
+        #[async_trait]
+        impl Sandbox for Minimal {
+            async fn spawn(&self, _spec: &ExecSpec) -> Result<SandboxHandle, SandboxError> {
+                Ok(SandboxHandle { id: "m".into() })
+            }
+            async fn exec(
+                &self,
+                _handle: &SandboxHandle,
+                _cmd: &[String],
+            ) -> Result<ExecOutput, SandboxError> {
+                Ok(ExecOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+            async fn destroy(&self, _handle: SandboxHandle) -> Result<(), SandboxError> {
+                Ok(())
+            }
+        }
+        let minimal = Minimal;
+        let handle = SandboxHandle { id: "m".into() };
+        // The double is a live backend, so every arm it implements is exercised.
+        assert_eq!(minimal.spawn(&stub_spec()).await.unwrap().id, "m");
+        assert_eq!(
+            minimal
+                .exec(&handle, &["true".into()])
+                .await
+                .unwrap()
+                .exit_code,
+            0
+        );
+        minimal.destroy(handle.clone()).await.unwrap();
+        assert!(matches!(
+            minimal
+                .exec_attached(&handle, &AttachedSpec::command(vec!["dsh".into()]))
+                .await,
+            Err(SandboxError::Unsupported(_))
+        ));
+        assert!(matches!(
+            minimal.copy_in(&handle, "/aria/session", Vec::new()).await,
+            Err(SandboxError::Unsupported(_))
+        ));
+        assert!(matches!(
+            minimal.has_image("aria-dsh-sandbox:latest").await,
+            Err(SandboxError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn attached_exec_debug_names_the_process_not_the_streams() {
+        let attached = AttachedExec {
+            exec_id: "exec-7".into(),
+            stdin: Box::pin(tokio::io::sink()),
+            output: Box::pin(futures::stream::empty()),
+        };
+        let shown = format!("{attached:?}");
+        assert!(
+            shown.contains("AttachedExec") && shown.contains("exec-7"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn split_started_refuses_a_detached_stream() {
+        let err = split_started(StartExecResults::Detached)
+            .err()
+            .expect("expected a detached-stream error");
+        assert!(matches!(err, SandboxError::Exec(_)), "{err:?}");
+        assert!(err.to_string().contains("detached"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn docker_exec_attached_forwards_stdin_and_frames() {
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        let stub = EngineStub::start();
+        let sandbox = stub.sandbox();
+        let handle = sandbox.spawn(&stub_spec()).await.unwrap();
+        let mut spec = AttachedSpec::command(vec!["dsh".into(), "--profile".into(), "sdk".into()]);
+        spec.workdir = Some("/aria/session/cwd".into());
+        spec.env = vec![("DSH_HOME".into(), "/aria/session/dsh".into())];
+        let mut attached = sandbox.exec_attached(&handle, &spec).await.unwrap();
+        assert_eq!(attached.exec_id, "exec-1");
+        attached
+            .stdin
+            .write_all(b"{\"jsonrpc\":\"2.0\"}\n")
+            .await
+            .unwrap();
+        attached.stdin.flush().await.unwrap();
+        let mut chunks = Vec::new();
+        while let Some(chunk) = attached.output.next().await {
+            chunks.push(chunk.unwrap());
+        }
+        // The stub's third frame is a stdin frame and must not surface.
+        assert_eq!(
+            chunks,
+            vec![
+                LogChunk::Stdout("hello\n".into()),
+                LogChunk::Stderr("oops\n".into()),
+            ]
+        );
+        assert!(stub
+            .requests()
+            .iter()
+            .any(|r| r.starts_with("POST") && r.ends_with("/exec")));
+    }
+
+    #[tokio::test]
+    async fn docker_exec_attached_rejects_an_empty_command() {
+        let stub = EngineStub::start();
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle {
+            id: "aria-sandbox-x".into(),
+        };
+        let err = sandbox
+            .exec_attached(&handle, &AttachedSpec::command(Vec::new()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err:?}");
+        assert!(stub.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn docker_exec_attached_surfaces_engine_errors() {
+        let stub = EngineStub::start_failing(Route::CreateExec);
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle {
+            id: "aria-sandbox-x".into(),
+        };
+        assert!(matches!(
+            sandbox
+                .exec_attached(&handle, &AttachedSpec::command(vec!["dsh".into()]))
+                .await,
+            Err(SandboxError::Exec(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn docker_exec_attached_surfaces_start_errors() {
+        let stub = EngineStub::start_failing(Route::StartExec);
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle {
+            id: "aria-sandbox-x".into(),
+        };
+        assert!(matches!(
+            sandbox
+                .exec_attached(&handle, &AttachedSpec::command(vec!["dsh".into()]))
+                .await,
+            Err(SandboxError::Exec(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn docker_exec_attached_reports_a_frame_decode_error() {
+        use futures::StreamExt;
+        let stub = EngineStub::start_truncating();
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle { id: "c".into() };
+        let mut attached = sandbox
+            .exec_attached(&handle, &AttachedSpec::command(vec!["dsh".into()]))
+            .await
+            .unwrap();
+        let mut error = None;
+        while let Some(frame) = attached.output.next().await {
+            if let Err(e) = frame {
+                error = Some(e);
+                break;
+            }
+        }
+        assert!(matches!(error, Some(SandboxError::Exec(_))), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn docker_has_image_surfaces_a_daemon_error() {
+        let stub = EngineStub::start_failing(Route::InspectImage);
+        let err = stub
+            .sandbox()
+            .has_image("aria-dsh-sandbox:latest")
+            .await
+            .expect_err("expected an error");
+        assert!(matches!(err, SandboxError::Exec(_)), "{err:?}");
+        assert!(err.to_string().contains("aria-dsh-sandbox:latest"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn docker_copy_in_uploads_an_archive() {
+        let stub = EngineStub::start();
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle {
+            id: "aria-sandbox-x".into(),
+        };
+        sandbox
+            .copy_in(&handle, "/aria/session/cwd", b"tarbytes".to_vec())
+            .await
+            .unwrap();
+        assert!(stub
+            .requests()
+            .iter()
+            .any(|r| r.starts_with("PUT") && r.contains("/archive")));
+    }
+
+    #[tokio::test]
+    async fn docker_has_image_asks_the_engine() {
+        let stub = EngineStub::start();
+        let sandbox = stub.sandbox();
+        assert!(sandbox.has_image("aria-dsh-sandbox:latest").await.unwrap());
+        assert!(stub
+            .requests()
+            .iter()
+            .any(|r| r.starts_with("GET") && r.contains("/images/")));
+    }
+
+    #[test]
+    fn a_missing_image_is_an_answer_and_other_errors_are_not() {
+        assert!(image_available(Ok(Default::default())).unwrap());
+        assert!(
+            !image_available(Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404,
+                message: "no such image".into(),
+            }))
+            .unwrap()
+        );
+        let err = image_available(Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "boom".into(),
+        }))
+        .unwrap_err();
+        assert!(err.contains("inspect image failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn docker_copy_in_surfaces_engine_errors() {
+        let stub = EngineStub::start_failing(Route::UploadArchive);
+        let sandbox = stub.sandbox();
+        let handle = SandboxHandle {
+            id: "aria-sandbox-x".into(),
+        };
+        let err = sandbox
+            .copy_in(&handle, "/aria/session/cwd", Vec::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Exec(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn the_cube_backend_refuses_mounts_and_hardening() {
+        let cube = CliSandbox::new(SandboxProvider::Cube, "docker", Vec::new(), "alpine:latest");
+        let mut with_mount = ExecSpec::command(vec!["true".into()]);
+        with_mount.mounts = vec![MountSpec::volume("v", "/aria/session")];
+        assert!(matches!(
+            cube.spawn(&with_mount).await,
+            Err(SandboxError::Unsupported(_))
+        ));
+
+        let mut hardened = ExecSpec::command(vec!["true".into()]);
+        hardened.hardening = SandboxHardening::locked_down();
+        assert!(matches!(
+            cube.spawn(&hardened).await,
+            Err(SandboxError::Unsupported(_))
+        ));
     }
 
     #[test]

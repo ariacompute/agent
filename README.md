@@ -63,7 +63,7 @@ by default, with pluggable sandboxes.
 continue the conversation and stream — while the runtime decides where memory lives and
 where tools execute:
 
-- 🐋 **DeepSeek Harness by default** — a turn runs on the external [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh --profile sdk`, newline-delimited JSON-RPC over stdio), so turn/step orchestration, model calls and tool execution are dsh's; the in-process Rust loop stays as an explicit `native` fallback (`aria-agent-dsh`).
+- 🐋 **DeepSeek Harness by default** — a turn runs on the external [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh --profile sdk`, newline-delimited JSON-RPC over stdio) **inside a `docker build --target sandbox` container** (`DSH_SANDBOX=1`, on by default), so turn/step orchestration, model calls and tool execution are dsh's and the host process is never the boundary; the in-process Rust loop stays as an explicit `native` fallback (`aria-agent-dsh`).
 - 🧩 **Agent shell** — `aria-agent-core` keeps `recall → memorize`, prompt assembly, the tool pipeline, session events and the frozen streaming envelope, independent of which runtime drove the turn.
 - 🔌 **Capability seams** — model, sandbox, storage, sessions, tools, approvals, sub-agents and scheduling are replaceable seams assembled by a plugin registry that fails closed at boot (`aria-agent-plugin`).
 - 🛠️ **One tool pipeline** — resolve → permission preset → approval → dispatch → post-process (truncate + spill), so a call without an approval provider is refused with a reason instead of running (`aria-agent-tools`).
@@ -112,11 +112,11 @@ of truth for both persistence and SSE streaming.
 | **aria-agent-sandbox** | Pluggable `Sandbox`: Docker (default) / Kata / Cube / Browser. |
 | **aria-agent-browser** | Browser sandbox: six-image `BrowserCatalog` + `BrowserSandbox` (reuses Docker/Kata) + browser tool family. |
 | **aria-agent-core** | Agent shell: `recall → runtime → memorize`, seams (`agent_loop` included), session event stream, tool pipeline, prompt assembly. |
-| **aria-agent-dsh** | The `agent_loop` seam's DeepSeek Harness provider: stdio JSON-RPC transport, per-session runtime pool, approval/question bridge, notification → `AgentEvent` mapping. |
+| **aria-agent-dsh** | The `agent_loop` seam's DeepSeek Harness provider: stdio JSON-RPC transport, per-session runtime pool, containerised session workspace, approval/question bridge, notification → `AgentEvent` mapping. |
 | **aria-agent-plugin** | Plugin registry: manifests, seam keys/roles, dependency topo-sort, cycle + core-uniqueness checks, frozen snapshot. |
 | **aria-agent-tools** | Built-in tool families: fs, shell, jobs, terminal (`pty`), skills, web (`web`), ask_user, plan, todo, memo. |
-| **aria-agent-governance** | Egress decision + `${credential}` substitution, JSONL audit sink, usage metering, tool-output projection, encrypted credential store, idle detection, quota guard and checkpoints (ADR-0021 … 0025). |
-| **aria-agent-rsi** | Recursive self-improvement: ledger accounting, deterministic proposer, replay validation, revision-guarded playbooks, receipted real re-run, shared skill sink and sweep (ADR-0026). |
+| **aria-agent-governance** | Egress decision + `${credential}` substitution, JSONL audit sink, usage metering, tool-output projection, encrypted credential store, idle detection, quota guard and checkpoints. |
+| **aria-agent-rsi** | Recursive self-improvement: ledger accounting, deterministic proposer, replay validation, revision-guarded playbooks, receipted real re-run, shared skill sink and sweep. |
 | **aria-agent-egress-proxy** | Secretless sidecar for `network` enforcement: speaks `/internal/egress/*` to the control plane, resolves the tenant from the peer IP, batches audit uploads. |
 | **aria-agent-orchestrator** | Sub-agents (in-process fork), agent teams (task DAG), scheduled jobs (single-flight ticker). |
 | **ariacompute-agent** | UniFFI `cdylib` (`libaria-agent_ffi`): cloud API client — `AriaAgent` / `Session` / `run` / `runStreamed` / `memorize` / `recall`. |
@@ -128,7 +128,6 @@ of truth for both persistence and SSE streaming.
 > **Storage boundary:** the **cloud** stores conversational / long-term context in
 > Postgres + pgvector (`context_fragments`, per-principal) — pgvector is required
 > and boot fails without it. The SDKs' `local` backend keeps an aria memo (SQLite) copy.
-> See `docs/adr/0010-context-storage-pgvector.md`.
 
 <div align="right">
 
@@ -175,6 +174,11 @@ cargo run -p aria-agent-cloud
 
 > The pgvector container is recreated on each run; `ensure_schema` creates the
 > tables on boot. If 55432 is taken, change both `-p` and `DATABASE_URL`.
+>
+> `.env.example` ships `DSH_SANDBOX=1`, so the first `cargo run` also expects
+> `aria-dsh-sandbox:latest`: run `just sandbox-image` once (nothing pulls it), or
+> set `DSH_SANDBOX=0` for a purely local run — the harness then stays a host
+> process with dsh's permission preset as the only boundary.
 
 <div align="right">
 
@@ -244,13 +248,21 @@ cp .env.example .env
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `agent` | Postgres (**pgvector**) credentials + database: metadata *and* context memory. |
 | `DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/agent` | Connection string. The host `postgres` is the compose service name. |
 | `AGENT_HARNESS` | `dsh` | Turn runtime: `dsh` (DeepSeek Harness) or `native` (built-in Rust loop). An unknown value fails at boot. |
-| `DSH_BIN` | `/opt/dsh/bin/dsh` | Harness executable (unset resolves `dsh` on `PATH`). Missing binary = actionable error, never a downgrade. |
+| `DSH_BIN` | `/opt/dsh/bin/dsh` | Host harness executable, used only when `DSH_SANDBOX=0`. Sandboxed runs execute `DSH_SANDBOX_BIN` inside the container. Missing binary = actionable error, never a downgrade. |
 | `DSH_PROVIDER` | `deepseek-official` | Provider route inside dsh. Aria passes it through unchanged; an unknown route fails in the harness instead of being remapped. |
 | `DSH_HOME_ROOT` | `/app/.aria/dsh` | Root for per-tenant/per-session `DSH_HOME` directories (unset resolves `.aria/dsh`). |
 | `DSH_POOL_MAX` | `8` | Live harness runtimes kept per tenant. |
 | `DSH_IDLE_TTL_SEC` | `900` | Idle window before a pooled runtime is reaped (sessions resume from `DSH_HOME`). |
-| `DSH_THINKING_FILTER` | `enable` | `enable` routes dsh through a loopback proxy that strips Anthropic `redacted_thinking` blocks in both directions (the bundled adapter cannot replay them and fails turn two with `UNSUPPORTED_CONTENT`); `thinking` blocks are preserved. `disable` connects dsh straight to the gateway. Any other value fails at boot. |
+| `DSH_THINKING_FILTER` | `enable` | `enable` routes dsh through a proxy that strips Anthropic `redacted_thinking` blocks in both directions (the bundled adapter cannot replay them and fails turn two with `UNSUPPORTED_CONTENT`); `thinking` blocks are preserved. `disable` connects dsh straight to the gateway. Any other value fails at boot. |
 | `DSH_PERMISSION_MODE` | `workspace-write` | Tool-permission ceiling dsh applies inside the sandbox (`read-only` \| `workspace-write` \| `danger-full-access`). Never set it wider than the sandbox allows. |
+| `DSH_SANDBOX` | `1` | Run the harness in a container instead of a host child process (**on by default**, fail-closed). A missing image, an unpreparable workspace or an unattachable harness aborts boot; there is no host fallback. `0` is the explicit, logged escape hatch. |
+| `DSH_SANDBOX_IMAGE` | `aria-dsh-sandbox:latest` | Image built by `just sandbox-image` (`docker build --target sandbox`). **Nothing pulls it**: it must exist locally before the cloud starts, or preflight fails. |
+| `DSH_SANDBOX_MOUNT` | `volume` | Session workspace backing: `volume` (named `aria-dsh-<tenant>-<session>`, DooD-safe) or `bind` (host path; only when the control plane shares a filesystem with the daemon — the directory must be writable by `DSH_SANDBOX_USER`, e.g. `DSH_SANDBOX_USER="$(id -u):$(id -g)"` locally). |
+| `DSH_SANDBOX_ROOT` / `DSH_SANDBOX_BIN` | `/aria/session` / `/usr/local/bin/dsh` | Mount point **inside** the container and the harness binary *inside* it. The host's `DSH_BIN` and `PATH` are never forwarded. |
+| `DSH_SANDBOX_VOLUME_PREFIX` | `aria-dsh` | Prefix for the per-session volume name. Volumes deliberately outlive a container (session resume) and are pruned by name. |
+| `DSH_SANDBOX_CPUS` / `DSH_SANDBOX_MEMORY` / `DSH_SANDBOX_PIDS` | `1.0` / `1g` / `512` | Container budget for the harness, separate from `SANDBOX_*` — dsh is heavier than a shell command. |
+| `DSH_SANDBOX_USER` / `DSH_SANDBOX_HARDEN` | `10001:10001` / `1` | Non-root user inside the image, and drop-all-capabilities + `no-new-privileges`. An empty user keeps the image's own. |
+| `DSH_THINKING_FILTER_BIND` / `DSH_THINKING_FILTER_URL` | `127.0.0.1:0` / _(empty)_ | Where the filter listens, and the address the **container** dials. A container's `127.0.0.1` is itself, so a sandboxed deployment with the filter enabled must set both (e.g. `0.0.0.0:8787` and `http://172.17.0.1:8787`) or boot fails. |
 | `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` | `https://gateway.ariacompute.com` / `your-api-key` (placeholder) / `ariacompute/ariamodel` | Model gateway config shared by **both** `dsh` and `native`. The value is the gateway root; `native` appends `/v1/chat/completions` and `dsh` appends `/anthropic/v1/messages`. No `OPENAI_*` fallback. `dsh` receives the values through its child-process allow-list. Leave empty only for stub/offline runs. |
 | `AGENT_CLOUD_API_KEY` | `your-api-key` (placeholder) | Bootstrap **admin** key. When set, it is the Admin principal (present as `Authorization: Bearer <key>` / `ApiKey <key>`); admins mint per-tenant keys via `POST /v1/api-keys`. Requests without a valid key get `401`. The template ships a placeholder — replace it. Empty = open (`default` tenant). |
 | `API_KEY_CACHE_TTL_SEC` | `60` | How long a resolved API key stays cached before it is re-checked in Postgres. |
@@ -467,6 +479,8 @@ All E2E-oriented `just` recipes:
 | `just e2e` | Run the real-socket HTTP E2E suite (`cargo test -p agent-tests --test e2e_http`); optional DB/Docker cases skip when unavailable. |
 | `just dsh-smoke` | Spawn a scripted fake `dsh` and verify the JSON-RPC handshake + turn framing (`cargo test -p aria-agent-dsh --test stdio -- --nocapture`); offline, no credentials. |
 | `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs a local `dsh` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`). The recipe only sets `ARIA_DSH_E2E=1`; `just` does not load `.env` by default, so use one of the two loading forms below. |
+| `just sandbox-image` | Build the harness image (`docker build --target sandbox -t aria-dsh-sandbox:latest .`). Required before a sandboxed boot; nothing pulls it. |
+| `just dsh-sandbox-e2e` | Complete the `initialize` handshake in a real container (`ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture`); needs the image above and `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`. Skips loudly when either is absent. |
 
 **Local `dsh` install.** The image installs `dsh` from `deepseek-harness-sdk`
 (which pulls `deepseek-harness-runtime-bin`) into `/opt/dsh/bin/dsh`. Locally:
@@ -519,8 +533,9 @@ envelope. `AGENT_HARNESS=native` selects the built-in Rust loop instead;
 an unknown value — or `dsh` without an installed runtime — is a hard error, never
 a silent fallback.
 
-By default (`DSH_THINKING_FILTER=enable`) dsh reaches the gateway through a
-loopback filter proxy: the bundled `deepseek-official` adapter accepts an
+By default (`DSH_THINKING_FILTER=enable`) dsh reaches the gateway through a local
+filter proxy (loopback unless `DSH_THINKING_FILTER_BIND` says otherwise, which a
+containerised harness requires): the bundled `deepseek-official` adapter accepts an
 Anthropic `redacted_thinking` block in the first turn, persists it, then throws
 `UNSUPPORTED_CONTENT` when replaying history. The proxy strips that block from
 request bodies and from JSON/SSE responses (renumbering content-block indices),
@@ -529,6 +544,18 @@ Anthropic-compatible layer requires them to be passed back — which makes think
 display-only and never replayed, the same trade-off OpenCode makes. Set
 `DSH_THINKING_FILTER=disable` only for a dsh build whose adapter handles redacted
 thinking.
+
+**Placement.** A sandboxed harness (`DSH_SANDBOX=1`) is a container, not a child
+process: `aria-agent-dsh` spawns the image with a keep-alive command, prepares
+`DSH_SANDBOX_ROOT` inside it, uploads the skill catalog as a tar and then
+attaches `dsh --profile sdk` over one long-lived `exec` (newline-delimited
+JSON-RPC, duplex stdio). The workspace lives on a **named volume** (not a host
+bind: the cloud talks to the daemon over `/var/run/docker.sock`, so a bind source
+would resolve on the daemon's host), which is why a session survives both an idle
+reap and a container rebuild. The container joins the governed egress network
+with the same tenant/session labels as every other sandbox, gets its budget from
+`DSH_SANDBOX_CPUS/MEMORY/PIDS`, and receives `GATEWAY_*` plus the proxy variables
+through an allow-list — never the host environment.
 
 <div align="right">
 
@@ -577,7 +604,7 @@ and `browser_use` (switch). Example tool calls:
 
 Image tags are overridable per engine via `ARIACOMPUTE_BROWSER_IMAGE_<KIND>`
 (e.g. `ARIACOMPUTE_BROWSER_IMAGE_CHROMIUM`), falling back to the built-in
-defaults. See `docs/adr/0012-browser-sandbox.md`.
+defaults.
 
 <div align="right">
 
@@ -612,7 +639,7 @@ Both the memory graph and auto-compact are gated by `AgentConfig::memory_graph`
 (off by default in `aria-agent-core` so its unit tests stay hermetic; the SDK
 enables it). `aria-agent-core` depends only on the `ContextStore` trait — never on
 `aria-agent-memo` — so the local (aria memo / SQLite) and cloud (pgvector)
-backends are interchangeable. See `docs/adr/0013-agent-memo-integration.md`.
+backends are interchangeable.
 
 <div align="right">
 
@@ -674,8 +701,7 @@ Rules the surface enforces:
 - **No hot swap** — promotion produces a new version read at the next turn; a
   running session's system prompt is never rewritten.
 
-`AGENT_RSI_AUTO_PROMOTE` exists for trusted deployments only. See
-`docs/adr/0026-recursive-self-improvement.md` and `requirements.md §11`.
+`AGENT_RSI_AUTO_PROMOTE` exists for trusted deployments only.
 
 <div align="right">
 
@@ -1240,8 +1266,8 @@ scripts/check-emudhra.sh /etc/ssl/certs/ca-certificates.crt
 
 ## 🛡️ Governed execution
 
-Every outbound request crosses one boundary that decides, substitutes and records
-(ADR-0025). Defaults are closed and come from `AgentConfig` only, so a CLI and a
+Every outbound request crosses one boundary that decides, substitutes and records.
+Defaults are closed and come from `AgentConfig` only, so a CLI and a
 cloud deployment cannot disagree about what the default is.
 
 | Variable | Default | Meaning |
@@ -1362,6 +1388,7 @@ Detailed design records live under [`docs/adr/`](./docs/adr), written in English
 | [Idle & rotation](./docs/adr/0023-idle-detection-and-credential-rotation.md) | Five-signal idle detection, credential rotation |
 | [Network enforcement](./docs/adr/0024-network-enforcement-sidecar.md) | Internal network + secretless egress proxy |
 | [Recursive self-improvement](./docs/adr/0026-recursive-self-improvement.md) | Ledger diagnosis, deterministic proposals, replay validation, revision-guarded playbooks, receipted real re-run |
+| [dsh sandbox runtime](./docs/adr/0027-dsh-sandbox-runtime.md) | Containerised harness: keep-alive + attached exec, named-volume session workspace, fail-closed preflight |
 
 <div align="right">
 

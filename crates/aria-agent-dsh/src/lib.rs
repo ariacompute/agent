@@ -36,6 +36,7 @@ pub mod approval;
 pub mod event_map;
 pub mod rpc;
 pub mod runtime;
+pub mod sandbox;
 pub mod thinking_proxy;
 pub mod transport;
 
@@ -49,6 +50,10 @@ pub use rpc::{
 pub use runtime::{
     no_bridge, session_dir_name, DshConfig, DshConnector, DshPool, DshRuntime, HarnessRuntime,
     RuntimeConnector, PERMISSION_MODES, SDK_PROFILE,
+};
+pub use sandbox::{
+    skill_catalog_tar, DshSandbox, SandboxMount, SandboxTransport, CONTAINER_PATH, DEFAULT_BIN,
+    DEFAULT_ROOT,
 };
 pub use thinking_proxy::{
     parse_filter_mode, strip_redacted_from_messages_json, strip_redacted_from_response_json,

@@ -96,9 +96,30 @@ services:
       DSH_POOL_MAX: ${DSH_POOL_MAX:-8}
       DSH_IDLE_TTL_SEC: ${DSH_IDLE_TTL_SEC:-900}
       # `enable` (default) strips Anthropic `redacted_thinking` blocks through a
-      # loopback proxy before the dsh adapter can replay them; `disable` connects
+      # proxy before the dsh adapter can replay them; `disable` connects
       # dsh straight to the gateway. Any other value fails at boot.
       DSH_THINKING_FILTER: ${DSH_THINKING_FILTER:-enable}
+      # A containerised harness (see the sandbox block below) cannot reach this
+      # process's 127.0.0.1, so binding + advertising are separate settings.
+      DSH_THINKING_FILTER_BIND: ${DSH_THINKING_FILTER_BIND:-127.0.0.1:0}
+      DSH_THINKING_FILTER_URL: ${DSH_THINKING_FILTER_URL:-}
+      # Sandboxed dsh runtime (ADR-0027). The harness runs inside a container on
+      # the governed network; its workspace and DSH_HOME live on a per-session
+      # named volume that the daemon owns (this service is Docker-out-of-Docker,
+      # so a host bind would resolve on the host and silently be empty).
+      # Build the image first:  just sandbox-image
+      # Missing image, or an enabled filter without a reachable URL, fails boot.
+      DSH_SANDBOX: ${DSH_SANDBOX:-1}
+      DSH_SANDBOX_IMAGE: ${DSH_SANDBOX_IMAGE:-aria-dsh-sandbox:latest}
+      DSH_SANDBOX_MOUNT: ${DSH_SANDBOX_MOUNT:-volume}
+      DSH_SANDBOX_ROOT: ${DSH_SANDBOX_ROOT:-/aria/session}
+      DSH_SANDBOX_BIN: ${DSH_SANDBOX_BIN:-/usr/local/bin/dsh}
+      DSH_SANDBOX_VOLUME_PREFIX: ${DSH_SANDBOX_VOLUME_PREFIX:-aria-dsh}
+      DSH_SANDBOX_CPUS: ${DSH_SANDBOX_CPUS:-1.0}
+      DSH_SANDBOX_MEMORY: ${DSH_SANDBOX_MEMORY:-1g}
+      DSH_SANDBOX_PIDS: ${DSH_SANDBOX_PIDS:-512}
+      DSH_SANDBOX_USER: ${DSH_SANDBOX_USER:-10001:10001}
+      DSH_SANDBOX_HARDEN: ${DSH_SANDBOX_HARDEN:-1}
       # GATEWAY_BASE_URL / GATEWAY_API_KEY / GATEWAY_MODEL come from `env_file`
       # above and configure BOTH harnesses (`dsh` and `native`). The dsh
       # child-process bridge maps them to the names dsh expects; nothing is
