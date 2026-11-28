@@ -480,7 +480,7 @@ All E2E-oriented `just` recipes:
 | `just dsh-smoke` | Spawn a scripted fake `dsh` and verify the JSON-RPC handshake + turn framing (`cargo test -p aria-agent-dsh --test stdio -- --nocapture`); offline, no credentials. |
 | `just dsh-e2e` | Run one live turn against a real `dsh` (`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`); needs a local `dsh` plus `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` (and optionally `GATEWAY_MODEL`). The recipe only sets `ARIA_DSH_E2E=1`; `just` does not load `.env` by default, so use one of the two loading forms below. |
 | `just sandbox-image` | Build the harness image (`docker build --target sandbox -t aria-dsh-sandbox:latest .`). Required before a sandboxed boot; nothing pulls it. |
-| `just dsh-sandbox-e2e` | Complete the `initialize` handshake in a real container (`ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture`); needs the image above and `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`. Skips loudly when either is absent. |
+| `just dsh-sandbox-e2e` | Complete the `initialize` handshake in a real container (`ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture`); needs the image above and `GATEWAY_BASE_URL` (`GATEWAY_API_KEY` is optional — `initialize` makes no model call). Skips loudly when either is absent. |
 
 **Local `dsh` install.** The image installs `dsh` from `deepseek-harness-sdk`
 (which pulls `deepseek-harness-runtime-bin`) into `/opt/dsh/bin/dsh`. Locally:

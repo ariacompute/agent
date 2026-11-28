@@ -497,6 +497,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evidence_naming_a_turn_the_ledger_dropped_falls_back() {
+        // The ledger is bounded, so evidence can point at a turn that has
+        // already been trimmed out of the window. That is "no exact turn",
+        // not "no input", so the first recorded turn still replays.
+        let ledger = ledger_with("ship the order");
+        let model = Arc::new(StubModel::answering("done"));
+        let store = Arc::new(MemoryStore::new());
+        let probe = probe(ledger, model.clone(), store.clone(), Duration::from_secs(5));
+
+        let mut candidate = proposal();
+        candidate.evidence[0].turn_id = Some("t-trimmed".into());
+        assert!(probe.rerun(&candidate, 40).await.unwrap().passed());
+        assert_eq!(model.calls(), 1, "the fallback still replays a real turn");
+    }
+
+    #[tokio::test]
     async fn a_model_error_is_inconclusive_and_still_recorded() {
         let ledger = ledger_with("ship the order");
         let model = Arc::new(StubModel::failing("upstream refused"));

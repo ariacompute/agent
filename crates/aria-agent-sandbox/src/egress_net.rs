@@ -834,6 +834,18 @@ mod tests {
         let seen = capture.last.lock().unwrap().clone().unwrap();
         assert_eq!(seen.network.as_deref(), Some("other"), "explicit wins");
         assert_eq!(seen.env, vec![("A".to_string(), "1".to_string())]);
+        assert_eq!(seen.labels.len(), 1, "labels are filled in");
+
+        // An identity the caller already stamped is not replaced either: the
+        // proxy resolves the tenant from these labels.
+        let mut labeled = crate::ExecSpec::command(vec!["true".into()]);
+        labeled.labels = vec![(TENANT_LABEL.into(), "tenant-b".into())];
+        sandbox.spawn(&labeled).await.unwrap();
+        let seen = capture.last.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            seen.labels,
+            vec![(TENANT_LABEL.to_string(), "tenant-b".to_string())]
+        );
         assert!(!format!("{sandbox:?}").is_empty());
     }
 

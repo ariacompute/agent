@@ -141,10 +141,10 @@ cargo build --workspace
 # 2. 测试
 cargo test --workspace
 
-# 3. lint
+# 3. lint（警告即错误）
 cargo clippy --workspace --all-targets -- -D warnings
 
-# 4. 生成 Swift/Kotlin 绑定
+# 4. 生成 Swift/Kotlin 绑定（需先构建 cdylib）
 # = cargo run -p aria-agent-ffigen
 just ffi
 
@@ -416,7 +416,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
 
 ### 6. 数据卷
 
-| 卷 | 对应路径 | 用途 |
+| 卷 | 存储后端 | 用途 |
 |----|----------|------|
 | `pgdata` | Postgres（pgvector） | `agents` / `runs` 元数据 **与** `context_fragments`（上下文记忆）。 |
 
@@ -449,7 +449,7 @@ echo "DOCKER_GID set to $DOCKER_GID"
 | `just dsh-smoke` | 拉起脚本化假 `dsh`，校验 JSON-RPC 握手与回合帧序（`cargo test -p aria-agent-dsh --test stdio -- --nocapture`）；离线、无需凭据。 |
 | `just dsh-e2e` | 用真实 `dsh` 跑一轮（`ARIA_DSH_E2E=1 cargo test -p aria-agent-dsh --test e2e_live -- --nocapture`）；需本地 `dsh` 以及 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`（可选 `GATEWAY_MODEL`）。该 `just` 任务只设置 `ARIA_DSH_E2E=1`；`just` 默认不加载 `.env`，请用下面两种方式之一加载。 |
 | `just sandbox-image` | 构建 harness 镜像（`docker build --target sandbox -t aria-dsh-sandbox:latest .`）。沙箱启动前必须有；不会自动拉取。 |
-| `just dsh-sandbox-e2e` | 在真实容器里完成 `initialize` 握手（`ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture`）；需上面的镜像与 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY`，缺任一项会响亮地跳过。 |
+| `just dsh-sandbox-e2e` | 在真实容器里完成 `initialize` 握手（`ARIA_DSH_SANDBOX_E2E=1 cargo test -p aria-agent-dsh --test sandbox_live -- --nocapture`）；需上面的镜像与 `GATEWAY_BASE_URL`（`initialize` 不调用模型，故 `GATEWAY_API_KEY` 可选），缺前两项之一会响亮地跳过。 |
 
 **本地安装 `dsh`。** 镜像通过 `deepseek-harness-sdk`（它会拉
 `deepseek-harness-runtime-bin`）把 `dsh` 装到 `/opt/dsh/bin/dsh`。本地同样安装：

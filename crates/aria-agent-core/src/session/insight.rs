@@ -1246,4 +1246,63 @@ mod tests {
         assert_eq!(found[0].tool.as_deref(), Some("unknown"));
         assert_eq!(found[0].key(), "repeated_tool_failure:unknown");
     }
+
+    #[test]
+    fn turn_scoped_events_before_any_turn_are_ignored() {
+        // A window can begin mid-session (the ledger is bounded), so every
+        // turn-scoped variant has to tolerate having no open turn yet.
+        let log = vec![
+            rec(
+                0,
+                SessionEvent::Step {
+                    phase: "model".into(),
+                    label: None,
+                },
+            ),
+            call(1, "i1", "fs_read", "{}"),
+            denial(2, "shell"),
+            rec(
+                3,
+                SessionEvent::Usage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    model: "m".into(),
+                },
+            ),
+            rec(
+                4,
+                SessionEvent::Compacted {
+                    fragment_id: "f".into(),
+                    removed: 2,
+                    reason: "pressure".into(),
+                },
+            ),
+            done(5, "t-missing"),
+            failed(6, "t-missing"),
+        ];
+        let report = analyze("s1", &log, &InsightLimits::default());
+        assert!(report.turns.is_empty());
+        assert!(report.findings.is_empty());
+        assert_eq!(report.score, 100);
+    }
+
+    #[test]
+    fn an_allowed_approval_is_not_a_denial() {
+        let log = vec![
+            started(0, "t1"),
+            rec(
+                1,
+                SessionEvent::Approval {
+                    id: "a1".into(),
+                    tool: "shell".into(),
+                    decision: "allow".into(),
+                    reason: None,
+                },
+            ),
+            done(2, "t1"),
+        ];
+        let report = analyze("s1", &log, &InsightLimits::default());
+        assert_eq!(report.turns[0].approvals_denied, 0);
+        assert!(report.findings_of(Pathology::ApprovalDeniedLoop).is_empty());
+    }
 }

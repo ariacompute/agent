@@ -427,6 +427,17 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_on_the_last_line_keeps_the_log() {
+        // There is no "line after" to keep, but the marker itself is the
+        // cause; dropping it would leave a projection with no signal.
+        let mut raw: String = (0..100).map(|i| format!("verbose step {i}\n")).collect();
+        raw.push_str("error: solver failed");
+        let out = compress(ContentKind::Logs, &raw).unwrap();
+        assert!(out.contains("error: solver failed"), "{out}");
+        assert!(out.contains("lines elided"), "{out}");
+    }
+
+    #[test]
     fn diffs_keep_changed_lines_only() {
         let mut raw = String::from("diff --git a/x b/x\n@@ -1,50 +1,50 @@\n");
         for i in 0..100 {

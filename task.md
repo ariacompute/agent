@@ -560,6 +560,28 @@ just cov-check           # 100% lines outside docs/coverage.md exclusions
       architecture "harness boundary" table, both READMEs, release notes and
       AGENTS.md.
 
+## Coverage hardening (after M20)
+- [x] The 100% line gate was hiding twenty-five closing-delimiter artifacts, and
+      several of them were real untested arms rather than punctuation:
+      turn-scoped events arriving before any `TurnStarted` (bounded windows start
+      mid-session), an allowed approval counted as a denial, a failure detail
+      whose only origin is `params.reason` (no method/type), non-JSON request and
+      response bodies at the thinking-filter proxy, an unparsable `application/
+      json` response, a trailing SSE frame that is not UTF-8 or is suppressed by
+      the filter, an empty SSE line inside a frame, a marker as the last log
+      line, projection auditing with no runtime / a down sink / a working sink,
+      explicit sandbox labels surviving the egress decorator, and evidence that
+      names a turn the bounded RSI ledger already trimmed.
+- [x] Tests: 13 new cases across `aria-agent-core` (2), `aria-agent-dsh` (6),
+      `aria-agent-governance` (4), `aria-agent-cloud` (1) and one extended
+      `aria-agent-sandbox` case; `cargo test --workspace` is 1287 passed.
+- [x] Result: measured **99.93% → 99.98%**, artifacts **25 → 7**, and
+      `./scripts/coverage.sh` stays green at **100.00% of included lines**
+      (35073/35073). The seven left are block ends with no statement of their
+      own (two test-harness closures, the never-returning `pending()` dial, the
+      ledger's two impossible `None` arms and two already-asserted `if let`
+      bodies in the RSI validation tests); `docs/coverage.md` records them.
+
 ## Open follow-ups
 * Surface `AgentEvent` through the native SDKs (Swift / Kotlin) so in-process
   runs render the same timeline as the cloud stream.

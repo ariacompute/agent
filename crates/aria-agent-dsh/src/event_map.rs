@@ -516,4 +516,27 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn failure_detail_skips_an_unknown_or_generic_kind_prefix() {
+        // Older builds put the failure straight under `params.reason` and send
+        // no method/type: the detail must not grow a `: ` prefix with nothing
+        // in front of it.
+        let kindless = json!({
+            "params": {"reason": {"kind": "error", "failure": {
+                "code": "MODEL", "message": "bad request"
+            }}}
+        });
+        assert_eq!(
+            failure_detail(&kindless).as_deref(),
+            Some("MODEL bad request")
+        );
+
+        // `session.event` is the envelope, not the failure's origin.
+        let enveloped = json!({
+            "method": "session.event",
+            "params": {"reason": {"failure": {"code": "E", "message": "m"}}}
+        });
+        assert_eq!(failure_detail(&enveloped).as_deref(), Some("E m"));
+    }
 }

@@ -342,6 +342,121 @@ mod tests {
         assert!(projection.content.len() < raw.len());
     }
 
+    fn compressible_payload() -> String {
+        serde_json::to_string(
+            &(0..400)
+                .map(|i| serde_json::json!({"path": format!("/workspace/src/file-{i:04}.rs")}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_projection_outside_a_runtime_is_still_returned() {
+        // A CLI can project before it starts a runtime. The audit hop is
+        // skipped, but the caller must still get the compressed content and
+        // the record (dropping it would silently disable compression).
+        let dir = tempfile::tempdir().unwrap();
+        let stack = GovernanceStack::from_agent_config(&agent_config(dir.path())).unwrap();
+        let projector = stack.projector();
+        let raw = compressible_payload();
+        let projection = projector.project("fs_read", false, &raw);
+        assert!(projection.record.is_some());
+        assert!(projection.content.len() < raw.len());
+    }
+
+    struct FailingAudit {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuditSink for FailingAudit {
+        async fn record(&self, _event: AuditEvent) -> SeamResult<()> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(SeamError::Unavailable("audit sink down".into()))
+        }
+
+        async fn recent(&self, _limit: usize) -> SeamResult<Vec<AuditEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingAudit {
+        events: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuditSink for CountingAudit {
+        async fn record(&self, _event: AuditEvent) -> SeamResult<()> {
+            self.events
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn recent(&self, _limit: usize) -> SeamResult<Vec<AuditEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Yield until the audit hop ran, so the assertion is about the spawned
+    /// task's effect instead of a race with the runtime.
+    async fn wait_for_events(audit: &CountingAudit) -> usize {
+        let mut seen = audit.events.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..100 {
+            if seen > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            seen = audit.events.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_projection_is_audited_on_the_async_hop() {
+        let audit = Arc::new(CountingAudit::default());
+        let projector = GovernanceProjector {
+            inner: Arc::new(compression::CompressionProjector::default()),
+            audit: audit.clone(),
+            principal: "p".into(),
+        };
+        let raw = compressible_payload();
+        let projection = projector.project("fs_read", false, &raw);
+        assert!(projection.record.is_some());
+        assert_eq!(wait_for_events(&audit).await, 1);
+        assert!(audit.recent(1).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_audit_hop_does_not_lose_the_projection() {
+        // Audit is best-effort by contract: a sink that is down must not turn
+        // a successful tool result into a failure.
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let audit = Arc::new(FailingAudit {
+            attempts: attempts.clone(),
+        });
+        let projector = GovernanceProjector {
+            inner: Arc::new(compression::CompressionProjector::default()),
+            audit: audit.clone(),
+            principal: "p".into(),
+        };
+        let raw = compressible_payload();
+        let projection = projector.project("fs_read", false, &raw);
+        assert!(projection.record.is_some());
+        for _ in 0..100 {
+            if attempts.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The read side of the trait still answers (an audit view showing
+        // nothing is not an error).
+        assert!(audit.recent(10).await.unwrap().is_empty());
+    }
+
     struct NullSandbox;
 
     #[async_trait::async_trait]

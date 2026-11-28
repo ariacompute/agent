@@ -1353,6 +1353,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_forwards_an_unparsable_json_response_untouched() {
+        // `application/json` with a body serde cannot read must be forwarded
+        // as-is: refusing would break a gateway quirk, and the body never had
+        // a redacted block to leak.
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Json("not json".into())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("not json"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_forwards_a_non_json_request_body_untouched() {
+        // Only JSON bodies can hide a content block; anything else goes
+        // through byte for byte (and is still recorded upstream).
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Plain("ok".into())).await;
+        let proxy = start_proxy(upstream).await;
+        let request = "POST /anthropic/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
+        let response = exchange(&proxy, request).await;
+
+        let captured = captured.await.expect("captured request");
+        assert_eq!(captured.body, "hello");
+        assert!(response.ends_with("ok"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_drops_a_trailing_sse_frame_the_filter_suppresses() {
+        // A stream that ends mid-frame cannot be parsed; the filter returns
+        // None and the partial bytes are dropped rather than forwarded.
+        let sse = b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\"}}";
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Sse(sse.to_vec())).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(!response.contains("redacted_thinking"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn proxy_drops_a_trailing_sse_frame_that_is_not_utf8() {
+        let mut sse = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n".to_vec();
+        sse.extend_from_slice(b"event: bad\ndata: \xff\xfe");
+        let (upstream, captured) = spawn_upstream(UpstreamReply::Sse(sse)).await;
+        let proxy = start_proxy(upstream).await;
+        let response = exchange(&proxy, &post_request("/anthropic/v1/messages", "{}")).await;
+
+        let _captured = captured.await.expect("captured request");
+        assert!(response.contains("message_start"), "{response}");
+        assert!(!response.contains("event: bad"), "{response}");
+    }
+
+    #[test]
+    fn an_empty_sse_line_is_neither_a_prefix_nor_data() {
+        let (prefix, data) =
+            parse_sse_frame("event: message_start\n\ndata: {\"type\":\"message_start\"}")
+                .expect("frame");
+        assert_eq!(prefix, vec!["event: message_start".to_string()]);
+        assert_eq!(data["type"], "message_start");
+    }
+
+    #[tokio::test]
     async fn proxy_rejects_a_content_encoded_upstream() {
         let (upstream, captured) = spawn_upstream(UpstreamReply::EncodedJson("{}".into())).await;
         let proxy = start_proxy(upstream).await;

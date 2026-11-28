@@ -9,11 +9,19 @@ statement of their own: closing-delimiter artifacts and `// LCOV_EXCL_LINE`
 opt-outs (see below). The summary prints both numbers, so a run reads:
 
 ```
-lines measured: 34859/34884 (99.93%)
-closing-delimiter artifacts: 25 (no statement; not counted)
-lines included: 34859/34859 (100.00%)
+lines measured: 35073/35080 (99.98%)
+closing-delimiter artifacts: 7 (no statement; not counted)
+lines included: 35073/35073 (100.00%)
 OK: every included line is covered (or explicitly excluded).
 ```
+
+The seven artifacts left are all block ends that carry no statement: two
+test-harness closures, the never-returning `pending()` dial that forces a
+connect timeout, the ledger's two impossible `None` arms (its capacity
+constructor clamps both bounds to at least one), and two not-taken arms of
+`if let` assertions in the RSI validation tests (the variant is asserted on the
+line above). They are printed for transparency; none can be reached by a
+different test without changing the code being measured.
 
 ```bash
 just cov-check        # gate: fails on any uncovered included line
